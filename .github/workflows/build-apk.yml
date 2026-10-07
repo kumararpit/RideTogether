@@ -34,6 +34,10 @@ jobs:
           ndk-version: null
           cmake-version: null
 
+      - name: Install Android Build Tools
+        run: |
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;34.0.0" "platform-tools"
+
       - name: Accept Android SDK Licenses
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
