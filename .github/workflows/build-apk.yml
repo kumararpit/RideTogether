@@ -31,8 +31,8 @@ jobs:
         uses: android-actions/setup-android@v3
         with:
           api-level: 34
-          target: default
-          arch: x86_64
+          ndk-version: null
+          cmake-version: null
 
       - name: Accept Android SDK Licenses
         run: |
