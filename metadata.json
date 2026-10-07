@@ -1,0 +1,6 @@
+{
+  "name": "RideTogether",
+  "description": "Group motorcycle ride tracker with live group map, stop detection, quick riding messages, and emergency SOS alerts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
