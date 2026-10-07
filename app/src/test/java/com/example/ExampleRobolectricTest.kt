@@ -4,10 +4,13 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.location.LocationTracker
 import com.example.data.location.StopDetector
+import com.example.data.map.MapProvider
 import com.example.data.map.TileMath
 import com.example.data.model.LatLng
 import com.example.data.model.MemberStatus
 import com.example.data.model.QuickMessageType
+import com.example.data.model.RideRole
+import com.example.data.model.RiderMember
 import com.example.data.repository.RideRepository
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -63,7 +66,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `test tile math projection`() {
+    fun `test tile math projection and osm user agent`() {
         val lon = 73.8567
         val lat = 18.5204
         val zoom = 13
@@ -76,6 +79,48 @@ class ExampleRobolectricTest {
         val tileUrl = TileMath.getCartoDarkTileUrl(zoom, tileX.toInt(), tileY.toInt())
         assertTrue(tileUrl.contains("cartodb-basemaps"))
         assertTrue(tileUrl.endsWith(".png"))
+
+        val osmUrl = TileMath.getOsmTileUrl(zoom, tileX.toInt(), tileY.toInt())
+        assertTrue(osmUrl.startsWith("https://tile.openstreetmap.org/"))
+
+        assertTrue(TileMath.OSM_USER_AGENT.contains("RideTogether"))
+    }
+
+    @Test
+    fun `test map provider abstraction implementation`() {
+        var showedMap = false
+        var addedRiderId: String? = null
+        var routeCount = 0
+
+        val provider = object : MapProvider {
+            override fun showMap() { showedMap = true }
+            override fun addRiderMarker(rider: RiderMember) { addedRiderId = rider.id }
+            override fun updateRiderMarker(rider: RiderMember) {}
+            override fun removeRiderMarker(riderId: String) {}
+            override fun drawRoute(points: List<LatLng>) { routeCount = points.size }
+            override fun setCenter(latLng: LatLng, zoom: Float) {}
+            override fun fitBounds(points: List<LatLng>) {}
+        }
+
+        provider.showMap()
+        assertTrue(showedMap)
+
+        val rider = RiderMember(
+            id = "rider_1",
+            name = "Arpit",
+            avatarColorHex = 0xFFFF9800,
+            role = RideRole.LEADER,
+            status = MemberStatus.RIDING,
+            location = LatLng(18.5204, 73.8567),
+            speedKmh = 45.0,
+            headingDeg = 180f,
+            lastUpdatedMs = System.currentTimeMillis()
+        )
+        provider.addRiderMarker(rider)
+        assertEquals("rider_1", addedRiderId)
+
+        provider.drawRoute(listOf(LatLng(18.52, 73.85), LatLng(18.75, 73.40)))
+        assertEquals(2, routeCount)
     }
 
     @Test

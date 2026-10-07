@@ -26,7 +26,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Explore
+import androidx.compose.material.icons.filled.FilterCenterFocus
 import androidx.compose.material.icons.filled.GpsFixed
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.FloatingActionButton
@@ -102,6 +104,7 @@ fun RideMapCanvas(
     var zoomLevel by remember { mutableIntStateOf(13) } // OSM Slippy tile zoom level (1..18)
     var panOffsetX by remember { mutableFloatStateOf(0f) }
     var panOffsetY by remember { mutableFloatStateOf(0f) }
+    var isDarkTacticalStyle by remember { mutableStateOf(true) }
 
     // Follow user if center not moved manually
     LaunchedEffect(currentUser?.location) {
@@ -172,11 +175,16 @@ fun RideMapCanvas(
                     val tileScreenX = (widthPx / 2f) + panOffsetX + ((tileX - centerTileXDouble) * tileSizePx).toFloat()
                     val tileScreenY = (heightPx / 2f) + panOffsetY + ((tileY - centerTileYDouble) * tileSizePx).toFloat()
 
-                    val tileUrl = TileMath.getCartoDarkTileUrl(zoomLevel, tileX, tileY)
+                    val tileUrl = if (isDarkTacticalStyle) {
+                        TileMath.getCartoDarkTileUrl(zoomLevel, tileX, tileY)
+                    } else {
+                        TileMath.getOsmTileUrl(zoomLevel, tileX, tileY)
+                    }
 
                     AsyncImage(
                         model = ImageRequest.Builder(context)
                             .data(tileUrl)
+                            .addHeader("User-Agent", TileMath.OSM_USER_AGENT)
                             .crossfade(true)
                             .build(),
                         contentDescription = "Map tile",
@@ -516,6 +524,32 @@ fun RideMapCanvas(
 
             Spacer(modifier = Modifier.height(10.dp))
 
+            // Fit Entire Group in View
+            SmallFloatingActionButton(
+                onClick = {
+                    if (members.isNotEmpty()) {
+                        val allPoints = members.map { it.location } + route
+                        val minLat = allPoints.minOf { it.latitude }
+                        val maxLat = allPoints.maxOf { it.latitude }
+                        val minLng = allPoints.minOf { it.longitude }
+                        val maxLng = allPoints.maxOf { it.longitude }
+
+                        centerLat = (minLat + maxLat) / 2.0
+                        centerLng = (minLng + maxLng) / 2.0
+                        panOffsetX = 0f
+                        panOffsetY = 0f
+                        zoomLevel = 12
+                    }
+                },
+                modifier = Modifier.testTag("fit_group_button"),
+                containerColor = SlateDark800,
+                contentColor = AmberPrimary
+            ) {
+                Icon(imageVector = Icons.Default.FilterCenterFocus, contentDescription = "Fit Group in View")
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
             // Zoom In (+)
             SmallFloatingActionButton(
                 onClick = {
@@ -548,6 +582,20 @@ fun RideMapCanvas(
                 contentColor = Color.White
             ) {
                 Icon(imageVector = Icons.Default.Remove, contentDescription = "Zoom Out")
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Map Style Toggle (Dark Tactical vs OpenStreetMap Standard)
+            SmallFloatingActionButton(
+                onClick = {
+                    isDarkTacticalStyle = !isDarkTacticalStyle
+                },
+                modifier = Modifier.testTag("map_style_toggle_button"),
+                containerColor = SlateDark800,
+                contentColor = if (isDarkTacticalStyle) AmberPrimary else Color.White
+            ) {
+                Icon(imageVector = Icons.Default.Layers, contentDescription = "Toggle Map Style")
             }
         }
     }

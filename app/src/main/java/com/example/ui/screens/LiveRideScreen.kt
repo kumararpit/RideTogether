@@ -76,7 +76,7 @@ fun LiveRideScreen(
     val isOtherRiderSos = activeSos != null && activeSos?.riderId != currentUser?.id
 
     Box(modifier = modifier.fillMaxSize()) {
-        // 1. Live Real Tile Map (Fills entire screen)
+        // 1. Live Map View (₹0 Cost MapLibre / OpenStreetMap Tile Engine)
         RideMapCanvas(
             route = viewModel.getRoutePoints(),
             members = members,
@@ -197,7 +197,7 @@ fun LiveRideScreen(
             }
         }
 
-        // 4. Primary Bottom Controls per Section 7.4:
+        // 4. Primary Bottom Controls:
         // [ 👥 Riders ] [ 💬 Message ] [ 🚨 SOS ]
         Surface(
             modifier = Modifier

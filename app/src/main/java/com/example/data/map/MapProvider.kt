@@ -1,21 +1,27 @@
 package com.example.data.map
 
 import com.example.data.model.LatLng
+import com.example.data.model.RiderMember
 import kotlin.math.PI
 import kotlin.math.asinh
 import kotlin.math.atan
-import kotlin.math.exp
 import kotlin.math.sinh
 import kotlin.math.tan
 
 interface MapProvider {
+    fun showMap()
+    fun addRiderMarker(rider: RiderMember)
+    fun updateRiderMarker(rider: RiderMember)
+    fun removeRiderMarker(riderId: String)
+    fun drawRoute(points: List<LatLng>)
     fun setCenter(latLng: LatLng, zoom: Float)
-    fun addMarker(id: String, latLng: LatLng, title: String)
-    fun removeMarker(id: String)
     fun fitBounds(points: List<LatLng>)
 }
 
 object TileMath {
+    // Compliant User-Agent header per OSM Tile Usage Policy
+    const val OSM_USER_AGENT = "RideTogether-Android-Personal-App/1.0 (arpitkumar1101@gmail.com)"
+
     fun lonToTileX(lon: Double, zoom: Int): Double {
         val n = 1 shl zoom
         return (lon + 180.0) / 360.0 * n

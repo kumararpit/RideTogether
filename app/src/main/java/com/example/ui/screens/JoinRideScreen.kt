@@ -10,15 +10,19 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Group
-import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -68,7 +72,10 @@ fun JoinRideScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
-                .padding(horizontal = 24.dp),
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(horizontal = 24.dp)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             Column {
@@ -111,10 +118,16 @@ fun JoinRideScreen(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = "ENTER 6-CHARACTER RIDE CODE",
+                            text = "ENTER 6-CHARACTER RIDE INVITE CODE",
                             color = AmberPrimary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Ask the ride leader for their 6-letter room code (e.g. ABC123)",
+                            color = Color(0xFF90A4AE),
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(top = 2.dp)
                         )
 
                         Spacer(modifier = Modifier.height(14.dp))
@@ -130,7 +143,7 @@ fun JoinRideScreen(
                             placeholder = { Text("e.g. ABC123", color = Color(0xFF78909C)) },
                             leadingIcon = {
                                 Icon(
-                                    imageVector = Icons.Default.Key,
+                                    imageVector = Icons.Default.GroupAdd,
                                     contentDescription = null,
                                     tint = AmberPrimary
                                 )
