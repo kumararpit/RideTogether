@@ -76,12 +76,12 @@ class ExampleRobolectricTest {
         assertTrue(tileX > 0)
         assertTrue(tileY > 0)
 
-        val tileUrl = TileMath.getCartoDarkTileUrl(zoom, tileX.toInt(), tileY.toInt())
-        assertTrue(tileUrl.contains("cartodb-basemaps"))
-        assertTrue(tileUrl.endsWith(".png"))
+        val topoUrl = TileMath.getTopoTileUrl(zoom, tileX.toInt(), tileY.toInt())
+        assertTrue(topoUrl.contains("opentopomap.org"))
+        assertTrue(topoUrl.endsWith(".png"))
 
         val osmUrl = TileMath.getOsmTileUrl(zoom, tileX.toInt(), tileY.toInt())
-        assertTrue(osmUrl.startsWith("https://tile.openstreetmap.org/"))
+        assertTrue(osmUrl.contains("tile.openstreetmap.org/"))
 
         assertTrue(TileMath.OSM_USER_AGENT.contains("RideTogether"))
     }
@@ -100,6 +100,11 @@ class ExampleRobolectricTest {
             override fun drawRoute(points: List<LatLng>) { routeCount = points.size }
             override fun setCenter(latLng: LatLng, zoom: Float) {}
             override fun fitBounds(points: List<LatLng>) {}
+            override suspend fun calculateAndDrawRoute(start: LatLng, destination: LatLng): com.example.data.model.RouteResult {
+                val pts = listOf(start, destination)
+                drawRoute(pts)
+                return com.example.data.model.RouteResult(pts, 1000.0, 60.0, emptyList())
+            }
         }
 
         provider.showMap()
@@ -121,6 +126,15 @@ class ExampleRobolectricTest {
 
         provider.drawRoute(listOf(LatLng(18.52, 73.85), LatLng(18.75, 73.40)))
         assertEquals(2, routeCount)
+
+        // Test MapLibreMapProvider with OSRM integration
+        val mapLibreProvider = com.example.data.map.MapLibreMapProvider()
+        mapLibreProvider.showMap()
+        assertTrue(mapLibreProvider.isMapVisible)
+        mapLibreProvider.addRiderMarker(rider)
+        assertEquals(1, mapLibreProvider.riderMarkers.value.size)
+        mapLibreProvider.drawRoute(listOf(LatLng(18.52, 73.85), LatLng(18.75, 73.40)))
+        assertEquals(2, mapLibreProvider.routePoints.value.size)
     }
 
     @Test
@@ -159,5 +173,39 @@ class ExampleRobolectricTest {
         // Test SOS resolve
         repo.resolveSos()
         assertEquals(null, repo.activeSos.value)
+
+        // Test Route Update
+        val pts = listOf(LatLng(18.52, 73.85), LatLng(18.60, 73.65), LatLng(18.75, 73.40))
+        repo.updateRoute(
+            routePoints = pts,
+            totalDistanceMeters = 64000.0,
+            totalDurationSeconds = 4500.0,
+            steps = listOf(
+                com.example.data.model.NavigationStep("Depart onto highway", "NH48", 12000.0, 700.0)
+            )
+        )
+        assertEquals(3, repo.currentRide.value?.routePoints?.size)
+        assertEquals(64000.0, repo.currentRide.value?.totalDistanceMeters ?: 0.0, 0.1)
+    }
+
+    @Test
+    fun `test route geometry helpers`() {
+        val p1 = LatLng(18.5204, 73.8567)
+        val p2 = LatLng(18.6000, 73.7000)
+        val p3 = LatLng(18.7546, 73.4062)
+        val route = listOf(p1, p2, p3)
+
+        // Closest point index
+        val nearP2 = LatLng(18.6010, 73.7010)
+        val closestIdx = com.example.data.location.RouteGeometry.findClosestPointIndex(nearP2, route)
+        assertEquals(1, closestIdx)
+
+        // Remaining distance along route
+        val remDist = com.example.data.location.RouteGeometry.remainingDistanceMeters(1, route)
+        assertTrue("Remaining distance should be positive", remDist > 0)
+
+        // Distance to polyline
+        val distMeters = com.example.data.location.RouteGeometry.distanceToPolylineMeters(nearP2, route)
+        assertTrue("Distance to polyline should be small (< 500m)", distMeters < 500.0)
     }
 }

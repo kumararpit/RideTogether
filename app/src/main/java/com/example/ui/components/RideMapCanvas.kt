@@ -50,6 +50,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
@@ -81,7 +83,9 @@ import com.example.ui.theme.StatusOfflineGray
 import com.example.ui.theme.StatusRidingGreen
 import com.example.ui.theme.StatusStoppedAmber
 import kotlin.math.PI
+import kotlin.math.ceil
 import kotlin.math.cos
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 @Composable
@@ -90,6 +94,8 @@ fun RideMapCanvas(
     members: List<RiderMember>,
     selectedRider: RiderMember?,
     onSelectRider: (RiderMember?) -> Unit,
+    isFollowRiderMode: Boolean = true,
+    onFollowRiderChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -101,14 +107,16 @@ fun RideMapCanvas(
 
     var centerLat by remember { mutableStateOf(initialCenter.latitude) }
     var centerLng by remember { mutableStateOf(initialCenter.longitude) }
-    var zoomLevel by remember { mutableIntStateOf(13) } // OSM Slippy tile zoom level (1..18)
+    var zoomLevel by remember { mutableIntStateOf(14) } // OSM Slippy tile zoom level (1..18)
     var panOffsetX by remember { mutableFloatStateOf(0f) }
     var panOffsetY by remember { mutableFloatStateOf(0f) }
     var isDarkTacticalStyle by remember { mutableStateOf(true) }
 
-    // Follow user if center not moved manually
-    LaunchedEffect(currentUser?.location) {
-        if (currentUser != null && panOffsetX == 0f && panOffsetY == 0f) {
+    // Follow user if follow mode is active
+    LaunchedEffect(currentUser?.location, isFollowRiderMode) {
+        if (currentUser != null && isFollowRiderMode) {
+            panOffsetX = 0f
+            panOffsetY = 0f
             centerLat = currentUser.location.latitude
             centerLng = currentUser.location.longitude
         }
@@ -144,7 +152,18 @@ fun RideMapCanvas(
     ) {
         val widthPx = with(density) { maxWidth.toPx() }
         val heightPx = with(density) { maxHeight.toPx() }
-        val tileSizePx = 256f
+        val tileSizeDp = 256.dp
+        val tileSizePx = with(density) { tileSizeDp.toPx() }
+
+        // Dark tactical color filter for high-contrast night/adventure rides
+        val darkTacticalColorFilter = remember {
+            ColorFilter.colorMatrix(ColorMatrix(floatArrayOf(
+                -0.80f, 0f, 0f, 0f, 215f,
+                0f, -0.75f, 0f, 0f, 220f,
+                0f, 0f, -0.70f, 0f, 230f,
+                0f, 0f, 0f, 1f, 0f
+            )))
+        }
 
         // Calculate center tile coordinates
         val centerTileXDouble = TileMath.lonToTileX(centerLng, zoomLevel)
@@ -164,8 +183,10 @@ fun RideMapCanvas(
         val centerTileYInt = centerTileYDouble.toInt()
         val maxTileIndex = (1 shl zoomLevel) - 1
 
-        val rangeX = -2..2
-        val rangeY = -2..2
+        val halfTilesX = ceil(widthPx / (tileSizePx * 2f)).toInt() + 1
+        val halfTilesY = ceil(heightPx / (tileSizePx * 2f)).toInt() + 1
+        val rangeX = -halfTilesX..halfTilesX
+        val rangeY = -halfTilesY..halfTilesY
 
         Box(modifier = Modifier.fillMaxSize()) {
             for (dx in rangeX) {
@@ -175,11 +196,7 @@ fun RideMapCanvas(
                     val tileScreenX = (widthPx / 2f) + panOffsetX + ((tileX - centerTileXDouble) * tileSizePx).toFloat()
                     val tileScreenY = (heightPx / 2f) + panOffsetY + ((tileY - centerTileYDouble) * tileSizePx).toFloat()
 
-                    val tileUrl = if (isDarkTacticalStyle) {
-                        TileMath.getCartoDarkTileUrl(zoomLevel, tileX, tileY)
-                    } else {
-                        TileMath.getOsmTileUrl(zoomLevel, tileX, tileY)
-                    }
+                    val tileUrl = TileMath.getOsmTileUrl(zoomLevel, tileX, tileY)
 
                     AsyncImage(
                         model = ImageRequest.Builder(context)
@@ -189,9 +206,10 @@ fun RideMapCanvas(
                             .build(),
                         contentDescription = "Map tile",
                         contentScale = ContentScale.FillBounds,
+                        colorFilter = if (isDarkTacticalStyle) darkTacticalColorFilter else null,
                         modifier = Modifier
-                            .offset { IntOffset(tileScreenX.toInt(), tileScreenY.toInt()) }
-                            .size(256.dp)
+                            .offset { IntOffset(tileScreenX.roundToInt(), tileScreenY.roundToInt()) }
+                            .size(tileSizeDp)
                     )
                 }
             }
@@ -207,6 +225,7 @@ fun RideMapCanvas(
                         change.consume()
                         panOffsetX += dragAmount.x
                         panOffsetY += dragAmount.y
+                        onFollowRiderChange(false)
                     }
                 }
                 .pointerInput(members) {
@@ -257,40 +276,66 @@ fun RideMapCanvas(
                     routePath.lineTo(routePoints[i].x, routePoints[i].y)
                 }
 
-                // Route halo
+                // 1. Dark Road Shadow
                 drawPath(
                     path = routePath,
-                    color = Color(0x44FFA726),
-                    style = Stroke(width = 14f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                    color = Color(0xAA0B0F19),
+                    style = Stroke(width = 18f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                 )
 
-                // Route line
+                // 2. High-contrast Orange/Amber Casing
+                drawPath(
+                    path = routePath,
+                    color = Color(0xFFE65100),
+                    style = Stroke(width = 12f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                )
+
+                // 3. Vibrant Road Line
                 drawPath(
                     path = routePath,
                     color = AmberPrimary,
-                    style = Stroke(width = 6f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                    style = Stroke(width = 7.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                 )
+
+                // 4. Center lane guide
+                drawPath(
+                    path = routePath,
+                    color = Color(0xFFFFF9C4),
+                    style = Stroke(width = 2.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                )
+
+                // Direction chevrons/dots along road every 15 points
+                if (routePoints.size > 15) {
+                    val step = (routePoints.size / 10).coerceAtLeast(4)
+                    for (k in step until routePoints.size - 2 step step) {
+                        val pt = routePoints[k]
+                        drawCircle(color = Color.White, radius = 3.5f, center = pt)
+                        drawCircle(color = Color(0xFFE65100), radius = 2f, center = pt)
+                    }
+                }
 
                 // Start Marker
                 val startScreen = routePoints.first()
-                drawCircle(color = StatusRidingGreen, radius = 9f, center = startScreen)
-                drawCircle(color = Color.White, radius = 4f, center = startScreen)
+                drawCircle(color = Color(0x664CAF50), radius = 16f, center = startScreen)
+                drawCircle(color = StatusRidingGreen, radius = 10f, center = startScreen)
+                drawCircle(color = Color.White, radius = 5f, center = startScreen)
                 drawSafeText(
-                    text = "Start",
+                    text = "START",
                     x = startScreen.x - 20f,
-                    y = startScreen.y + 12f,
-                    style = TextStyle(color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    y = startScreen.y + 14f,
+                    style = TextStyle(color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Black)
                 )
 
                 // Destination Marker
                 val destScreen = routePoints.last()
-                drawCircle(color = StatusEmergencyRed, radius = 9f, center = destScreen)
-                drawCircle(color = Color.White, radius = 4f, center = destScreen)
+                drawCircle(color = Color(0x66F44336), radius = 18f, center = destScreen)
+                drawCircle(color = StatusEmergencyRed, radius = 11f, center = destScreen)
+                drawCircle(color = Color.White, radius = 5f, center = destScreen)
                 drawSafeText(
-                    text = "Finish",
-                    x = destScreen.x - 20f,
+                    text = "FINISH",
+                    x = destScreen.x - 22f,
                     y = destScreen.y - 28f,
-                    style = TextStyle(color = AmberPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    style = TextStyle(color = AmberPrimary, fontSize = 11.sp, fontWeight = FontWeight.Black)
                 )
             }
 
@@ -308,6 +353,15 @@ fun RideMapCanvas(
 
                 val isSelected = rider.id == selectedRider?.id
                 val isEmergency = rider.status == MemberStatus.EMERGENCY
+
+                // GPS Accuracy Pulse for Current User
+                if (rider.isCurrentUser) {
+                    drawCircle(
+                        color = Color(0x3329B6F6),
+                        radius = 26f,
+                        center = screenPos
+                    )
+                }
 
                 // Draw Emergency Beacon Radiating Waves
                 if (isEmergency) {
@@ -508,12 +562,13 @@ fun RideMapCanvas(
                         centerLat = currentUser.location.latitude
                         centerLng = currentUser.location.longitude
                     }
+                    onFollowRiderChange(true)
                 },
                 modifier = Modifier
                     .size(48.dp)
                     .testTag("recenter_button"),
-                containerColor = SlateDark800,
-                contentColor = AmberPrimary,
+                containerColor = if (isFollowRiderMode) AmberPrimary else SlateDark800,
+                contentColor = if (isFollowRiderMode) SlateDark900 else AmberPrimary,
                 elevation = FloatingActionButtonDefaults.elevation(4.dp)
             ) {
                 Icon(

@@ -38,8 +38,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.data.model.MemberStatus
 import com.example.ui.components.ActiveSosBar
+import com.example.ui.components.NavigationTripHud
 import com.example.ui.components.QuickMessageSheet
 import com.example.ui.components.RecentMessageToast
 import com.example.ui.components.RideHeader
@@ -49,6 +49,7 @@ import com.example.ui.components.RiderBottomSheet
 import com.example.ui.components.RiderStatusBadge
 import com.example.ui.components.SosAlertBanner
 import com.example.ui.components.SosConfirmDialog
+import com.example.ui.components.TurnByTurnNavHeader
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
@@ -66,6 +67,16 @@ fun LiveRideScreen(
     val activeSos by viewModel.activeSos.collectAsState()
     val recentMessage by viewModel.recentMessage.collectAsState()
 
+    // Navigation & Routing states
+    val isRerouting by viewModel.isRerouting.collectAsState()
+    val isOffRoute by viewModel.isOffRoute.collectAsState()
+    val isFollowMode by viewModel.isFollowRiderMode.collectAsState()
+    val currentStep = viewModel.getCurrentNavigationStep()
+    val nextStep = viewModel.getNextNavigationStep()
+    val remainingDistText = viewModel.getFormattedRemainingDistance()
+    val remainingDurationText = viewModel.getFormattedRemainingDuration()
+    val etaText = viewModel.getFormattedEta()
+
     val showRidersSheet by viewModel.showRidersSheet.collectAsState()
     val showQuickMessageSheet by viewModel.showQuickMessageSheet.collectAsState()
     val showSosConfirmDialog by viewModel.showSosConfirmDialog.collectAsState()
@@ -76,27 +87,38 @@ fun LiveRideScreen(
     val isOtherRiderSos = activeSos != null && activeSos?.riderId != currentUser?.id
 
     Box(modifier = modifier.fillMaxSize()) {
-        // 1. Live Map View (₹0 Cost MapLibre / OpenStreetMap Tile Engine)
+        // 1. Live Map View with road-following route and bike markers
         RideMapCanvas(
             route = viewModel.getRoutePoints(),
             members = members,
             selectedRider = selectedRider,
-            onSelectRider = { viewModel.selectRider(it) }
+            onSelectRider = { viewModel.selectRider(it) },
+            isFollowRiderMode = isFollowMode,
+            onFollowRiderChange = { viewModel.setFollowRiderMode(it) }
         )
 
-        // 2. Top Header and Alert Overlay Stack
+        // 2. Top Header, Turn-by-Turn Nav HUD, and Alert Overlay Stack
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
         ) {
-            // Header
+            // Ride pack header
             RideHeader(
                 rideName = ride?.name ?: "Group Ride",
                 riderCount = members.size,
                 inviteCode = ride?.inviteCode ?: "ABC123",
                 onOpenRiders = { viewModel.openRidersSheet(true) },
                 onOpenSettings = { viewModel.openSettingsSheet(true) }
+            )
+
+            // Google Maps-style Turn-by-Turn Navigation HUD
+            TurnByTurnNavHeader(
+                currentStep = currentStep,
+                nextStep = nextStep,
+                isOffRoute = isOffRoute,
+                isRerouting = isRerouting,
+                onReroute = { viewModel.rerouteFromCurrentLocation() }
             )
 
             // Alert banner if another rider triggered SOS
@@ -123,181 +145,196 @@ fun LiveRideScreen(
             RecentMessageToast(message = recentMessage)
         }
 
-        // 3. Selected Rider Quick Detail Card (if a rider marker was tapped)
-        if (selectedRider != null) {
-            val rider = selectedRider!!
-            val userLoc = currentUser?.location
-            val distText = if (userLoc != null) rider.getFormattedDistanceTo(userLoc) else ""
+        // 3. Bottom Layer Stack: Trip Info HUD + Selected Rider Card + Action Bar
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+        ) {
+            // Selected Rider Quick Detail Card (if a rider marker was tapped)
+            if (selectedRider != null) {
+                val rider = selectedRider!!
+                val userLoc = currentUser?.location
+                val distText = if (userLoc != null) rider.getFormattedDistanceTo(userLoc) else ""
 
+                Surface(
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .fillMaxWidth()
+                        .testTag("selected_rider_card"),
+                    color = SlateDark900.copy(alpha = 0.95f),
+                    shape = RoundedCornerShape(16.dp),
+                    tonalElevation = 8.dp
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(CircleShape)
+                                .background(Color(rider.avatarColorHex)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = rider.name.take(1).uppercase(),
+                                color = Color.White,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = if (rider.isCurrentUser) "${rider.name} (You)" else rider.name,
+                                    color = Color.White,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Text(
+                                text = if (rider.isCurrentUser) "Current device" else "Distance from you: $distText",
+                                color = Color(0xFFCFD8DC),
+                                fontSize = 12.sp
+                            )
+                        }
+
+                        RiderStatusBadge(
+                            status = rider.status,
+                            speedKmh = rider.speedKmh,
+                            stoppedDurationSec = rider.stoppedDurationSec
+                        )
+
+                        IconButton(
+                            onClick = { viewModel.selectRider(null) },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close",
+                                tint = Color.White.copy(alpha = 0.7f),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Google Maps-style Trip HUD (ETA, Remaining Distance, Time, Follow Camera Toggle)
+            NavigationTripHud(
+                destinationName = ride?.destinationName ?: "Destination",
+                remainingDistance = remainingDistText,
+                remainingDuration = remainingDurationText,
+                etaTime = etaText,
+                isFollowMode = isFollowMode,
+                onToggleFollowMode = { viewModel.toggleFollowRiderMode() }
+            )
+
+            // Primary Bottom Action Bar:
+            // [ 👥 Riders ] [ 💬 Message ] [ 🚨 SOS ]
             Surface(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 100.dp, start = 16.dp, end = 16.dp)
                     .fillMaxWidth()
-                    .testTag("selected_rider_card"),
-                color = SlateDark900.copy(alpha = 0.95f),
-                shape = RoundedCornerShape(16.dp),
+                    .testTag("bottom_riding_bar"),
+                color = SlateDark900.copy(alpha = 0.96f),
                 tonalElevation = 8.dp
             ) {
                 Row(
-                    modifier = Modifier.padding(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
+                    // 👥 Riders Button
+                    Button(
+                        onClick = { viewModel.openRidersSheet(true) },
                         modifier = Modifier
-                            .size(44.dp)
-                            .clip(CircleShape)
-                            .background(Color(rider.avatarColorHex)),
-                        contentAlignment = Alignment.Center
+                            .weight(1f)
+                            .height(56.dp)
+                            .testTag("open_riders_button"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SlateDark800,
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(14.dp)
                     ) {
+                        Icon(
+                            imageVector = Icons.Default.Group,
+                            contentDescription = "Riders",
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = rider.name.take(1).uppercase(),
-                            color = Color.White,
-                            fontSize = 18.sp,
+                            text = "Riders (${members.size})",
+                            fontSize = 14.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
 
-                    Spacer(modifier = Modifier.width(12.dp))
-
-                    Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = if (rider.isCurrentUser) "${rider.name} (You)" else rider.name,
-                                color = Color.White,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                        Text(
-                            text = if (rider.isCurrentUser) "Current device" else "Distance from you: $distText",
-                            color = Color(0xFFCFD8DC),
-                            fontSize = 12.sp
-                        )
-                    }
-
-                    RiderStatusBadge(
-                        status = rider.status,
-                        speedKmh = rider.speedKmh,
-                        stoppedDurationSec = rider.stoppedDurationSec
-                    )
-
-                    IconButton(
-                        onClick = { viewModel.selectRider(null) },
-                        modifier = Modifier.size(36.dp)
+                    // 💬 Quick Message Button
+                    Button(
+                        onClick = { viewModel.openQuickMessageSheet(true) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(56.dp)
+                            .testTag("open_message_button"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SlateDark800,
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(14.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Close",
-                            tint = Color.White.copy(alpha = 0.7f),
-                            modifier = Modifier.size(18.dp)
+                            imageVector = Icons.Default.Chat,
+                            contentDescription = "Message",
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Message",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    // 🚨 Large Emergency SOS Button
+                    Button(
+                        onClick = { viewModel.openSosConfirmDialog(true) },
+                        modifier = Modifier
+                            .weight(1.1f)
+                            .height(56.dp)
+                            .testTag("trigger_sos_button"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = StatusEmergencyRed,
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "SOS",
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "🚨 SOS",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Black
                         )
                     }
                 }
             }
         }
 
-        // 4. Primary Bottom Controls:
-        // [ 👥 Riders ] [ 💬 Message ] [ 🚨 SOS ]
-        Surface(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .testTag("bottom_riding_bar"),
-            color = SlateDark900.copy(alpha = 0.96f),
-            tonalElevation = 8.dp
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // 👥 Riders Button
-                Button(
-                    onClick = { viewModel.openRidersSheet(true) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(56.dp)
-                        .testTag("open_riders_button"),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = SlateDark800,
-                        contentColor = Color.White
-                    ),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Group,
-                        contentDescription = "Riders",
-                        tint = AmberPrimary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Riders (${members.size})",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                // 💬 Quick Message Button
-                Button(
-                    onClick = { viewModel.openQuickMessageSheet(true) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(56.dp)
-                        .testTag("open_message_button"),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = SlateDark800,
-                        contentColor = Color.White
-                    ),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Chat,
-                        contentDescription = "Message",
-                        tint = AmberPrimary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Message",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                // 🚨 Large Emergency SOS Button
-                Button(
-                    onClick = { viewModel.openSosConfirmDialog(true) },
-                    modifier = Modifier
-                        .weight(1.1f)
-                        .height(56.dp)
-                        .testTag("trigger_sos_button"),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = StatusEmergencyRed,
-                        contentColor = Color.White
-                    ),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Warning,
-                        contentDescription = "SOS",
-                        modifier = Modifier.size(22.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "🚨 SOS",
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Black
-                    )
-                }
-            }
-        }
-
-        // 5. Modals and Dialogs
+        // 4. Modals and Dialogs
         if (showRidersSheet) {
             RiderBottomSheet(
                 members = members,

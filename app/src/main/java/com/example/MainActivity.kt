@@ -103,9 +103,11 @@ fun RideTogetherApp(viewModel: RideViewModel) {
             }
             CreateRideScreen(
                 onBack = { viewModel.navigateTo(AppScreen.WELCOME) },
-                onCreateRide = { name, start, dest ->
-                    viewModel.createRide(name, start, dest)
-                }
+                onCreateRide = { name, start, dest, startCoords, destCoords ->
+                    viewModel.createRide(name, start, dest, startCoords, destCoords)
+                },
+                currentGpsLocation = viewModel.locationTracker.currentLocation.value?.latLng,
+                placeSearchService = viewModel.placeSearchService
             )
         }
 

@@ -5,6 +5,7 @@ import com.example.data.location.LocationUpdate
 import com.example.data.location.StopDetector
 import com.example.data.model.LatLng
 import com.example.data.model.MemberStatus
+import com.example.data.model.NavigationStep
 import com.example.data.model.QuickMessage
 import com.example.data.model.QuickMessageType
 import com.example.data.model.Ride
@@ -171,6 +172,21 @@ class RideRepository(
         _currentRide.value = ride
         _members.value = listOf(joinedMember)
         return ride
+    }
+
+    fun updateRoute(
+        routePoints: List<LatLng>,
+        totalDistanceMeters: Double,
+        totalDurationSeconds: Double,
+        steps: List<NavigationStep>
+    ) {
+        val current = _currentRide.value ?: return
+        _currentRide.value = current.copy(
+            routePoints = routePoints,
+            totalDistanceMeters = totalDistanceMeters,
+            totalDurationSeconds = totalDurationSeconds,
+            navigationSteps = steps
+        )
     }
 
     fun addPackMember(name: String, offsetLat: Double, offsetLon: Double, role: RideRole = RideRole.MEMBER) {

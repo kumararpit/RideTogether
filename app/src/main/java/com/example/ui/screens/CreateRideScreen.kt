@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,11 +22,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Place
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.TwoWheeler
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -32,9 +40,11 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,22 +54,72 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.location.OsrmRoutingService
+import com.example.data.location.PlaceSearchResult
+import com.example.data.location.PlaceSearchService
+import com.example.data.model.LatLng
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.SlateDark700
 import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
+import com.example.ui.theme.StatusRidingGreen
 import com.example.ui.theme.SurfaceCard
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 fun CreateRideScreen(
     onBack: () -> Unit,
-    onCreateRide: (name: String, start: String, destination: String) -> Unit,
+    onCreateRide: (name: String, start: String, destination: String, startCoords: LatLng?, destCoords: LatLng?) -> Unit,
+    currentGpsLocation: LatLng? = null,
+    placeSearchService: PlaceSearchService = remember { PlaceSearchService() },
     modifier: Modifier = Modifier
 ) {
+    val coroutineScope = rememberCoroutineScope()
+    val routingService = remember { OsrmRoutingService() }
+
+    val defaultStart = currentGpsLocation ?: LatLng(18.5204, 73.8567)
+    val defaultDest = LatLng(18.7546, 73.4062)
+
     var rideName by remember { mutableStateOf("Pune → Lonavala") }
-    var startLocation by remember { mutableStateOf("Current Location (Pune)") }
-    var destination by remember { mutableStateOf("Lonavala") }
+    var startLocationText by remember { mutableStateOf("Pune") }
+    var startCoords by remember { mutableStateOf<LatLng?>(defaultStart) }
+
+    var destinationText by remember { mutableStateOf("Lonavala") }
+    var destCoords by remember { mutableStateOf<LatLng?>(defaultDest) }
+
     var nameError by remember { mutableStateOf(false) }
+
+    // Search state for Start
+    var startSearchResults by remember { mutableStateOf<List<PlaceSearchResult>>(emptyList()) }
+    var isSearchingStart by remember { mutableStateOf(false) }
+    var showStartDropdown by remember { mutableStateOf(false) }
+    var startDebounceJob by remember { mutableStateOf<Job?>(null) }
+
+    // Search state for Destination
+    var destSearchResults by remember { mutableStateOf<List<PlaceSearchResult>>(emptyList()) }
+    var isSearchingDest by remember { mutableStateOf(false) }
+    var showDestDropdown by remember { mutableStateOf(false) }
+    var destDebounceJob by remember { mutableStateOf<Job?>(null) }
+
+    // Route estimate preview
+    var routeDistanceText by remember { mutableStateOf("65.8 km") }
+    var routeDurationText by remember { mutableStateOf("1 hr 15 min") }
+    var isEstimatingRoute by remember { mutableStateOf(false) }
+
+    // Recalculate route summary when coordinates change
+    LaunchedEffect(startCoords, destCoords) {
+        if (startCoords != null && destCoords != null) {
+            isEstimatingRoute = true
+            try {
+                val result = routingService.fetchRoute(startCoords!!, destCoords!!)
+                routeDistanceText = result.formattedDistance
+                routeDurationText = result.formattedDuration
+            } catch (_: Exception) {}
+            isEstimatingRoute = false
+        }
+    }
 
     Surface(
         modifier = modifier
@@ -104,7 +164,7 @@ fun CreateRideScreen(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 // Ride Name Field
                 Surface(
@@ -158,32 +218,90 @@ fun CreateRideScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                // Start Location Field
+                // Start Location Search Field
                 Surface(
                     color = SurfaceCard,
                     shape = RoundedCornerShape(16.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "START POINT",
-                            color = AmberPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = startLocation,
-                            onValueChange = { startLocation = it },
-                            placeholder = { Text("Current Location", color = Color(0xFF78909C)) },
-                            leadingIcon = {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "START POINT (MAP SEARCH)",
+                                color = AmberPrimary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            // Quick Button: Use Current GPS
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(SlateDark800)
+                                    .clickable {
+                                        if (currentGpsLocation != null) {
+                                            startCoords = currentGpsLocation
+                                            startLocationText = "Current GPS Location"
+                                            rideName = "Current Location → $destinationText"
+                                            showStartDropdown = false
+                                        }
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Icon(
                                     imageVector = Icons.Default.MyLocation,
                                     contentDescription = null,
-                                    tint = Color(0xFF00E676)
+                                    tint = StatusRidingGreen,
+                                    modifier = Modifier.size(13.dp)
                                 )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Use GPS",
+                                    color = Color.White,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        OutlinedTextField(
+                            value = startLocationText,
+                            onValueChange = { query ->
+                                startLocationText = query
+                                showStartDropdown = true
+                                startDebounceJob?.cancel()
+                                startDebounceJob = coroutineScope.launch {
+                                    delay(250)
+                                    isSearchingStart = true
+                                    startSearchResults = placeSearchService.searchPlaces(query)
+                                    isSearchingStart = false
+                                }
+                            },
+                            placeholder = { Text("Search city, town, landmark", color = Color(0xFF78909C)) },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Search,
+                                    contentDescription = null,
+                                    tint = StatusRidingGreen
+                                )
+                            },
+                            trailingIcon = {
+                                if (isSearchingStart) {
+                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), color = AmberPrimary, strokeWidth = 2.dp)
+                                } else if (startLocationText.isNotBlank()) {
+                                    IconButton(onClick = { startLocationText = ""; showStartDropdown = false }) {
+                                        Icon(imageVector = Icons.Default.Clear, contentDescription = "Clear", tint = Color.Gray, modifier = Modifier.size(18.dp))
+                                    }
+                                }
                             },
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = AmberPrimary,
@@ -197,12 +315,61 @@ fun CreateRideScreen(
                                 .testTag("start_location_input"),
                             shape = RoundedCornerShape(12.dp)
                         )
+
+                        // Coordinates Confirmation Badge
+                        if (startCoords != null) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = StatusRidingGreen, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Mapped: ${String.format("%.4f, %.4f", startCoords!!.latitude, startCoords!!.longitude)}",
+                                    color = StatusRidingGreen,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+
+                        // Search Results Dropdown List
+                        if (showStartDropdown && startSearchResults.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(SlateDark800)
+                                    .border(1.dp, SlateDark700, RoundedCornerShape(10.dp))
+                            ) {
+                                for (place in startSearchResults.take(4)) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                startLocationText = place.name
+                                                startCoords = place.latLng
+                                                rideName = "${place.name} → $destinationText"
+                                                showStartDropdown = false
+                                            }
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(imageVector = Icons.Default.Place, contentDescription = null, tint = StatusRidingGreen, modifier = Modifier.size(18.dp))
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Column {
+                                            Text(text = place.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                            Text(text = place.displayName, color = Color(0xFF90A4AE), fontSize = 10.sp, maxLines = 1)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                // Destination Field
+                // Destination Search Field
                 Surface(
                     color = SurfaceCard,
                     shape = RoundedCornerShape(16.dp),
@@ -210,22 +377,43 @@ fun CreateRideScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            text = "DESTINATION",
+                            text = "DESTINATION (MAP SEARCH)",
                             color = AmberPrimary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
                         )
+
                         Spacer(modifier = Modifier.height(8.dp))
+
                         OutlinedTextField(
-                            value = destination,
-                            onValueChange = { destination = it },
-                            placeholder = { Text("Destination town or landmark", color = Color(0xFF78909C)) },
+                            value = destinationText,
+                            onValueChange = { query ->
+                                destinationText = query
+                                showDestDropdown = true
+                                destDebounceJob?.cancel()
+                                destDebounceJob = coroutineScope.launch {
+                                    delay(250)
+                                    isSearchingDest = true
+                                    destSearchResults = placeSearchService.searchPlaces(query)
+                                    isSearchingDest = false
+                                }
+                            },
+                            placeholder = { Text("Search destination town, ghat, landmark", color = Color(0xFF78909C)) },
                             leadingIcon = {
                                 Icon(
                                     imageVector = Icons.Default.Flag,
                                     contentDescription = null,
                                     tint = AmberPrimary
                                 )
+                            },
+                            trailingIcon = {
+                                if (isSearchingDest) {
+                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), color = AmberPrimary, strokeWidth = 2.dp)
+                                } else if (destinationText.isNotBlank()) {
+                                    IconButton(onClick = { destinationText = ""; showDestDropdown = false }) {
+                                        Icon(imageVector = Icons.Default.Clear, contentDescription = "Clear", tint = Color.Gray, modifier = Modifier.size(18.dp))
+                                    }
+                                }
                             },
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = AmberPrimary,
@@ -239,32 +427,130 @@ fun CreateRideScreen(
                                 .testTag("destination_input"),
                             shape = RoundedCornerShape(12.dp)
                         )
+
+                        // Coordinates Confirmation Badge
+                        if (destCoords != null) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = AmberPrimary, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Mapped: ${String.format("%.4f, %.4f", destCoords!!.latitude, destCoords!!.longitude)}",
+                                    color = AmberPrimary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+
+                        // Search Results Dropdown List
+                        if (showDestDropdown && destSearchResults.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(SlateDark800)
+                                    .border(1.dp, SlateDark700, RoundedCornerShape(10.dp))
+                            ) {
+                                for (place in destSearchResults.take(4)) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                destinationText = place.name
+                                                destCoords = place.latLng
+                                                rideName = "$startLocationText → ${place.name}"
+                                                showDestDropdown = false
+                                            }
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(imageVector = Icons.Default.Place, contentDescription = null, tint = AmberPrimary, modifier = Modifier.size(18.dp))
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Column {
+                                            Text(text = place.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                            Text(text = place.displayName, color = Color(0xFF90A4AE), fontSize = 10.sp, maxLines = 1)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                // Info note
-                Text(
-                    text = "A unique 6-character ride code (e.g. ABC123) will be generated for your pack to join.",
-                    color = Color(0xFF90A4AE),
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp
-                )
+                // Road-Following Route Preview Card
+                Surface(
+                    color = SlateDark800.copy(alpha = 0.9f),
+                    shape = RoundedCornerShape(14.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.4f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(AmberPrimary.copy(alpha = 0.15f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(imageVector = Icons.Default.Directions, contentDescription = null, tint = AmberPrimary, modifier = Modifier.size(24.dp))
+                        }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "OSRM ROAD ROUTE ESTIMATE",
+                                color = AmberPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "$routeDistanceText • $routeDurationText",
+                                    color = Color.White,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                if (isEstimatingRoute) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    CircularProgressIndicator(modifier = Modifier.size(14.dp), color = AmberPrimary, strokeWidth = 2.dp)
+                                }
+                            }
+                            Text(
+                                text = "Real highway paths will be traced on the live map",
+                                color = Color(0xFF90A4AE),
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
             }
 
             // Create Button
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 24.dp)
+                    .padding(vertical = 20.dp)
             ) {
                 Button(
                     onClick = {
                         if (rideName.isBlank()) {
                             nameError = true
                         } else {
-                            onCreateRide(rideName, startLocation, destination)
+                            onCreateRide(
+                                rideName,
+                                startLocationText,
+                                destinationText,
+                                startCoords,
+                                destCoords
+                            )
                         }
                     },
                     modifier = Modifier

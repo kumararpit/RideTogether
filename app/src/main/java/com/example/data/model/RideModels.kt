@@ -88,6 +88,48 @@ data class SosEvent(
     val isResolved: Boolean = false
 )
 
+data class NavigationStep(
+    val instruction: String,
+    val roadName: String,
+    val distanceMeters: Double,
+    val durationSeconds: Double,
+    val maneuverType: String = "turn",
+    val modifier: String = "straight"
+) {
+    val formattedDistance: String
+        get() = if (distanceMeters >= 1000) {
+            String.format("%.1f km", distanceMeters / 1000.0)
+        } else {
+            "${kotlin.math.round(distanceMeters).toInt()} m"
+        }
+}
+
+data class RouteResult(
+    val coordinates: List<LatLng>,
+    val totalDistanceMeters: Double,
+    val totalDurationSeconds: Double,
+    val steps: List<NavigationStep>
+) {
+    val formattedDistance: String
+        get() = if (totalDistanceMeters >= 1000) {
+            String.format("%.1f km", totalDistanceMeters / 1000.0)
+        } else {
+            "${kotlin.math.round(totalDistanceMeters).toInt()} m"
+        }
+
+    val formattedDuration: String
+        get() {
+            val mins = kotlin.math.round(totalDurationSeconds / 60.0).toInt()
+            return if (mins >= 60) {
+                val hours = mins / 60
+                val remMins = mins % 60
+                if (remMins > 0) "${hours} hr ${remMins} min" else "${hours} hr"
+            } else {
+                "${mins} min"
+            }
+        }
+}
+
 data class Ride(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
@@ -99,5 +141,9 @@ data class Ride(
     val inviteCode: String,
     val status: RideStatus = RideStatus.LOBBY,
     val members: List<RiderMember> = emptyList(),
+    val routePoints: List<LatLng> = emptyList(),
+    val totalDistanceMeters: Double = 0.0,
+    val totalDurationSeconds: Double = 0.0,
+    val navigationSteps: List<NavigationStep> = emptyList(),
     val createdAtMs: Long = System.currentTimeMillis()
 )

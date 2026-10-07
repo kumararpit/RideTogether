@@ -189,7 +189,48 @@ fun RideLobbyScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Road Route Overview Card
+            Surface(
+                color = SlateDark800,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth().testTag("route_overview_card")
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(AmberPrimary.copy(alpha = 0.2f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = "🛣️", fontSize = 18.sp)
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Road-Following Route (OSRM)",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        val distStr = if (ride.totalDistanceMeters > 0) String.format(java.util.Locale.getDefault(), "%.1f km", ride.totalDistanceMeters / 1000.0) else "Live Route"
+                        val durStr = if (ride.totalDurationSeconds > 0) "${(ride.totalDurationSeconds / 60.0).toInt()} min" else "Turn-by-turn"
+                        Text(
+                            text = "$distStr • $durStr • Highway & Curves Ready",
+                            color = AmberPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
 
             // Riders Waiting in Lobby
             Row(
