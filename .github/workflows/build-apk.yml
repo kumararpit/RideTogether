@@ -29,6 +29,14 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          api-level: 34
+          target: default
+          arch: x86_64
+
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
