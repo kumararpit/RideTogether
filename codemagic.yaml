@@ -1,59 +1,39 @@
 workflows:
   android-workflow:
-    name: Android Native APK
+    name: RideTogether Android APK
     max_build_duration: 60
-    instance_type: linux_x2_16
+    instance_type: linux_x2
+
     environment:
-      android_signing:
-        - none
-      groups:
-        - google_play # optional if publishing to Google Play
-      vars:
-        PACKAGE_NAME: "com.aistudio.ridetogether.kqmvpw"
       java: 21
+
     scripts:
-      - name: Set up local properties and environment
+      - name: Set up Android SDK
         script: |
           echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/local.properties"
-          if [ ! -f .env ] && [ -f .env.example ]; then
-            cp .env.example .env
-          fi
-      - name: Generate or decode debug keystore
-        script: |
-          if [ -f debug.keystore.base64 ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
-          elif [ ! -f debug.keystore ]; then
-            keytool -genkey -v -keystore debug.keystore -storepass android \
-              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
-              -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-          fi
+
       - name: Accept Android SDK licenses
         script: |
           yes | sdkmanager --licenses || true
-      - name: Install Android build tools and SDK platforms
+
+      - name: Install Android SDK
         script: |
-          sdkmanager "platform-tools" "platforms;android-35" "platforms;android-34" "build-tools;35.0.0" "build-tools;34.0.0"
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "platforms;android-34" \
+            "build-tools;35.0.0" \
+            "build-tools;34.0.0"
+
       - name: Run unit tests
         script: |
-          if [ -x "./gradlew" ]; then
-            ./gradlew :app:testDebugUnitTest --no-daemon
-          else
-            gradle :app:testDebugUnitTest --no-daemon
-          fi
+          chmod +x ./gradlew
+          ./gradlew :app:testDebugUnitTest --no-daemon
+
       - name: Build Android debug APK
         script: |
-          if [ -x "./gradlew" ]; then
-            ./gradlew :app:assembleDebug --no-daemon --stacktrace
-          else
-            gradle :app:assembleDebug --no-daemon --stacktrace
-          fi
+          chmod +x ./gradlew
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
     artifacts:
-      - app/build/outputs/**/*.apk
-      - app/build/outputs/**/mapping.txt
-    publishing:
-      email:
-        recipients:
-          - user@example.com
-        notify:
-          success: true
-          failure: true
+      - app/build/outputs/apk/debug/*.apk
