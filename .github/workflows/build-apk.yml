@@ -27,60 +27,63 @@ jobs:
           distribution: 'temurin'
           cache: 'gradle'
 
-      - name: Setup Android SDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          api-level: 34
+          api-level: 36
+          build-tools: 36.0.0
           ndk-version: null
           cmake-version: null
-
-      - name: Install Android Build Tools
-        run: |
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;34.0.0" "platform-tools"
 
       - name: Accept Android SDK Licenses
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.3.1'
+      - name: Ensure Gradle Wrapper Executable
+        run: chmod +x ./gradlew
 
-      - name: Prepare Secrets and Debug Keystore
+      - name: Prepare Build Environment
         run: |
-          # 1. Provide .env for secrets gradle plugin if not present
+          # 1. Provide .env for Secrets Gradle Plugin
           if [ ! -f .env ]; then
-            echo "Creating .env from .env.example..."
-            cp .env.example .env
+            if [ -f .env.example ]; then
+              echo "Creating .env from .env.example..."
+              cp .env.example .env
+            else
+              echo "Creating empty .env..."
+              touch .env
+            fi
           fi
 
-          # 2. Decode or generate debug.keystore
+          # 2. Provide debug.keystore expected by signingConfigs in app/build.gradle.kts
           if [ -f debug.keystore.base64 ]; then
-            echo "Decoding debug.keystore from base64..."
+            echo "Decoding debug.keystore from debug.keystore.base64..."
             base64 -d debug.keystore.base64 > debug.keystore
           elif [ ! -f debug.keystore ]; then
-            echo "Generating fresh debug keystore..."
+            echo "Generating debug.keystore..."
             keytool -genkey -v -keystore debug.keystore -storepass android \
               -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
               -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
       - name: Run Unit Tests
-        run: |
-          if [ -x "./gradlew" ]; then
-            ./gradlew :app:testDebugUnitTest --no-daemon
-          else
-            gradle :app:testDebugUnitTest --no-daemon
-          fi
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
 
       - name: Build Debug APK
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and Locate Generated APK
+        id: find-apk
         run: |
-          if [ -x "./gradlew" ]; then
-            ./gradlew :app:assembleDebug --no-daemon --stacktrace
-          else
-            gradle :app:assembleDebug --no-daemon --stacktrace
+          echo "Locating generated APK files..."
+          APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" -type f | head -n 1)
+          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
+            echo "Error: No APK file was found in app/build/outputs/apk/debug"
+            find app/build/outputs -type f || true
+            exit 1
           fi
+          echo "Found APK at: $APK_PATH"
+          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
