@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">RideTogether</string>
+    <!-- Web Client ID for Google Sign-In via Credential Manager -->
+    <string name="default_web_client_id" translatable="false">13707892827-l6crnpj7kpu0nu422eagbl5mim5hipjb.apps.googleusercontent.com</string>
 </resources>

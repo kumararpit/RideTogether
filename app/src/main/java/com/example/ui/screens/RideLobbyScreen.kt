@@ -330,15 +330,17 @@ fun RideLobbyScreen(
                                     }
                                 }
                                 Text(
-                                    text = if (rider.isCurrentUser) "Ride Host" else "Ready to roll",
-                                    color = Color(0xFF90A4AE),
+                                    text = if (rider.motorcycleModel.isNotBlank()) "🏍️ ${rider.motorcycleModel}" else if (rider.isCurrentUser) "Ride Host" else "Ready to roll",
+                                    color = if (rider.motorcycleModel.isNotBlank()) AmberPrimary else Color(0xFF90A4AE),
                                     fontSize = 12.sp
                                 )
                             }
 
                             RiderStatusBadge(
                                 status = rider.status,
-                                speedKmh = rider.speedKmh
+                                speedKmh = rider.speedKmh,
+                                stoppedDurationSec = rider.stoppedDurationSec,
+                                connectionStatus = rider.connectionStatus
                             )
                         }
                     }

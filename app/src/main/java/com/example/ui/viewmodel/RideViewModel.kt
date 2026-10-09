@@ -71,6 +71,9 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     private val _userName = MutableStateFlow(authRepository.currentUser?.displayName ?: "Rider")
     val userName: StateFlow<String> = _userName.asStateFlow()
 
+    private val _motorcycleModel = MutableStateFlow("Triumph Tiger 900")
+    val motorcycleModel: StateFlow<String> = _motorcycleModel.asStateFlow()
+
     // Exposed repository flows
     val currentRide: StateFlow<Ride?> = repository.currentRide
     val members: StateFlow<List<RiderMember>> = repository.members
@@ -125,7 +128,7 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
                     _userId.value = fbUser.uid
                     val name = fbUser.displayName?.ifBlank { "Rider" } ?: "Rider"
                     _userName.value = name
-                    repository.initCurrentUser(fbUser.uid, name)
+                    repository.initCurrentUser(fbUser.uid, name, _motorcycleModel.value)
                 }
             }
         }
@@ -313,8 +316,13 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     fun setUserName(name: String) {
         if (name.isNotBlank()) {
             _userName.value = name
-            repository.initCurrentUser(_userId.value, name)
+            repository.initCurrentUser(_userId.value, name, _motorcycleModel.value)
         }
+    }
+
+    fun setMotorcycleModel(model: String) {
+        _motorcycleModel.value = model
+        repository.setMotorcycleModel(model)
     }
 
     fun navigateTo(screen: AppScreen) {

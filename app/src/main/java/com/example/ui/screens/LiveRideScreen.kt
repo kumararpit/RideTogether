@@ -195,9 +195,20 @@ fun LiveRideScreen(
                                     fontSize = 16.sp,
                                     fontWeight = FontWeight.Bold
                                 )
+                                if (rider.motorcycleModel.isNotBlank()) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "• ${rider.motorcycleModel}",
+                                        color = AmberPrimary,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
                             }
+                            val updateAgoSec = ((System.currentTimeMillis() - rider.lastUpdatedMs) / 1000).coerceAtLeast(0)
+                            val updateText = if (updateAgoSec < 5) "Live now" else "${updateAgoSec}s ago"
                             Text(
-                                text = if (rider.isCurrentUser) "Current device" else "Distance from you: $distText",
+                                text = if (rider.isCurrentUser) "Current device • $updateText" else "Distance: $distText • $updateText",
                                 color = Color(0xFFCFD8DC),
                                 fontSize = 12.sp
                             )
@@ -206,7 +217,8 @@ fun LiveRideScreen(
                         RiderStatusBadge(
                             status = rider.status,
                             speedKmh = rider.speedKmh,
-                            stoppedDurationSec = rider.stoppedDurationSec
+                            stoppedDurationSec = rider.stoppedDurationSec,
+                            connectionStatus = rider.connectionStatus
                         )
 
                         IconButton(

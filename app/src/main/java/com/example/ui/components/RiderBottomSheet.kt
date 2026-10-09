@@ -235,11 +235,31 @@ fun RiderCardItem(
 
                 Spacer(modifier = Modifier.height(4.dp))
 
-                // Relative position or duration
+                // Motorcycle model if present
+                if (rider.motorcycleModel.isNotBlank()) {
+                    Text(
+                        text = "🏍️ ${rider.motorcycleModel}",
+                        color = AmberPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                }
+
+                // Relative position, last updated time
+                val updateAgoSec = ((System.currentTimeMillis() - rider.lastUpdatedMs) / 1000).coerceAtLeast(0)
+                val updateText = when {
+                    updateAgoSec < 5 -> "Live now"
+                    updateAgoSec < 60 -> "${updateAgoSec}s ago"
+                    else -> "${updateAgoSec / 60}m ago"
+                }
+
+                val positionDesc = if (rider.isCurrentUser) "Current device • $updateText" else if (relativePositionText.isNotBlank()) "$relativePositionText • $updateText" else updateText
+
                 Text(
-                    text = if (rider.isCurrentUser) "Current device" else relativePositionText,
-                    color = if (rider.status == MemberStatus.OFFLINE) Color(0xFF78909C) else Color(0xFFCFD8DC),
-                    fontSize = 13.sp
+                    text = positionDesc,
+                    color = if (rider.status == MemberStatus.OFFLINE || rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED) Color(0xFF78909C) else Color(0xFFCFD8DC),
+                    fontSize = 12.sp
                 )
             }
 
@@ -248,7 +268,8 @@ fun RiderCardItem(
                 RiderStatusBadge(
                     status = rider.status,
                     speedKmh = rider.speedKmh,
-                    stoppedDurationSec = rider.stoppedDurationSec
+                    stoppedDurationSec = rider.stoppedDurationSec,
+                    connectionStatus = rider.connectionStatus
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {

@@ -34,9 +34,16 @@ class LocationTracker(private val context: Context) {
     private val _isTracking = MutableStateFlow(false)
     val isTracking: StateFlow<Boolean> = _isTracking.asStateFlow()
 
+    private val _isGpsAvailable = MutableStateFlow(true)
+    val isGpsAvailable: StateFlow<Boolean> = _isGpsAvailable.asStateFlow()
+
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
-            val loc: Location = result.lastLocation ?: return
+            val loc: Location = result.lastLocation ?: run {
+                _isGpsAvailable.value = false
+                return
+            }
+            _isGpsAvailable.value = true
             // Convert m/s to km/h (1 m/s = 3.6 km/h)
             val speedKmh = if (loc.hasSpeed()) (loc.speed * 3.6).coerceAtLeast(0.0) else 0.0
             val heading = if (loc.hasBearing()) loc.bearing else 0f
@@ -52,12 +59,12 @@ class LocationTracker(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    fun startTracking(updateIntervalMs: Long = 5000L) {
+    fun startTracking(updateIntervalMs: Long = 4000L) {
         if (_isTracking.value) return
         try {
             val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, updateIntervalMs)
                 .setMinUpdateIntervalMillis(3000L)
-                .setMinUpdateDistanceMeters(10f)
+                .setMinUpdateDistanceMeters(5f)
                 .build()
 
             fusedClient.requestLocationUpdates(
@@ -66,10 +73,13 @@ class LocationTracker(private val context: Context) {
                 Looper.getMainLooper()
             )
             _isTracking.value = true
+            _isGpsAvailable.value = true
         } catch (e: SecurityException) {
             _isTracking.value = false
+            _isGpsAvailable.value = false
         } catch (e: Exception) {
             _isTracking.value = false
+            _isGpsAvailable.value = false
         }
     }
 

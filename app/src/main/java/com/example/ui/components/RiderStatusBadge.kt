@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.ConnectionStatus
 import com.example.data.model.MemberStatus
 import com.example.ui.theme.StatusEmergencyRed
 import com.example.ui.theme.StatusOfflineGray
@@ -36,6 +37,7 @@ fun RiderStatusBadge(
     status: MemberStatus,
     speedKmh: Double = 0.0,
     stoppedDurationSec: Long = 0,
+    connectionStatus: ConnectionStatus = ConnectionStatus.CONNECTED,
     modifier: Modifier = Modifier
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
@@ -49,13 +51,33 @@ fun RiderStatusBadge(
         label = "pulseAlpha"
     )
 
-    val (bgTint, dotColor, label) = when (status) {
-        MemberStatus.RIDING -> Triple(
-            Color(0x2200E676),
-            StatusRidingGreen,
-            if (speedKmh > 0) "Riding • ${speedKmh.toInt()} km/h" else "Riding"
+    val (bgTint, dotColor, label) = when {
+        connectionStatus == ConnectionStatus.LOCATION_UNAVAILABLE -> Triple(
+            Color(0x2278909C),
+            StatusOfflineGray,
+            "GPS Lost"
         )
-        MemberStatus.STOPPED -> {
+        connectionStatus == ConnectionStatus.LOCATION_STALE -> Triple(
+            Color(0x33FFB300),
+            StatusStoppedAmber,
+            "Stale Signal"
+        )
+        connectionStatus == ConnectionStatus.DISCONNECTED -> Triple(
+            Color(0x2278909C),
+            StatusOfflineGray,
+            "Disconnected"
+        )
+        connectionStatus == ConnectionStatus.RECONNECTING -> Triple(
+            Color(0x3329B6F6),
+            Color(0xFF29B6F6),
+            "Reconnecting"
+        )
+        status == MemberStatus.EMERGENCY -> Triple(
+            Color(0x33FF1744),
+            StatusEmergencyRed,
+            "EMERGENCY"
+        )
+        status == MemberStatus.STOPPED -> {
             val mins = stoppedDurationSec / 60
             val durationText = if (mins > 0) "${mins}m" else "${stoppedDurationSec}s"
             Triple(
@@ -64,15 +86,15 @@ fun RiderStatusBadge(
                 "Stopped • $durationText"
             )
         }
-        MemberStatus.EMERGENCY -> Triple(
-            Color(0x33FF1744),
-            StatusEmergencyRed,
-            "EMERGENCY"
-        )
-        MemberStatus.OFFLINE -> Triple(
+        status == MemberStatus.OFFLINE -> Triple(
             Color(0x2278909C),
             StatusOfflineGray,
             "Offline"
+        )
+        else -> Triple(
+            Color(0x2200E676),
+            StatusRidingGreen,
+            if (speedKmh > 0) "Riding • ${speedKmh.toInt()} km/h" else "Riding"
         )
     }
 

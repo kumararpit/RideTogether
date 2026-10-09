@@ -80,6 +80,7 @@ class RideRepository(
 
     private var currentUserId: String = auth.currentUser?.uid ?: "rider_unknown"
     private var currentUserName: String = auth.currentUser?.displayName ?: "Rider"
+    private var currentMotorcycleModel: String = ""
 
     init {
         // Collect real location updates and sync to active ride in Firestore
@@ -90,17 +91,27 @@ class RideRepository(
                 }
             }
         }
+
+        // Stale & connection health detector loop: checks every 5 seconds for stale riders
+        repositoryScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(5000L)
+                checkRidersStaleness()
+            }
+        }
     }
 
-    fun initCurrentUser(id: String, name: String) {
+    fun initCurrentUser(id: String, name: String, motorcycleModel: String = "") {
         currentUserId = id
         currentUserName = name
+        currentMotorcycleModel = motorcycleModel
         // Also save/update user doc in Firestore
         repositoryScope.launch {
             try {
                 val userDoc = mapOf(
                     "id" to id,
                     "name" to name,
+                    "motorcycleModel" to motorcycleModel,
                     "email" to (auth.currentUser?.email ?: ""),
                     "photoUrl" to (auth.currentUser?.photoUrl?.toString() ?: ""),
                     "createdAt" to FieldValue.serverTimestamp(),
@@ -112,6 +123,40 @@ class RideRepository(
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.WRITE, "users/$id")
             }
+        }
+    }
+
+    fun setMotorcycleModel(model: String) {
+        currentMotorcycleModel = model
+        initCurrentUser(currentUserId, currentUserName, model)
+    }
+
+    private fun checkRidersStaleness() {
+        val now = System.currentTimeMillis()
+        val currentList = _members.value
+        if (currentList.isEmpty()) return
+
+        var changed = false
+        val updated = currentList.map { rider ->
+            if (rider.isCurrentUser) {
+                rider
+            } else {
+                val diffMs = now - rider.lastUpdatedMs
+                val newConn = when {
+                    diffMs > 60000L -> com.example.data.model.ConnectionStatus.DISCONNECTED
+                    diffMs > 25000L -> com.example.data.model.ConnectionStatus.LOCATION_STALE
+                    else -> com.example.data.model.ConnectionStatus.CONNECTED
+                }
+                if (newConn != rider.connectionStatus) {
+                    changed = true
+                    rider.copy(connectionStatus = newConn)
+                } else {
+                    rider
+                }
+            }
+        }
+        if (changed) {
+            _members.value = updated
         }
     }
 
@@ -135,6 +180,7 @@ class RideRepository(
                     "userId" to currentUid,
                     "rideId" to activeRideId,
                     "name" to currentUserName,
+                    "motorcycleModel" to currentMotorcycleModel,
                     "role" to if (_currentRide.value?.leaderId == currentUid) "LEADER" else "MEMBER",
                     "status" to finalStatus.name,
                     "latitude" to loc.latLng.latitude,
@@ -194,6 +240,7 @@ class RideRepository(
                 "userId" to uid,
                 "rideId" to rideId,
                 "name" to currentUserName,
+                "motorcycleModel" to currentMotorcycleModel,
                 "role" to "LEADER",
                 "status" to _currentRiderStatus.value.name,
                 "latitude" to startLoc.latitude,
@@ -225,6 +272,7 @@ class RideRepository(
             val leaderMember = RiderMember(
                 id = uid,
                 name = currentUserName,
+                motorcycleModel = currentMotorcycleModel,
                 avatarColorHex = 0xFFFF5722,
                 role = RideRole.LEADER,
                 status = _currentRiderStatus.value,
@@ -312,6 +360,7 @@ class RideRepository(
                 "userId" to uid,
                 "rideId" to rideId,
                 "name" to currentUserName,
+                "motorcycleModel" to currentMotorcycleModel,
                 "role" to if (leaderId == uid) "LEADER" else "MEMBER",
                 "status" to _currentRiderStatus.value.name,
                 "latitude" to userLoc.latitude,
@@ -474,6 +523,7 @@ class RideRepository(
     private fun parseRiderDoc(doc: DocumentSnapshot, currentUid: String): RiderMember? {
         val id = doc.getString("userId") ?: doc.id
         val name = doc.getString("name") ?: "Rider"
+        val motorcycle = doc.getString("motorcycleModel") ?: ""
         val roleStr = doc.getString("role") ?: "MEMBER"
         val role = runCatching { RideRole.valueOf(roleStr) }.getOrDefault(RideRole.MEMBER)
         val statusStr = doc.getString("status") ?: "RIDING"
@@ -488,6 +538,19 @@ class RideRepository(
 
         val isCurrentUser = (id == currentUid)
 
+        // Calculate connection & staleness
+        val timeDiffMs = System.currentTimeMillis() - lastUpdated
+        val connectionStatus = if (isCurrentUser) {
+            if (locationTracker.isGpsAvailable.value) com.example.data.model.ConnectionStatus.CONNECTED
+            else com.example.data.model.ConnectionStatus.LOCATION_UNAVAILABLE
+        } else {
+            when {
+                timeDiffMs > 60000L -> com.example.data.model.ConnectionStatus.DISCONNECTED
+                timeDiffMs > 25000L -> com.example.data.model.ConnectionStatus.LOCATION_STALE
+                else -> com.example.data.model.ConnectionStatus.CONNECTED
+            }
+        }
+
         val avatarColorHex = when (Math.abs(id.hashCode()) % 5) {
             0 -> 0xFFFF9800
             1 -> 0xFF4CAF50
@@ -499,9 +562,11 @@ class RideRepository(
         return RiderMember(
             id = id,
             name = name,
+            motorcycleModel = motorcycle,
             avatarColorHex = avatarColorHex,
             role = role,
             status = status,
+            connectionStatus = connectionStatus,
             location = LatLng(lat, lng),
             speedKmh = speedKmh,
             headingDeg = headingDeg,
@@ -512,7 +577,7 @@ class RideRepository(
         )
     }
 
-    fun addPackMember(name: String, offsetLat: Double, offsetLon: Double, role: RideRole = RideRole.MEMBER) {
+    fun addPackMember(name: String, offsetLat: Double, offsetLon: Double, role: RideRole = RideRole.MEMBER, motorcycleModel: String = "Duke 390") {
         val currentUser = _members.value.find { it.isCurrentUser }
         val baseLoc = currentUser?.location ?: LatLng(18.5204, 73.8567)
         val memberLoc = LatLng(baseLoc.latitude + offsetLat, baseLoc.longitude + offsetLon)
@@ -520,6 +585,7 @@ class RideRepository(
         val newMember = RiderMember(
             id = "rider_${UUID.randomUUID().toString().take(6)}",
             name = name,
+            motorcycleModel = motorcycleModel,
             avatarColorHex = when (_members.value.size % 4) {
                 0 -> 0xFF4CAF50
                 1 -> 0xFF29B6F6
@@ -528,6 +594,7 @@ class RideRepository(
             },
             role = role,
             status = MemberStatus.RIDING,
+            connectionStatus = com.example.data.model.ConnectionStatus.CONNECTED,
             location = memberLoc,
             speedKmh = 40.0,
             headingDeg = 290f,

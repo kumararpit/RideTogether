@@ -38,6 +38,7 @@ service cloud.firestore {
         && data.userId is string
         && data.rideId is string
         && data.name is string && data.name.size() > 0 && data.name.size() <= 100
+        && (!('motorcycleModel' in data) || (data.motorcycleModel is string && data.motorcycleModel.size() <= 100))
         && data.role in ['LEADER', 'MEMBER']
         && data.status in ['RIDING', 'STOPPED', 'EMERGENCY', 'OFFLINE']
         && data.latitude is number

@@ -197,6 +197,60 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `test location update message validation and contract`() {
+        val validMsg = com.example.data.model.LocationUpdateMessage(
+            version = 1,
+            type = "LOCATION_UPDATE",
+            rideId = "ride-101",
+            userId = "user-1",
+            userName = "Arpit",
+            motorcycleModel = "Triumph Tiger 900",
+            latitude = 18.5204,
+            longitude = 73.8567,
+            accuracyMeters = 8.0f,
+            speedMps = 11.7,
+            bearingDegrees = 120.0f
+        )
+        assertTrue("Valid message should pass validation", validMsg.isValid())
+
+        val invalidLat = validMsg.copy(latitude = 95.0)
+        assertTrue("Latitude > 90 should be invalid", !invalidLat.isValid())
+
+        val invalidRide = validMsg.copy(rideId = "")
+        assertTrue("Blank rideId should be invalid", !invalidRide.isValid())
+    }
+
+    @Test
+    fun `test stale rider detection and connection status transitions`() {
+        val now = System.currentTimeMillis()
+        val freshRider = RiderMember(
+            id = "rider_fresh",
+            name = "Rohan",
+            motorcycleModel = "Interceptor 650",
+            status = MemberStatus.RIDING,
+            connectionStatus = com.example.data.model.ConnectionStatus.CONNECTED,
+            location = LatLng(18.52, 73.85),
+            speedKmh = 50.0,
+            headingDeg = 90f,
+            lastUpdatedMs = now - 3000L // 3 seconds ago
+        )
+        assertTrue("Rider updated 3s ago is not stale", !freshRider.isStale(now, 25000L))
+
+        val staleRider = freshRider.copy(
+            lastUpdatedMs = now - 30000L, // 30 seconds ago
+            connectionStatus = com.example.data.model.ConnectionStatus.LOCATION_STALE
+        )
+        assertTrue("Rider updated 30s ago is stale", staleRider.isStale(now, 25000L))
+        assertEquals(com.example.data.model.ConnectionStatus.LOCATION_STALE, staleRider.connectionStatus)
+
+        val disconnectedRider = freshRider.copy(
+            lastUpdatedMs = now - 70000L, // 70 seconds ago
+            connectionStatus = com.example.data.model.ConnectionStatus.DISCONNECTED
+        )
+        assertEquals(com.example.data.model.ConnectionStatus.DISCONNECTED, disconnectedRider.connectionStatus)
+    }
+
+    @Test
     fun `test route geometry helpers`() {
         val p1 = LatLng(18.5204, 73.8567)
         val p2 = LatLng(18.6000, 73.7000)

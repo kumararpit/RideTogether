@@ -455,16 +455,27 @@ fun RideMapCanvas(
 
                 // Name & Status Pill
                 val labelText = if (rider.isCurrentUser) "${rider.name} (You)" else rider.name
-                val statusText = when (rider.status) {
-                    MemberStatus.EMERGENCY -> "🚨 SOS!"
-                    MemberStatus.STOPPED -> "Stopped"
-                    MemberStatus.RIDING -> "${rider.speedKmh.toInt()} km/h"
-                    MemberStatus.OFFLINE -> "Offline"
+                val bikeSuffix = if (rider.motorcycleModel.isNotBlank()) " [${rider.motorcycleModel}]" else ""
+                val statusText = when {
+                    rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_UNAVAILABLE -> "⚠️ No GPS"
+                    rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_STALE -> "⏳ Stale"
+                    rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED -> "🔌 Disconnected"
+                    rider.connectionStatus == com.example.data.model.ConnectionStatus.RECONNECTING -> "🔄 Reconnecting"
+                    rider.status == MemberStatus.EMERGENCY -> "🚨 SOS!"
+                    rider.status == MemberStatus.STOPPED -> "Stopped"
+                    rider.status == MemberStatus.RIDING -> "${rider.speedKmh.toInt()} km/h"
+                    rider.status == MemberStatus.OFFLINE -> "Offline"
+                    else -> "${rider.speedKmh.toInt()} km/h"
                 }
 
-                val fullTag = "$labelText • $statusText"
+                val fullTag = "$labelText$bikeSuffix • $statusText"
                 val tagStyle = TextStyle(
-                    color = if (isEmergency) StatusEmergencyRed else Color.White,
+                    color = when {
+                        isEmergency -> StatusEmergencyRed
+                        rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_STALE -> StatusStoppedAmber
+                        rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED -> Color(0xFF90A4AE)
+                        else -> Color.White
+                    },
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold
                 )

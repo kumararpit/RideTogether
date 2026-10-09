@@ -58,12 +58,15 @@ import com.example.ui.theme.SurfaceCard
 fun WelcomeScreen(
     currentName: String,
     onNameChange: (String) -> Unit,
+    currentMotorcycle: String = "",
+    onMotorcycleChange: (String) -> Unit = {},
     onCreateRideClick: () -> Unit,
     onJoinRideClick: () -> Unit,
     onSignOutClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var nameInput by remember { mutableStateOf(currentName) }
+    var bikeInput by remember { mutableStateOf(currentMotorcycle) }
 
     Surface(
         modifier = modifier
@@ -80,15 +83,15 @@ fun WelcomeScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 28.dp, vertical = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(24.dp)
+            verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             // Branding & Motorcycle Emblem
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(
                     modifier = Modifier
-                        .size(100.dp)
+                        .size(96.dp)
                         .clip(CircleShape)
                         .background(AmberPrimary.copy(alpha = 0.15f)),
                     contentAlignment = Alignment.Center
@@ -97,11 +100,11 @@ fun WelcomeScreen(
                         imageVector = Icons.Default.TwoWheeler,
                         contentDescription = "Motorcycle",
                         tint = AmberPrimary,
-                        modifier = Modifier.size(56.dp)
+                        modifier = Modifier.size(54.dp)
                     )
                 }
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
                 Text(
                     text = "RideTogether",
@@ -111,17 +114,17 @@ fun WelcomeScreen(
                     letterSpacing = (-0.5).sp
                 )
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
-                    text = "Keep your group together.",
+                    text = "Real-time group motorcycle tracking",
                     color = Color(0xFFB0BEC5),
-                    fontSize = 16.sp,
+                    fontSize = 15.sp,
                     textAlign = TextAlign.Center
                 )
             }
 
-            // Rider Name Field
+            // Rider Profile & Motorcycle Setup Card
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 color = SurfaceCard,
@@ -130,7 +133,7 @@ fun WelcomeScreen(
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "YOUR RIDER NAME",
+                        text = "RIDER IDENTITY",
                         color = AmberPrimary,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold
@@ -160,6 +163,42 @@ fun WelcomeScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("rider_name_input"),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = "MOTORCYCLE MODEL (OPTIONAL)",
+                        color = Color(0xFF90A4AE),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = bikeInput,
+                        onValueChange = {
+                            bikeInput = it
+                            onMotorcycleChange(it)
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.TwoWheeler,
+                                contentDescription = "Bike",
+                                tint = AmberLight
+                            )
+                        },
+                        placeholder = { Text("e.g. Triumph Tiger 900, Duke 390", color = Color(0xFF78909C)) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = SlateDark700,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("motorcycle_model_input"),
                         shape = RoundedCornerShape(12.dp)
                     )
                 }

@@ -35,9 +35,11 @@ enum class QuickMessageType(val label: String, val icon: String) {
 data class RiderMember(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
+    val motorcycleModel: String = "",
     val avatarColorHex: Long = 0xFFFF9800,
     val role: RideRole = RideRole.MEMBER,
     val status: MemberStatus = MemberStatus.RIDING,
+    val connectionStatus: ConnectionStatus = ConnectionStatus.CONNECTED,
     val location: LatLng,
     val speedKmh: Double = 0.0,
     val headingDeg: Float = 0f,
@@ -46,6 +48,10 @@ data class RiderMember(
     val isCurrentUser: Boolean = false,
     val batteryPct: Int = 85
 ) {
+    fun isStale(currentMs: Long = System.currentTimeMillis(), staleThresholdMs: Long = 25000L): Boolean {
+        return (currentMs - lastUpdatedMs) > staleThresholdMs
+    }
+
     fun getFormattedDistanceTo(other: LatLng): String {
         val distKm = location.distanceTo(other)
         return if (distKm < 1.0) {

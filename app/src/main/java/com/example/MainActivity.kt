@@ -97,6 +97,7 @@ class MainActivity : ComponentActivity() {
 fun RideTogetherApp(viewModel: RideViewModel) {
     val currentScreen by viewModel.currentScreen.collectAsState()
     val userName by viewModel.userName.collectAsState()
+    val motorcycleModel by viewModel.motorcycleModel.collectAsState()
     val ride by viewModel.currentRide.collectAsState()
     val members by viewModel.members.collectAsState()
     val joinError by viewModel.joinError.collectAsState()
@@ -107,6 +108,8 @@ fun RideTogetherApp(viewModel: RideViewModel) {
             WelcomeScreen(
                 currentName = userName,
                 onNameChange = { viewModel.setUserName(it) },
+                currentMotorcycle = motorcycleModel,
+                onMotorcycleChange = { viewModel.setMotorcycleModel(it) },
                 onCreateRideClick = { viewModel.navigateTo(AppScreen.CREATE_RIDE) },
                 onJoinRideClick = { viewModel.navigateTo(AppScreen.JOIN_RIDE) },
                 onSignOutClick = { viewModel.signOut(context) }
