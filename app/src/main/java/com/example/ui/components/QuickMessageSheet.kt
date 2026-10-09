@@ -103,11 +103,13 @@ fun QuickMessageSheet(
             // Quick message options per spec:
             // "I'm stopping", "Wait for me", "Slow down", "I'm okay", "Fuel stop", "Food stop", "Emergency"
             val options = listOf(
-                QuickMessageType.IM_STOPPING,
+                QuickMessageType.STOPPED,
+                QuickMessageType.NEED_FUEL,
+                QuickMessageType.NEED_HELP,
+                QuickMessageType.REGROUP,
                 QuickMessageType.WAIT_FOR_ME,
                 QuickMessageType.SLOW_DOWN,
                 QuickMessageType.IM_OKAY,
-                QuickMessageType.FUEL_STOP,
                 QuickMessageType.FOOD_STOP,
                 QuickMessageType.EMERGENCY
             )

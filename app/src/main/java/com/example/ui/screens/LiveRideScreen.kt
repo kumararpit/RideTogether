@@ -123,6 +123,7 @@ fun LiveRideScreen(
 
             // Alert banner if another rider triggered SOS
             if (isOtherRiderSos && activeSos != null) {
+                val isAcked = activeSos!!.acknowledgedBy.contains(currentUser?.id ?: "")
                 SosAlertBanner(
                     sosEvent = activeSos!!,
                     onViewLocation = { sos ->
@@ -130,14 +131,17 @@ fun LiveRideScreen(
                         if (target != null) {
                             viewModel.selectRider(target)
                         }
-                    }
+                    },
+                    onAcknowledge = { viewModel.acknowledgeSos(activeSos!!.id) },
+                    isAcknowledged = isAcked
                 )
             }
 
             // Banner if YOU have active SOS
             if (isMySosActive) {
                 ActiveSosBar(
-                    onResolve = { viewModel.resolveSos() }
+                    onResolve = { viewModel.resolveSos() },
+                    acknowledgedCount = activeSos?.acknowledgedBy?.size ?: 0
                 )
             }
 
@@ -206,7 +210,12 @@ fun LiveRideScreen(
                                 }
                             }
                             val updateAgoSec = ((System.currentTimeMillis() - rider.lastUpdatedMs) / 1000).coerceAtLeast(0)
-                            val updateText = if (updateAgoSec < 5) "Live now" else "${updateAgoSec}s ago"
+                            val updateText = when {
+                                rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED -> "Signal lost"
+                                rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_STALE || updateAgoSec > 25 -> "${updateAgoSec}s ago (stale)"
+                                updateAgoSec < 5 -> "Live now"
+                                else -> "${updateAgoSec}s ago"
+                            }
                             Text(
                                 text = if (rider.isCurrentUser) "Current device • $updateText" else "Distance: $distText • $updateText",
                                 color = Color(0xFFCFD8DC),
@@ -247,7 +256,7 @@ fun LiveRideScreen(
             )
 
             // Primary Bottom Action Bar:
-            // [ 👥 Riders ] [ 💬 Message ] [ 🚨 SOS ]
+            // [ 👥 Riders ] [ 💬 Chat ] [ 🚨 SOS ]
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -259,8 +268,8 @@ fun LiveRideScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .navigationBarsPadding()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // 👥 Riders Button
@@ -268,7 +277,7 @@ fun LiveRideScreen(
                         onClick = { viewModel.openRidersSheet(true) },
                         modifier = Modifier
                             .weight(1f)
-                            .height(56.dp)
+                            .height(54.dp)
                             .testTag("open_riders_button"),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = SlateDark800,
@@ -280,22 +289,23 @@ fun LiveRideScreen(
                             imageVector = Icons.Default.Group,
                             contentDescription = "Riders",
                             tint = AmberPrimary,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(19.dp)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Riders (${members.size})",
+                            text = "Riders",
                             fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
                         )
                     }
 
-                    // 💬 Quick Message Button
+                    // 💬 Chat Button
                     Button(
                         onClick = { viewModel.openQuickMessageSheet(true) },
                         modifier = Modifier
                             .weight(1f)
-                            .height(56.dp)
+                            .height(54.dp)
                             .testTag("open_message_button"),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = SlateDark800,
@@ -305,15 +315,16 @@ fun LiveRideScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Chat,
-                            contentDescription = "Message",
+                            contentDescription = "Chat",
                             tint = AmberPrimary,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(19.dp)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Message",
+                            text = "Chat",
                             fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
                         )
                     }
 
@@ -321,8 +332,8 @@ fun LiveRideScreen(
                     Button(
                         onClick = { viewModel.openSosConfirmDialog(true) },
                         modifier = Modifier
-                            .weight(1.1f)
-                            .height(56.dp)
+                            .weight(1.05f)
+                            .height(54.dp)
                             .testTag("trigger_sos_button"),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = StatusEmergencyRed,
@@ -333,13 +344,14 @@ fun LiveRideScreen(
                         Icon(
                             imageVector = Icons.Default.Warning,
                             contentDescription = "SOS",
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier.size(20.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "🚨 SOS",
+                            text = "SOS",
                             fontSize = 15.sp,
-                            fontWeight = FontWeight.Black
+                            fontWeight = FontWeight.Black,
+                            maxLines = 1
                         )
                     }
                 }

@@ -22,8 +22,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.GroupAdd
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.TwoWheeler
+import com.example.data.db.CompletedRideEntity
+import com.example.ui.components.RideHistorySheet
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -63,10 +66,14 @@ fun WelcomeScreen(
     onCreateRideClick: () -> Unit,
     onJoinRideClick: () -> Unit,
     onSignOutClick: (() -> Unit)? = null,
+    isSignedIn: Boolean = false,
+    userEmail: String? = null,
+    pastRides: List<CompletedRideEntity> = emptyList(),
     modifier: Modifier = Modifier
 ) {
     var nameInput by remember { mutableStateOf(currentName) }
     var bikeInput by remember { mutableStateOf(currentMotorcycle) }
+    var showHistorySheet by remember { mutableStateOf(false) }
 
     Surface(
         modifier = modifier
@@ -250,9 +257,36 @@ fun WelcomeScreen(
                     )
                 }
 
+                if (pastRides.isNotEmpty()) {
+                    androidx.compose.material3.TextButton(
+                        onClick = { showHistorySheet = true },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("ride_history_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.History,
+                            contentDescription = null,
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "View Ride History (${pastRides.size})",
+                            color = AmberPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
                 Text(
-                    text = "Live GPS • Stop Detection • Quick Chat • SOS",
-                    color = Color(0xFF78909C),
+                    text = if (isSignedIn) {
+                        "Signed in: ${userEmail ?: currentName} • Cloud Sync Enabled"
+                    } else {
+                        "Guest Mode • Sign in required when creating or joining rides"
+                    },
+                    color = if (isSignedIn) AmberPrimary else Color(0xFF78909C),
                     fontSize = 12.sp,
                     textAlign = TextAlign.Center,
                     modifier = Modifier
@@ -260,7 +294,7 @@ fun WelcomeScreen(
                         .padding(top = 4.dp)
                 )
 
-                if (onSignOutClick != null) {
+                if (isSignedIn && onSignOutClick != null) {
                     androidx.compose.material3.TextButton(
                         onClick = onSignOutClick,
                         modifier = Modifier
@@ -275,6 +309,13 @@ fun WelcomeScreen(
                     }
                 }
             }
+        }
+
+        if (showHistorySheet) {
+            RideHistorySheet(
+                rides = pastRides,
+                onDismiss = { showHistorySheet = false }
+            )
         }
     }
 }

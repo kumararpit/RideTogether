@@ -21,17 +21,26 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.tasks.await
 
 class AuthRepository(
-    private val auth: FirebaseAuth = FirebaseAuth.getInstance()
+    private val authProvider: () -> FirebaseAuth = { FirebaseAuth.getInstance() }
 ) {
+    val auth: FirebaseAuth?
+        get() = try { authProvider() } catch (e: Exception) { null }
+
     val currentUser: FirebaseUser?
-        get() = auth.currentUser
+        get() = auth?.currentUser
 
     fun authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
-        val listener = FirebaseAuth.AuthStateListener { fbAuth ->
-            trySend(fbAuth.currentUser)
+        val fbAuth = auth
+        if (fbAuth == null) {
+            trySend(null)
+            awaitClose { }
+            return@callbackFlow
         }
-        auth.addAuthStateListener(listener)
-        awaitClose { auth.removeAuthStateListener(listener) }
+        val listener = FirebaseAuth.AuthStateListener { fb ->
+            trySend(fb.currentUser)
+        }
+        fbAuth.addAuthStateListener(listener)
+        awaitClose { fbAuth.removeAuthStateListener(listener) }
     }
 
     suspend fun signInWithGoogle(context: Context): Result<FirebaseUser> {
@@ -60,7 +69,8 @@ class AuthRepository(
             ) {
                 val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
                 val authCredential = GoogleAuthProvider.getCredential(googleIdTokenCredential.idToken, null)
-                val authResult = auth.signInWithCredential(authCredential).await()
+                val fbAuth = auth ?: return Result.failure(IllegalStateException("Firebase Auth service unavailable"))
+                val authResult = fbAuth.signInWithCredential(authCredential).await()
                 val user = authResult.user ?: error("FirebaseUser is null after Google sign-in")
                 Result.success(user)
             } else {
@@ -85,7 +95,11 @@ class AuthRepository(
         } catch (e: Exception) {
             Log.w("AuthRepository", "Error clearing credential state: ${e.message}")
         }
-        auth.signOut()
+        try {
+            auth?.signOut()
+        } catch (e: Exception) {
+            Log.w("AuthRepository", "Error during FirebaseAuth signOut: ${e.message}")
+        }
     }
 
     /**

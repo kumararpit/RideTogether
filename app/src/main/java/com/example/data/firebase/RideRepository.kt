@@ -47,12 +47,16 @@ class RideRepository(
     // Secondary constructor for convenience resolving custom database id
     constructor(context: Context, locationTracker: LocationTracker) : this(
         locationTracker = locationTracker,
-        firestore = FirebaseFirestore.getInstance(
-            context.applicationContext.getString(R.string.firestore_database_id)
-        )
+        firestore = try {
+            val dbId = context.applicationContext.getString(R.string.firestore_database_id)
+            if (dbId.isNotBlank() && dbId != "(default)") FirebaseFirestore.getInstance(dbId) else FirebaseFirestore.getInstance()
+        } catch (_: Exception) {
+            FirebaseFirestore.getInstance()
+        }
     )
 
-    private val auth = FirebaseAuth.getInstance()
+    private val auth: FirebaseAuth?
+        get() = try { FirebaseAuth.getInstance() } catch (_: Exception) { null }
     private val repositoryScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     private val _currentRide = MutableStateFlow<Ride?>(null)
@@ -78,9 +82,12 @@ class RideRepository(
     private var messagesListener: ListenerRegistration? = null
     private var sosListener: ListenerRegistration? = null
 
-    private var currentUserId: String = auth.currentUser?.uid ?: "rider_unknown"
-    private var currentUserName: String = auth.currentUser?.displayName ?: "Rider"
+    private var currentUserId: String = auth?.currentUser?.uid ?: "rider_unknown"
+    private var currentUserName: String = auth?.currentUser?.displayName ?: "Rider"
     private var currentMotorcycleModel: String = ""
+    private var localSequenceNumber: Long = 0L
+    private val riderLatestSequence = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private var lastRecordedGpsPoint: LatLng? = null
 
     init {
         // Collect real location updates and sync to active ride in Firestore
@@ -112,8 +119,8 @@ class RideRepository(
                     "id" to id,
                     "name" to name,
                     "motorcycleModel" to motorcycleModel,
-                    "email" to (auth.currentUser?.email ?: ""),
-                    "photoUrl" to (auth.currentUser?.photoUrl?.toString() ?: ""),
+                    "email" to (auth?.currentUser?.email ?: ""),
+                    "photoUrl" to (auth?.currentUser?.photoUrl?.toString() ?: ""),
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -169,8 +176,24 @@ class RideRepository(
         }
         _currentRiderStatus.value = finalStatus
 
-        val activeRideId = _currentRide.value?.id ?: return
-        val currentUid = auth.currentUser?.uid ?: return
+        val activeRide = _currentRide.value
+        val activeRideId = activeRide?.id ?: return
+        val currentUid = auth?.currentUser?.uid ?: return
+
+        // Accumulate actual recorded distance if ride is ACTIVE and GPS accuracy is good (< 30m)
+        if (activeRide.status == RideStatus.ACTIVE && loc.accuracyMeters <= 30f) {
+            val prev = lastRecordedGpsPoint
+            if (prev != null) {
+                val deltaMeters = prev.distanceTo(loc.latLng) * 1000.0
+                if (deltaMeters in 3.0..300.0) { // filter micro-jitter and teleport jumps
+                    val newActual = activeRide.actualRecordedDistanceMeters + deltaMeters
+                    _currentRide.value = activeRide.copy(actualRecordedDistanceMeters = newActual)
+                }
+            }
+            lastRecordedGpsPoint = loc.latLng
+        }
+
+        val seq = ++localSequenceNumber
 
         // Sync rider location to Firestore subcollection /rides/{rideId}/riders/{riderId}
         repositoryScope.launch {
@@ -187,6 +210,8 @@ class RideRepository(
                     "longitude" to loc.latLng.longitude,
                     "speedKmh" to loc.speedKmh,
                     "headingDeg" to loc.headingDeg,
+                    "accuracyMeters" to loc.accuracyMeters,
+                    "sequenceNumber" to seq,
                     "batteryPct" to 90,
                     "stoppedDurationSec" to stoppedSec,
                     "lastUpdatedMs" to loc.timestampMs,
@@ -209,7 +234,7 @@ class RideRepository(
         startLoc: LatLng,
         destLoc: LatLng
     ): Ride {
-        val uid = auth.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: error("User must be signed in to create a ride")
+        val uid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: error("User must be signed in to create a ride")
         val rideId = UUID.randomUUID().toString()
         val inviteCode = generateInviteCode()
 
@@ -327,7 +352,7 @@ class RideRepository(
     }
 
     suspend fun joinRide(inviteCode: String, userLoc: LatLng): Result<Ride> {
-        val uid = auth.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return Result.failure(IllegalStateException("Please sign in first"))
+        val uid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return Result.failure(IllegalStateException("Please sign in first"))
         val code = inviteCode.trim().uppercase()
 
         return try {
@@ -401,7 +426,7 @@ class RideRepository(
 
     private fun listenToRide(rideId: String) {
         detachListeners()
-        val currentUid = auth.currentUser?.uid ?: ""
+        val currentUid = auth?.currentUser?.uid ?: ""
 
         // 1. Listen to Ride metadata
         val rideRef = firestore.collection("rides").document(rideId)
@@ -505,13 +530,16 @@ class RideRepository(
                     val lng = activeSosDoc.getDouble("longitude") ?: 0.0
                     val ts = activeSosDoc.getLong("timestampMs") ?: System.currentTimeMillis()
 
+                    val acks = (activeSosDoc.get("acknowledgedBy") as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
+
                     _activeSos.value = SosEvent(
                         id = activeSosDoc.id,
                         riderId = riderId,
                         riderName = riderName,
                         location = LatLng(lat, lng),
                         timestampMs = ts,
-                        isResolved = false
+                        isResolved = false,
+                        acknowledgedBy = acks
                     )
                 } else {
                     _activeSos.value = null
@@ -535,6 +563,17 @@ class RideRepository(
         val stoppedSec = doc.getLong("stoppedDurationSec") ?: 0L
         val lastUpdated = doc.getLong("lastUpdatedMs") ?: System.currentTimeMillis()
         val battery = (doc.getLong("batteryPct") ?: 90L).toInt()
+        val seq = doc.getLong("sequenceNumber") ?: 0L
+        val accuracy = (doc.getDouble("accuracyMeters") ?: 10.0).toFloat()
+
+        // Handle out-of-order delayed packets
+        val prevSeq = riderLatestSequence[id] ?: -1L
+        if (seq > 0 && seq < prevSeq) {
+            val existing = _members.value.find { it.id == id }
+            if (existing != null) return existing
+        } else {
+            riderLatestSequence[id] = seq
+        }
 
         val isCurrentUser = (id == currentUid)
 
@@ -570,6 +609,8 @@ class RideRepository(
             location = LatLng(lat, lng),
             speedKmh = speedKmh,
             headingDeg = headingDeg,
+            accuracyMeters = accuracy,
+            sequenceNumber = seq,
             lastUpdatedMs = lastUpdated,
             stoppedDurationSec = stoppedSec,
             isCurrentUser = isCurrentUser,
@@ -680,7 +721,7 @@ class RideRepository(
 
     fun leaveRide() {
         val activeRideId = _currentRide.value?.id
-        val currentUid = auth.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() }
+        val currentUid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() }
 
         if (activeRideId != null && currentUid != null) {
             repositoryScope.launch {
@@ -706,7 +747,7 @@ class RideRepository(
 
     fun sendQuickMessage(type: QuickMessageType) {
         val activeRideId = _currentRide.value?.id ?: return
-        val currentUid = auth.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return
+        val currentUid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return
 
         val msgId = UUID.randomUUID().toString()
         val msg = QuickMessage(
@@ -743,7 +784,7 @@ class RideRepository(
 
     fun triggerSos() {
         val activeRideId = _currentRide.value?.id ?: return
-        val currentUid = auth.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return
+        val currentUid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return
 
         val currentUserMember = _members.value.find { it.isCurrentUser }
         val loc = currentUserMember?.location ?: locationTracker.currentLocation.value?.latLng ?: LatLng(18.5204, 73.8567)
@@ -779,6 +820,28 @@ class RideRepository(
                     .await()
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.CREATE, "rides/$activeRideId/sos/$sosId")
+            }
+        }
+    }
+
+    fun acknowledgeSos(sosId: String) {
+        val activeRideId = _currentRide.value?.id ?: return
+        val currentUid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return
+
+        // Update local state immediately
+        val currentSos = _activeSos.value
+        if (currentSos != null && currentSos.id == sosId && !currentSos.acknowledgedBy.contains(currentUid)) {
+            _activeSos.value = currentSos.copy(acknowledgedBy = currentSos.acknowledgedBy + currentUid)
+        }
+
+        repositoryScope.launch {
+            try {
+                firestore.collection("rides").document(activeRideId)
+                    .collection("sos").document(sosId)
+                    .update("acknowledgedBy", FieldValue.arrayUnion(currentUid))
+                    .await()
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/sos/$sosId")
             }
         }
     }

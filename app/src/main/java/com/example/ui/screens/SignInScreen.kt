@@ -47,6 +47,7 @@ fun SignInScreen(
     isLoading: Boolean,
     errorMessage: String?,
     onSignInClick: () -> Unit,
+    onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -196,6 +197,22 @@ fun SignInScreen(
                                     text = "Sign in with Google",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 15.sp
+                                )
+                            }
+                        }
+
+                        if (onBack != null) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            androidx.compose.material3.TextButton(
+                                onClick = onBack,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("cancel_sign_in_button")
+                            ) {
+                                Text(
+                                    text = "Cancel & Return to Home",
+                                    color = Color(0xFF90A4AE),
+                                    fontSize = 14.sp
                                 )
                             }
                         }

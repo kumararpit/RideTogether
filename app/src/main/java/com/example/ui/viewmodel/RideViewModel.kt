@@ -30,6 +30,7 @@ import java.util.Locale
 
 enum class AppScreen {
     WELCOME,
+    SIGN_IN,
     CREATE_RIDE,
     JOIN_RIDE,
     RIDE_LOBBY,
@@ -43,15 +44,28 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     val osrmRoutingService = OsrmRoutingService()
     val placeSearchService = PlaceSearchService()
 
-    private val db = run {
-        val databaseId = BuildConfig.FIRESTORE_DATABASE_ID.ifBlank {
+    private val db: FirebaseFirestore = run {
+        try {
+            val databaseId = BuildConfig.FIRESTORE_DATABASE_ID.ifBlank {
+                try {
+                    application.getString(R.string.firestore_database_id)
+                } catch (e: Exception) {
+                    "ai-studio-android-ridetoge-ff1218fd-f019-458f-ad73-f84981c73561"
+                }
+            }
+            if (databaseId.isNotBlank() && databaseId != "(default)") {
+                FirebaseFirestore.getInstance(databaseId)
+            } else {
+                FirebaseFirestore.getInstance()
+            }
+        } catch (_: Exception) {
             try {
-                application.getString(R.string.firestore_database_id)
-            } catch (e: Exception) {
-                "ai-studio-android-ridetoge-ff1218fd-f019-458f-ad73-f84981c73561"
+                FirebaseFirestore.getInstance()
+            } catch (_: Exception) {
+                // If offline / uninitialized in test, fallback or dummy
+                FirebaseFirestore.getInstance()
             }
         }
-        FirebaseFirestore.getInstance(databaseId)
     }
 
     val authRepository = AuthRepository()
@@ -191,8 +205,8 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
 
         val closestIdx = RouteGeometry.findClosestPointIndex(userLoc, route)
         if (closestIdx >= 0) {
-            val distToRouteM = userLoc.distanceTo(route[closestIdx]) * 1000.0
-            _isOffRoute.value = distToRouteM > 250.0
+            val distToRouteM = RouteGeometry.distanceToPolylineMeters(userLoc, route)
+            _isOffRoute.value = distToRouteM > 120.0
 
             val remDistMeters = RouteGeometry.remainingDistanceMeters(closestIdx, route)
             _remainingDistanceMeters.value = remDistMeters
@@ -362,7 +376,39 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         _currentScreen.value = AppScreen.LIVE_RIDE
     }
 
+    val completedRides = com.example.data.db.RideDatabase.getInstance(getApplication<Application>())
+        .completedRideDao()
+        .getAllCompletedRides()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
     fun endRide() {
+        val ride = currentRide.value
+        val memberList = members.value
+        if (ride != null) {
+            val distMeters = if (ride.actualRecordedDistanceMeters > 0) ride.actualRecordedDistanceMeters else ride.totalDistanceMeters
+            val durationSec = ride.totalDurationSeconds
+            val avgSpeed = if (durationSec > 60 && distMeters > 500) ((distMeters / 1000.0) / (durationSec / 3600.0)) else 0.0
+
+            viewModelScope.launch {
+                try {
+                    val entity = com.example.data.db.CompletedRideEntity(
+                        id = ride.id,
+                        rideName = ride.name,
+                        startLocationName = ride.startLocationName,
+                        destinationName = ride.destinationName,
+                        distanceMeters = distMeters,
+                        durationSeconds = durationSec,
+                        avgSpeedKmh = avgSpeed,
+                        riderCount = memberList.size,
+                        completedAtMs = System.currentTimeMillis(),
+                        hadEmergency = memberList.any { it.status == MemberStatus.EMERGENCY }
+                    )
+                    com.example.data.db.RideDatabase.getInstance(getApplication()).completedRideDao().insertRide(entity)
+                } catch (e: Exception) {
+                    android.util.Log.w("RideViewModel", "Error saving completed ride to Room: ${e.message}")
+                }
+            }
+        }
         repository.endRide()
         _currentScreen.value = AppScreen.RIDE_SUMMARY
     }
@@ -379,6 +425,10 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
 
     fun triggerSos() {
         repository.triggerSos()
+    }
+
+    fun acknowledgeSos(sosId: String) {
+        repository.acknowledgeSos(sosId)
     }
 
     fun resolveSos() {

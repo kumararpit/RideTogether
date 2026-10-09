@@ -67,7 +67,7 @@ fun RideLobbyScreen(
 ) {
     val context = LocalContext.current
     val currentUser = members.find { it.isCurrentUser }
-    val isLeader = currentUser?.role == RideRole.LEADER || ride.leaderId == currentUser?.id || true
+    val isLeader = currentUser?.role == RideRole.LEADER || ride.leaderId == currentUser?.id
 
     Surface(
         modifier = modifier
@@ -172,7 +172,14 @@ fun RideLobbyScreen(
 
                         OutlinedButton(
                             onClick = {
-                                Toast.makeText(context, "Share: Join my motorcycle ride on RideTogether with code ${ride.inviteCode}!", Toast.LENGTH_LONG).show()
+                                val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(
+                                        android.content.Intent.EXTRA_TEXT,
+                                        "Join my motorcycle ride on RideTogether!\nRide: ${ride.name}\nInvite Code: ${ride.inviteCode}"
+                                    )
+                                }
+                                context.startActivity(android.content.Intent.createChooser(shareIntent, "Share Ride Invite Code"))
                             },
                             modifier = Modifier
                                 .weight(1f)
@@ -225,8 +232,9 @@ fun RideLobbyScreen(
                             )
                             val distStr = if (ride.totalDistanceMeters > 0) String.format(java.util.Locale.getDefault(), "%.1f km", ride.totalDistanceMeters / 1000.0) else "Live Route"
                             val durStr = if (ride.totalDurationSeconds > 0) "${(ride.totalDurationSeconds / 60.0).toInt()} min" else "Turn-by-turn"
+                            val riderPlural = if (members.size == 1) "1 rider" else "${members.size} riders"
                             Text(
-                                text = "$distStr • $durStr • ${members.size} rider(s) on radar",
+                                text = "$distStr • $durStr • $riderPlural on radar",
                                 color = AmberPrimary,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold

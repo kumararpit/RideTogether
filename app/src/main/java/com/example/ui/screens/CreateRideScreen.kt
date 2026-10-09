@@ -104,8 +104,8 @@ fun CreateRideScreen(
     var destDebounceJob by remember { mutableStateOf<Job?>(null) }
 
     // Route estimate preview
-    var routeDistanceText by remember { mutableStateOf("65.8 km") }
-    var routeDurationText by remember { mutableStateOf("1 hr 15 min") }
+    var routeDistanceText by remember { mutableStateOf("Calculating...") }
+    var routeDurationText by remember { mutableStateOf("Estimating...") }
     var isEstimatingRoute by remember { mutableStateOf(false) }
 
     // Recalculate route summary when coordinates change
@@ -116,7 +116,12 @@ fun CreateRideScreen(
                 val result = routingService.fetchRoute(startCoords!!, destCoords!!)
                 routeDistanceText = result.formattedDistance
                 routeDurationText = result.formattedDuration
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+                val distKm = startCoords!!.distanceTo(destCoords!!)
+                routeDistanceText = String.format(java.util.Locale.getDefault(), "%.1f km (est)", distKm)
+                val mins = (distKm / 50.0 * 60).toInt().coerceAtLeast(1)
+                routeDurationText = "${mins} min"
+            }
             isEstimatingRoute = false
         }
     }

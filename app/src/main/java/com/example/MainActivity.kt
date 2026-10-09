@@ -16,6 +16,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
@@ -73,20 +76,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = SlateDark900
                 ) {
-                    val currentUser by viewModel.currentUser.collectAsState()
-                    val isAuthLoading by viewModel.isAuthLoading.collectAsState()
-                    val authError by viewModel.authError.collectAsState()
-                    val context = LocalContext.current
-
-                    if (currentUser == null) {
-                        SignInScreen(
-                            isLoading = isAuthLoading,
-                            errorMessage = authError,
-                            onSignInClick = { viewModel.signInWithGoogle(context) }
-                        )
-                    } else {
-                        RideTogetherApp(viewModel = viewModel)
-                    }
+                    RideTogetherApp(viewModel = viewModel)
                 }
             }
         }
@@ -101,18 +91,63 @@ fun RideTogetherApp(viewModel: RideViewModel) {
     val ride by viewModel.currentRide.collectAsState()
     val members by viewModel.members.collectAsState()
     val joinError by viewModel.joinError.collectAsState()
+    val currentUser by viewModel.currentUser.collectAsState()
+    val isAuthLoading by viewModel.isAuthLoading.collectAsState()
+    val authError by viewModel.authError.collectAsState()
+    val context = LocalContext.current
+
+    var pendingScreen by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<AppScreen?>(null) }
+
+    LaunchedEffect(currentUser) {
+        if (currentUser != null && currentScreen == AppScreen.SIGN_IN && pendingScreen != null) {
+            val target = pendingScreen!!
+            pendingScreen = null
+            viewModel.navigateTo(target)
+        }
+    }
 
     when (currentScreen) {
         AppScreen.WELCOME -> {
-            val context = LocalContext.current
             WelcomeScreen(
                 currentName = userName,
                 onNameChange = { viewModel.setUserName(it) },
                 currentMotorcycle = motorcycleModel,
                 onMotorcycleChange = { viewModel.setMotorcycleModel(it) },
-                onCreateRideClick = { viewModel.navigateTo(AppScreen.CREATE_RIDE) },
-                onJoinRideClick = { viewModel.navigateTo(AppScreen.JOIN_RIDE) },
-                onSignOutClick = { viewModel.signOut(context) }
+                onCreateRideClick = {
+                    if (currentUser != null) {
+                        viewModel.navigateTo(AppScreen.CREATE_RIDE)
+                    } else {
+                        pendingScreen = AppScreen.CREATE_RIDE
+                        viewModel.navigateTo(AppScreen.SIGN_IN)
+                    }
+                },
+                onJoinRideClick = {
+                    if (currentUser != null) {
+                        viewModel.navigateTo(AppScreen.JOIN_RIDE)
+                    } else {
+                        pendingScreen = AppScreen.JOIN_RIDE
+                        viewModel.navigateTo(AppScreen.SIGN_IN)
+                    }
+                },
+                onSignOutClick = { viewModel.signOut(context) },
+                isSignedIn = (currentUser != null),
+                userEmail = currentUser?.email
+            )
+        }
+
+        AppScreen.SIGN_IN -> {
+            BackHandler {
+                pendingScreen = null
+                viewModel.navigateTo(AppScreen.WELCOME)
+            }
+            SignInScreen(
+                isLoading = isAuthLoading,
+                errorMessage = authError,
+                onSignInClick = { viewModel.signInWithGoogle(context) },
+                onBack = {
+                    pendingScreen = null
+                    viewModel.navigateTo(AppScreen.WELCOME)
+                }
             )
         }
 

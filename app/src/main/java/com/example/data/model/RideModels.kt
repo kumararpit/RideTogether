@@ -23,11 +23,13 @@ enum class RideRole {
 }
 
 enum class QuickMessageType(val label: String, val icon: String) {
-    IM_STOPPING("I'm stopping", "🛑"),
+    STOPPED("Stopped", "🛑"),
+    NEED_FUEL("Need fuel", "⛽"),
+    NEED_HELP("Need help", "🆘"),
+    REGROUP("Regroup", "🤝"),
     WAIT_FOR_ME("Wait for me", "⏳"),
     SLOW_DOWN("Slow down", "⚠️"),
     IM_OKAY("I'm okay", "👍"),
-    FUEL_STOP("Fuel stop", "⛽"),
     FOOD_STOP("Food stop", "🍔"),
     EMERGENCY("Emergency", "🚨")
 }
@@ -43,6 +45,8 @@ data class RiderMember(
     val location: LatLng,
     val speedKmh: Double = 0.0,
     val headingDeg: Float = 0f,
+    val accuracyMeters: Float = 10f,
+    val sequenceNumber: Long = 0L,
     val lastUpdatedMs: Long = System.currentTimeMillis(),
     val stoppedDurationSec: Long = 0,
     val isCurrentUser: Boolean = false,
@@ -57,14 +61,14 @@ data class RiderMember(
         return if (distKm < 1.0) {
             "${(distKm * 1000).toInt()} m"
         } else {
-            String.format("%.1f km", distKm)
+            String.format(java.util.Locale.getDefault(), "%.1f km", distKm)
         }
     }
 
     fun getRelativePositionDescription(userLoc: LatLng, userHeading: Float): String {
         if (isCurrentUser) return "You"
         val distKm = location.distanceTo(userLoc)
-        val formattedDist = if (distKm < 1.0) "${(distKm * 1000).toInt()} m" else String.format("%.1f km", distKm)
+        val formattedDist = if (distKm < 1.0) "${(distKm * 1000).toInt()} m" else String.format(java.util.Locale.getDefault(), "%.1f km", distKm)
         val bearing = userLoc.bearingTo(location)
         val diff = (bearing - userHeading + 360) % 360
         return when {
@@ -91,7 +95,8 @@ data class SosEvent(
     val riderName: String,
     val location: LatLng,
     val timestampMs: Long = System.currentTimeMillis(),
-    val isResolved: Boolean = false
+    val isResolved: Boolean = false,
+    val acknowledgedBy: List<String> = emptyList()
 )
 
 data class NavigationStep(
@@ -104,7 +109,7 @@ data class NavigationStep(
 ) {
     val formattedDistance: String
         get() = if (distanceMeters >= 1000) {
-            String.format("%.1f km", distanceMeters / 1000.0)
+            String.format(java.util.Locale.getDefault(), "%.1f km", distanceMeters / 1000.0)
         } else {
             "${kotlin.math.round(distanceMeters).toInt()} m"
         }
@@ -118,7 +123,7 @@ data class RouteResult(
 ) {
     val formattedDistance: String
         get() = if (totalDistanceMeters >= 1000) {
-            String.format("%.1f km", totalDistanceMeters / 1000.0)
+            String.format(java.util.Locale.getDefault(), "%.1f km", totalDistanceMeters / 1000.0)
         } else {
             "${kotlin.math.round(totalDistanceMeters).toInt()} m"
         }
@@ -151,5 +156,7 @@ data class Ride(
     val totalDistanceMeters: Double = 0.0,
     val totalDurationSeconds: Double = 0.0,
     val navigationSteps: List<NavigationStep> = emptyList(),
+    val actualRecordedDistanceMeters: Double = 0.0,
+    val elapsedDurationSeconds: Double = 0.0,
     val createdAtMs: Long = System.currentTimeMillis()
 )
