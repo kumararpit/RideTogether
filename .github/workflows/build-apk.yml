@@ -23,20 +23,18 @@ jobs:
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
+          distribution: temurin
           java-version: "21"
-          distribution: "temurin"
-          cache: "gradle"
+          cache: gradle
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
         with:
-          api-level: 36
-          build-tools: 36.0.0
+          packages: ""
 
-      - name: Install required Android SDK packages
+      - name: Install Android SDK packages
         run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
+          sdkmanager --install \
             "platform-tools" \
             "platforms;android-36" \
             "build-tools;36.0.0"
@@ -48,22 +46,24 @@ jobs:
         run: |
           if [ ! -f .env ]; then
             if [ -f .env.example ]; then
-              echo "Creating .env from .env.example..."
               cp .env.example .env
             else
-              echo "Creating empty .env..."
               touch .env
             fi
           fi
 
           if [ -f debug.keystore.base64 ]; then
-            echo "Decoding debug.keystore from debug.keystore.base64..."
             base64 -d debug.keystore.base64 > debug.keystore
           elif [ ! -f debug.keystore ]; then
-            echo "Generating debug.keystore..."
-            keytool -genkey -v -keystore debug.keystore -storepass android \
-              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
-              -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+            keytool -genkey -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
 
       - name: Run Unit Tests
@@ -74,21 +74,24 @@ jobs:
 
       - name: Verify and Locate Generated APK
         id: find-apk
+        shell: bash
         run: |
-          echo "Locating generated APK files..."
-          APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" -type f | head -n 1)
+          APK_PATH=$(find app/build/outputs/apk/debug \
+            -type f -name "*.apk" -print -quit)
+
           if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
-            echo "Error: No APK file was found in app/build/outputs/apk/debug"
+            echo "Error: No debug APK found."
             find app/build/outputs -type f || true
             exit 1
           fi
-          echo "Found APK at: $APK_PATH"
+
+          echo "Found APK: $APK_PATH"
           echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: RideTogether-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: ${{ steps.find-apk.outputs.apk_path }}
           retention-days: 14
           if-no-files-found: error
