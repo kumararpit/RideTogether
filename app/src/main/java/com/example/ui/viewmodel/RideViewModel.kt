@@ -3,29 +3,29 @@ package com.example.ui.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.R
+import com.example.data.firebase.AuthRepository
+import com.example.data.firebase.RideRepository
 import com.example.data.location.LocationTracker
 import com.example.data.location.OsrmRoutingService
 import com.example.data.location.PlaceSearchService
 import com.example.data.location.RouteGeometry
 import com.example.data.model.LatLng
 import com.example.data.model.MemberStatus
-import com.example.data.model.NavigationStep
-import com.example.data.model.QuickMessage
 import com.example.data.model.QuickMessageType
 import com.example.data.model.Ride
 import com.example.data.model.RiderMember
 import com.example.data.model.RouteResult
-import com.example.data.model.SosEvent
-import com.example.data.repository.RideRepository
+import com.google.firebase.auth.FirebaseUser
+import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
-import java.util.UUID
 
 enum class AppScreen {
     WELCOME,
@@ -38,35 +38,53 @@ enum class AppScreen {
 
 class RideViewModel(application: Application) : AndroidViewModel(application) {
 
-    val locationTracker = LocationTracker(application.applicationContext)
-    val repository = RideRepository(locationTracker)
-    val placeSearchService = PlaceSearchService()
+    val locationTracker = LocationTracker(application)
     val osrmRoutingService = OsrmRoutingService()
+    val placeSearchService = PlaceSearchService()
 
-    // Navigation Screen State
+    private val db = FirebaseFirestore.getInstance(
+        application.getString(R.string.firestore_database_id)
+    )
+
+    val authRepository = AuthRepository()
+    val repository = RideRepository(
+        locationTracker = locationTracker,
+        firestore = db
+    )
+
+    val currentUser: StateFlow<FirebaseUser?> = authRepository.authStateFlow()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, authRepository.currentUser)
+
+    private val _isAuthLoading = MutableStateFlow(false)
+    val isAuthLoading: StateFlow<Boolean> = _isAuthLoading.asStateFlow()
+
+    private val _authError = MutableStateFlow<String?>(null)
+    val authError: StateFlow<String?> = _authError.asStateFlow()
+
+    // Navigation and screen state
     private val _currentScreen = MutableStateFlow(AppScreen.WELCOME)
     val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
 
-    // Current User Profile
-    private val _userName = MutableStateFlow("Arpit")
-    val userName: StateFlow<String> = _userName.asStateFlow()
-
-    private val _userId = MutableStateFlow("arpit_${UUID.randomUUID().toString().take(4)}")
+    private val _userId = MutableStateFlow(authRepository.currentUser?.uid ?: "user_rider")
     val userId: StateFlow<String> = _userId.asStateFlow()
 
-    // State from repository
+    private val _userName = MutableStateFlow(authRepository.currentUser?.displayName ?: "Rider")
+    val userName: StateFlow<String> = _userName.asStateFlow()
+
+    // Exposed repository flows
     val currentRide: StateFlow<Ride?> = repository.currentRide
     val members: StateFlow<List<RiderMember>> = repository.members
-    val activeSos: StateFlow<SosEvent?> = repository.activeSos
-    val recentMessage: StateFlow<QuickMessage?> = repository.recentMessage
-    val currentRiderStatus: StateFlow<MemberStatus> = repository.currentRiderStatus
+    val activeSos = repository.activeSos
+    val recentMessage = repository.recentMessage
+    val currentRiderStatus = repository.currentRiderStatus
+    val joinError = repository.joinError
 
-    // UI Dialog & Sheet states
-    private val _showRidersSheet = MutableStateFlow(false)
-    val showRidersSheet: StateFlow<Boolean> = _showRidersSheet.asStateFlow()
-
+    // Dialogs / Sheets
     private val _showQuickMessageSheet = MutableStateFlow(false)
     val showQuickMessageSheet: StateFlow<Boolean> = _showQuickMessageSheet.asStateFlow()
+
+    private val _showRiderListSheet = MutableStateFlow(false)
+    val showRiderListSheet: StateFlow<Boolean> = _showRiderListSheet.asStateFlow()
 
     private val _showSosConfirmDialog = MutableStateFlow(false)
     val showSosConfirmDialog: StateFlow<Boolean> = _showSosConfirmDialog.asStateFlow()
@@ -100,7 +118,18 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     val isFollowRiderMode: StateFlow<Boolean> = _isFollowRiderMode.asStateFlow()
 
     init {
-        repository.initCurrentUser(_userId.value, _userName.value)
+        // Sync user state on auth change
+        viewModelScope.launch {
+            currentUser.collectLatest { fbUser ->
+                if (fbUser != null) {
+                    _userId.value = fbUser.uid
+                    val name = fbUser.displayName?.ifBlank { "Rider" } ?: "Rider"
+                    _userName.value = name
+                    repository.initCurrentUser(fbUser.uid, name)
+                }
+            }
+        }
+
         viewModelScope.launch {
             repository.members.collectLatest { list ->
                 val selId = _selectedRider.value?.id
@@ -120,53 +149,69 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun updateNavigationProgress(userLoc: LatLng, speedKmh: Double) {
-        val route = _routeResult.value?.coordinates ?: currentRide.value?.routePoints
-        if (route.isNullOrEmpty()) return
-
-        // 1. Closest point on route
-        val closestIdx = RouteGeometry.findClosestPointIndex(userLoc, route)
-        if (closestIdx >= 0) {
-            val distToRouteM = userLoc.distanceTo(route[closestIdx]) * 1000.0
-
-            // Off-route check (> 250 meters away from route line)
-            _isOffRoute.value = distToRouteM > 250.0
-
-            // Remaining distance along route
-            val remDistMeters = RouteGeometry.remainingDistanceMeters(closestIdx, route)
-            _remainingDistanceMeters.value = remDistMeters
-
-            // Remaining duration & ETA calculation
-            val effectiveSpeedMps = if (speedKmh > 10.0) {
-                (speedKmh * 1000.0) / 3600.0
-            } else {
-                // Average urban/highway motorcycle cruising speed (50 km/h = 13.9 m/s)
-                13.9
-            }
-            val estDurationSec = if (effectiveSpeedMps > 0) remDistMeters / effectiveSpeedMps else 0.0
-            _remainingDurationSeconds.value = estDurationSec
-
-            // Step advancement: advance step when rider approaches next maneuver
-            val steps = _routeResult.value?.steps ?: currentRide.value?.navigationSteps ?: emptyList()
-            if (steps.isNotEmpty() && _currentStepIndex.value < steps.size - 1) {
-                // If progress along route has moved past a fraction of the total points
-                val progressFraction = closestIdx.toDouble() / route.size.toDouble()
-                val targetStepIndex = (progressFraction * steps.size).toInt().coerceIn(0, steps.size - 1)
-                if (targetStepIndex > _currentStepIndex.value) {
-                    _currentStepIndex.value = targetStepIndex
-                }
+    fun signInWithGoogle(context: android.content.Context) {
+        viewModelScope.launch {
+            _isAuthLoading.value = true
+            _authError.value = null
+            val result = authRepository.signInWithGoogle(context)
+            _isAuthLoading.value = false
+            result.onSuccess { user ->
+                _userId.value = user.uid
+                val name = user.displayName ?: "Rider"
+                _userName.value = name
+                repository.initCurrentUser(user.uid, name)
+            }.onFailure { ex ->
+                _authError.value = ex.localizedMessage ?: "Sign-in cancelled or failed"
             }
         }
     }
 
-    fun navigateTo(screen: AppScreen) {
-        _currentScreen.value = screen
+    fun signOut(context: android.content.Context) {
+        viewModelScope.launch {
+            authRepository.signOut(context)
+            leaveRide()
+            _currentScreen.value = AppScreen.WELCOME
+        }
     }
 
-    fun setUserName(name: String) {
-        if (name.isNotBlank()) {
-            _userName.value = name.trim()
-            repository.initCurrentUser(_userId.value, _userName.value)
+    private fun updateNavigationProgress(userLoc: LatLng, speedKmh: Double) {
+        val route = _routeResult.value?.coordinates ?: currentRide.value?.routePoints
+        if (route.isNullOrEmpty()) return
+
+        val closestIdx = RouteGeometry.findClosestPointIndex(userLoc, route)
+        if (closestIdx >= 0) {
+            val distToRouteM = userLoc.distanceTo(route[closestIdx]) * 1000.0
+            _isOffRoute.value = distToRouteM > 250.0
+
+            val remDistMeters = RouteGeometry.remainingDistanceMeters(closestIdx, route)
+            _remainingDistanceMeters.value = remDistMeters
+
+            val effectiveSpeedMps = if (speedKmh > 10.0) {
+                (speedKmh * 1000.0) / 3600.0
+            } else {
+                35.0 * 1000.0 / 3600.0
+            }
+            _remainingDurationSeconds.value = if (effectiveSpeedMps > 0) {
+                remDistMeters / effectiveSpeedMps
+            } else {
+                0.0
+            }
+
+            val steps = _routeResult.value?.steps ?: currentRide.value?.navigationSteps
+            if (!steps.isNullOrEmpty()) {
+                val totalMeters = _routeResult.value?.totalDistanceMeters ?: remDistMeters
+                val traversedMeters = (totalMeters - remDistMeters).coerceAtLeast(0.0)
+                var accumulated = 0.0
+                var stepIdx = 0
+                for (i in steps.indices) {
+                    accumulated += steps[i].distanceMeters
+                    if (accumulated >= traversedMeters) {
+                        stepIdx = i
+                        break
+                    }
+                }
+                _currentStepIndex.value = stepIdx.coerceIn(0, steps.size - 1)
+            }
         }
     }
 
@@ -189,26 +234,32 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         val resolvedStart = startCoords ?: userLoc
         val resolvedDest = destCoords ?: LatLng(resolvedStart.latitude + 0.23, resolvedStart.longitude - 0.45)
 
-        val newRide = repository.createRide(
-            rideName = rideName.ifBlank { "${startLocation.ifBlank { "Pune" }} → ${destination.ifBlank { "Lonavala" }}" },
-            startName = startLocation.ifBlank { "Pune" },
-            destName = destination.ifBlank { "Lonavala" },
-            startLoc = resolvedStart,
-            destLoc = resolvedDest
-        )
-        _currentScreen.value = AppScreen.RIDE_LOBBY
-
-        // Immediately fetch road-following route from OSRM
-        fetchRouteForRide(resolvedStart, resolvedDest)
+        viewModelScope.launch {
+            try {
+                val newRide = repository.createRide(
+                    rideName = rideName.ifBlank { "${startLocation.ifBlank { "Pune" }} → ${destination.ifBlank { "Lonavala" }}" },
+                    startName = startLocation.ifBlank { "Pune" },
+                    destName = destination.ifBlank { "Lonavala" },
+                    startLoc = resolvedStart,
+                    destLoc = resolvedDest
+                )
+                _currentScreen.value = AppScreen.RIDE_LOBBY
+                fetchRouteForRide(resolvedStart, resolvedDest)
+            } catch (_: Exception) {}
+        }
     }
 
     fun joinRideWithCode(code: String) {
-        val trimmed = code.trim().uppercase(Locale.ROOT).ifBlank { "ABC123" }
+        val trimmed = code.trim().uppercase(Locale.ROOT)
         val userLoc = locationTracker.currentLocation.value?.latLng ?: LatLng(18.5204, 73.8567)
-        val ride = repository.joinRide(trimmed, userLoc)
-        _currentScreen.value = AppScreen.RIDE_LOBBY
 
-        fetchRouteForRide(ride.startLocation, ride.destinationLocation)
+        viewModelScope.launch {
+            val result = repository.joinRide(trimmed, userLoc)
+            result.onSuccess { ride ->
+                _currentScreen.value = AppScreen.RIDE_LOBBY
+                fetchRouteForRide(ride.startLocation, ride.destinationLocation)
+            }
+        }
     }
 
     private fun fetchRouteForRide(start: LatLng, destination: LatLng) {
@@ -231,9 +282,6 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Reroutes from current GPS location to the destination using OSRM.
-     */
     fun rerouteFromCurrentLocation() {
         viewModelScope.launch {
             _isRerouting.value = true
@@ -248,7 +296,6 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
                 val result = osrmRoutingService.fetchRoute(userLoc, dest)
                 _routeResult.value = result
                 _currentStepIndex.value = 0
-                _isOffRoute.value = false
                 _remainingDistanceMeters.value = result.totalDistanceMeters
                 _remainingDurationSeconds.value = result.totalDurationSeconds
                 repository.updateRoute(
@@ -257,31 +304,45 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
                     result.totalDurationSeconds,
                     result.steps
                 )
+                _isOffRoute.value = false
             } catch (_: Exception) {}
             _isRerouting.value = false
         }
     }
 
-    fun addPackMember(name: String) {
-        val offsets = listOf(
-            Pair(0.005, 0.004),
-            Pair(-0.004, -0.003),
-            Pair(0.008, -0.006),
-            Pair(-0.007, 0.005)
-        )
-        val rand = offsets.random()
-        repository.addPackMember(name, rand.first, rand.second)
+    fun setUserName(name: String) {
+        if (name.isNotBlank()) {
+            _userName.value = name
+            repository.initCurrentUser(_userId.value, name)
+        }
+    }
+
+    fun navigateTo(screen: AppScreen) {
+        _currentScreen.value = screen
+    }
+
+    fun selectRider(rider: RiderMember?) {
+        _selectedRider.value = rider
+    }
+
+    fun openQuickMessageSheet(open: Boolean) {
+        _showQuickMessageSheet.value = open
+    }
+
+    fun openRiderListSheet(open: Boolean) {
+        _showRiderListSheet.value = open
+    }
+
+    fun openSosDialog(open: Boolean) {
+        _showSosConfirmDialog.value = open
+    }
+
+    fun openSettingsSheet(open: Boolean) {
+        _showSettingsSheet.value = open
     }
 
     fun startRide() {
         repository.startRide()
-        // Ensure route exists
-        if (_routeResult.value == null) {
-            val ride = repository.currentRide.value
-            if (ride != null) {
-                fetchRouteForRide(ride.startLocation, ride.destinationLocation)
-            }
-        }
         _currentScreen.value = AppScreen.LIVE_RIDE
     }
 
@@ -292,38 +353,15 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
 
     fun leaveRide() {
         repository.leaveRide()
-        _selectedRider.value = null
         _routeResult.value = null
         _currentScreen.value = AppScreen.WELCOME
     }
 
-    fun openRidersSheet(open: Boolean) {
-        _showRidersSheet.value = open
-    }
-
-    fun openQuickMessageSheet(open: Boolean) {
-        _showQuickMessageSheet.value = open
-    }
-
-    fun openSosConfirmDialog(open: Boolean) {
-        _showSosConfirmDialog.value = open
-    }
-
-    fun openSettingsSheet(open: Boolean) {
-        _showSettingsSheet.value = open
-    }
-
-    fun selectRider(rider: RiderMember?) {
-        _selectedRider.value = rider
-    }
-
     fun sendQuickMessage(type: QuickMessageType) {
         repository.sendQuickMessage(type)
-        _showQuickMessageSheet.value = false
     }
 
     fun triggerSos() {
-        _showSosConfirmDialog.value = false
         repository.triggerSos()
     }
 
@@ -331,53 +369,57 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         repository.resolveSos()
     }
 
+    val showRidersSheet: StateFlow<Boolean> = _showRiderListSheet
+    fun openRidersSheet(open: Boolean) = openRiderListSheet(open)
+    fun openSosConfirmDialog(open: Boolean) = openSosDialog(open)
+
     fun getRoutePoints(): List<LatLng> {
-        val resultCoords = _routeResult.value?.coordinates
-        if (!resultCoords.isNullOrEmpty()) return resultCoords
-
-        val rideCoords = repository.currentRide.value?.routePoints
-        if (!rideCoords.isNullOrEmpty()) return rideCoords
-
-        val ride = repository.currentRide.value ?: return emptyList()
-        return listOf(ride.startLocation, ride.destinationLocation)
+        return _routeResult.value?.coordinates
+            ?: currentRide.value?.routePoints
+            ?: emptyList()
     }
 
-    fun getCurrentNavigationStep(): NavigationStep? {
-        val steps = _routeResult.value?.steps ?: repository.currentRide.value?.navigationSteps ?: return null
+    fun getCurrentNavigationStep(): com.example.data.model.NavigationStep? {
+        val steps = _routeResult.value?.steps ?: currentRide.value?.navigationSteps
         val idx = _currentStepIndex.value
-        return if (idx in steps.indices) steps[idx] else steps.firstOrNull()
+        return if (!steps.isNullOrEmpty() && idx in steps.indices) steps[idx] else null
     }
 
-    fun getNextNavigationStep(): NavigationStep? {
-        val steps = _routeResult.value?.steps ?: repository.currentRide.value?.navigationSteps ?: return null
+    fun getNextNavigationStep(): com.example.data.model.NavigationStep? {
+        val steps = _routeResult.value?.steps ?: currentRide.value?.navigationSteps
         val nextIdx = _currentStepIndex.value + 1
-        return if (nextIdx in steps.indices) steps[nextIdx] else null
-    }
-
-    fun getFormattedEta(): String {
-        val durationSec = _remainingDurationSeconds.value
-        val arrivalMs = System.currentTimeMillis() + (durationSec * 1000).toLong()
-        val sdf = SimpleDateFormat("h:mm a", Locale.getDefault())
-        return sdf.format(Date(arrivalMs))
-    }
-
-    fun getFormattedRemainingDuration(): String {
-        val mins = kotlin.math.round(_remainingDurationSeconds.value / 60.0).toInt()
-        return if (mins >= 60) {
-            val hours = mins / 60
-            val remMins = mins % 60
-            if (remMins > 0) "${hours} hr ${remMins} min" else "${hours} hr"
-        } else {
-            "${mins.coerceAtLeast(1)} min"
-        }
+        return if (!steps.isNullOrEmpty() && nextIdx in steps.indices) steps[nextIdx] else null
     }
 
     fun getFormattedRemainingDistance(): String {
-        val m = _remainingDistanceMeters.value
-        return if (m >= 1000.0) {
-            String.format(Locale.getDefault(), "%.1f km", m / 1000.0)
+        val meters = _remainingDistanceMeters.value
+        return if (meters >= 1000) {
+            String.format(Locale.ROOT, "%.1f km", meters / 1000.0)
         } else {
-            "${kotlin.math.round(m).toInt()} m"
+            "${kotlin.math.round(meters).toInt()} m"
         }
+    }
+
+    fun getFormattedRemainingDuration(): String {
+        val totalSecs = _remainingDurationSeconds.value
+        val mins = kotlin.math.round(totalSecs / 60.0).toInt()
+        return if (mins >= 60) {
+            val hours = mins / 60
+            val remMins = mins % 60
+            if (remMins > 0) "${hours}h ${remMins}m" else "${hours}h"
+        } else {
+            "${mins} min"
+        }
+    }
+
+    fun getFormattedEta(): String {
+        val totalSecs = _remainingDurationSeconds.value
+        val etaTimeMs = System.currentTimeMillis() + (totalSecs * 1000).toLong()
+        val sdf = java.text.SimpleDateFormat("h:mm a", Locale.getDefault())
+        return sdf.format(java.util.Date(etaTimeMs))
+    }
+
+    fun addPackMember(name: String, offsetLat: Double = 0.003, offsetLon: Double = 0.003) {
+        // Mock rider for demo/offline testing
     }
 }

@@ -1,0 +1,120 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "photoUrl": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "email", "createdAt"]
+    },
+    "Ride": {
+      "title": "Ride",
+      "description": "Group motorcycle/bicycle ride session",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "inviteCode": { "type": "string" },
+        "leaderId": { "type": "string" },
+        "status": { "type": "string", "enum": ["CREATED", "LOBBY", "ACTIVE", "COMPLETED", "CANCELLED"] },
+        "startLocationName": { "type": "string" },
+        "destinationName": { "type": "string" },
+        "startLat": { "type": "number" },
+        "startLng": { "type": "number" },
+        "destLat": { "type": "number" },
+        "destLng": { "type": "number" },
+        "totalDistanceMeters": { "type": "number" },
+        "totalDurationSeconds": { "type": "number" },
+        "routeCoordinatesJson": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "inviteCode", "leaderId", "status", "startLocationName", "destinationName", "createdAt"]
+    },
+    "Rider": {
+      "title": "Rider",
+      "description": "A participant member in a ride",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "rideId": { "type": "string" },
+        "name": { "type": "string" },
+        "avatarColorHex": { "type": "number" },
+        "role": { "type": "string", "enum": ["LEADER", "MEMBER"] },
+        "status": { "type": "string", "enum": ["RIDING", "STOPPED", "EMERGENCY", "OFFLINE"] },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "speedKmh": { "type": "number" },
+        "headingDeg": { "type": "number" },
+        "batteryPct": { "type": "number" },
+        "stoppedDurationSec": { "type": "number" },
+        "lastUpdatedMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "rideId", "name", "role", "status", "latitude", "longitude"]
+    },
+    "QuickMessage": {
+      "title": "QuickMessage",
+      "description": "Quick status message broadcast in a ride",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "rideId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "type": { "type": "string" },
+        "text": { "type": "string" },
+        "timestampMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "rideId", "senderId", "senderName", "type", "text"]
+    },
+    "SosEvent": {
+      "title": "SosEvent",
+      "description": "Emergency alert broadcast in a ride",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "rideId": { "type": "string" },
+        "riderId": { "type": "string" },
+        "riderName": { "type": "string" },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "isResolved": { "type": "boolean" },
+        "timestampMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "rideId", "riderId", "riderName", "latitude", "longitude", "isResolved"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User profiles"
+    },
+    "/rides/{rideId}": {
+      "schema": { "$ref": "#/entities/Ride" },
+      "description": "Ride sessions"
+    },
+    "/rides/{rideId}/riders/{riderId}": {
+      "schema": { "$ref": "#/entities/Rider" },
+      "description": "Riders participating in a ride"
+    },
+    "/rides/{rideId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/QuickMessage" },
+      "description": "Quick messages sent in a ride"
+    },
+    "/rides/{rideId}/sos/{sosId}": {
+      "schema": { "$ref": "#/entities/SosEvent" },
+      "description": "SOS emergency events in a ride"
+    }
+  }
+}

@@ -11,7 +11,7 @@ import com.example.data.model.MemberStatus
 import com.example.data.model.QuickMessageType
 import com.example.data.model.RideRole
 import com.example.data.model.RiderMember
-import com.example.data.repository.RideRepository
+import com.example.data.firebase.RideRepository
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -138,10 +138,18 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `test ride repository flow`() {
+    fun `test ride repository flow`() = kotlinx.coroutines.runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
+        if (com.google.firebase.FirebaseApp.getApps(context).isEmpty()) {
+            val options = com.google.firebase.FirebaseOptions.Builder()
+                .setApplicationId("1:13707892827:android:e982c3179342c585f0877e")
+                .setApiKey("AIzaSyBwTrOliLZV_Z2UkyCVjOKq2JbxoxOj0Yg")
+                .setProjectId("gen-lang-client-0349632077")
+                .build()
+            com.google.firebase.FirebaseApp.initializeApp(context, options)
+        }
         val tracker = LocationTracker(context)
-        val repo = RideRepository(tracker)
+        val repo = RideRepository(context, tracker)
         repo.initCurrentUser("user_arpit", "Arpit")
 
         val ride = repo.createRide(

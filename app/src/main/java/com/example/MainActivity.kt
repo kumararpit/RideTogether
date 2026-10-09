@@ -17,12 +17,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import com.example.ui.screens.CreateRideScreen
 import com.example.ui.screens.JoinRideScreen
 import com.example.ui.screens.LiveRideScreen
 import com.example.ui.screens.RideLobbyScreen
 import com.example.ui.screens.RideSummaryScreen
+import com.example.ui.screens.SignInScreen
 import com.example.ui.screens.WelcomeScreen
 import com.example.ui.theme.RideTogetherTheme
 import com.example.ui.theme.SlateDark900
@@ -39,7 +41,6 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             RideTogetherTheme(darkTheme = true) {
-                // Location permission launcher
                 val locationPermissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestMultiplePermissions()
                 ) { permissions ->
@@ -50,7 +51,6 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Check permissions on start
                 LaunchedEffect(Unit) {
                     val hasFine = ContextCompat.checkSelfPermission(
                         this@MainActivity,
@@ -73,7 +73,20 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = SlateDark900
                 ) {
-                    RideTogetherApp(viewModel = viewModel)
+                    val currentUser by viewModel.currentUser.collectAsState()
+                    val isAuthLoading by viewModel.isAuthLoading.collectAsState()
+                    val authError by viewModel.authError.collectAsState()
+                    val context = LocalContext.current
+
+                    if (currentUser == null) {
+                        SignInScreen(
+                            isLoading = isAuthLoading,
+                            errorMessage = authError,
+                            onSignInClick = { viewModel.signInWithGoogle(context) }
+                        )
+                    } else {
+                        RideTogetherApp(viewModel = viewModel)
+                    }
                 }
             }
         }
@@ -86,14 +99,17 @@ fun RideTogetherApp(viewModel: RideViewModel) {
     val userName by viewModel.userName.collectAsState()
     val ride by viewModel.currentRide.collectAsState()
     val members by viewModel.members.collectAsState()
+    val joinError by viewModel.joinError.collectAsState()
 
     when (currentScreen) {
         AppScreen.WELCOME -> {
+            val context = LocalContext.current
             WelcomeScreen(
                 currentName = userName,
                 onNameChange = { viewModel.setUserName(it) },
                 onCreateRideClick = { viewModel.navigateTo(AppScreen.CREATE_RIDE) },
-                onJoinRideClick = { viewModel.navigateTo(AppScreen.JOIN_RIDE) }
+                onJoinRideClick = { viewModel.navigateTo(AppScreen.JOIN_RIDE) },
+                onSignOutClick = { viewModel.signOut(context) }
             )
         }
 
@@ -119,7 +135,8 @@ fun RideTogetherApp(viewModel: RideViewModel) {
                 onBack = { viewModel.navigateTo(AppScreen.WELCOME) },
                 onJoinRide = { code ->
                     viewModel.joinRideWithCode(code)
-                }
+                },
+                errorMessage = joinError
             )
         }
 
@@ -131,6 +148,7 @@ fun RideTogetherApp(viewModel: RideViewModel) {
                 RideLobbyScreen(
                     ride = ride!!,
                     members = members,
+                    routePoints = viewModel.getRoutePoints(),
                     onStartRide = { viewModel.startRide() },
                     onBack = { viewModel.navigateTo(AppScreen.WELCOME) }
                 )
@@ -141,7 +159,6 @@ fun RideTogetherApp(viewModel: RideViewModel) {
 
         AppScreen.LIVE_RIDE -> {
             BackHandler {
-                // Prevent accidental back exit while riding; open settings to leave
                 viewModel.openSettingsSheet(true)
             }
             LiveRideScreen(viewModel = viewModel)

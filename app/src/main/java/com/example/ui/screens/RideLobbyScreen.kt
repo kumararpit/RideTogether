@@ -53,10 +53,14 @@ import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
 import com.example.ui.theme.SurfaceCard
 
+import com.example.data.model.LatLng
+import com.example.ui.components.RideMapCanvas
+
 @Composable
 fun RideLobbyScreen(
     ride: Ride,
     members: List<RiderMember>,
+    routePoints: List<LatLng> = emptyList(),
     onStartRide: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
@@ -191,40 +195,59 @@ fun RideLobbyScreen(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Road Route Overview Card
+            // Road Route & Live Map Overview Card
             Surface(
                 color = SlateDark800,
                 shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.fillMaxWidth().testTag("route_overview_card")
             ) {
-                Row(
-                    modifier = Modifier.padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                Column {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(AmberPrimary.copy(alpha = 0.2f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(text = "🛣️", fontSize = 18.sp)
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Live Map & Road Route",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            val distStr = if (ride.totalDistanceMeters > 0) String.format(java.util.Locale.getDefault(), "%.1f km", ride.totalDistanceMeters / 1000.0) else "Live Route"
+                            val durStr = if (ride.totalDurationSeconds > 0) "${(ride.totalDurationSeconds / 60.0).toInt()} min" else "Turn-by-turn"
+                            Text(
+                                text = "$distStr • $durStr • ${members.size} rider(s) on radar",
+                                color = AmberPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+
+                    // Embedded Map Preview with live positions of group members
                     Box(
                         modifier = Modifier
-                            .size(38.dp)
-                            .clip(CircleShape)
-                            .background(AmberPrimary.copy(alpha = 0.2f)),
-                        contentAlignment = Alignment.Center
+                            .fillMaxWidth()
+                            .height(180.dp)
+                            .clip(RoundedCornerShape(bottomStart = 14.dp, bottomEnd = 14.dp))
+                            .testTag("lobby_map_preview")
                     ) {
-                        Text(text = "🛣️", fontSize = 18.sp)
-                    }
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Road-Following Route (OSRM)",
-                            color = Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        val distStr = if (ride.totalDistanceMeters > 0) String.format(java.util.Locale.getDefault(), "%.1f km", ride.totalDistanceMeters / 1000.0) else "Live Route"
-                        val durStr = if (ride.totalDurationSeconds > 0) "${(ride.totalDurationSeconds / 60.0).toInt()} min" else "Turn-by-turn"
-                        Text(
-                            text = "$distStr • $durStr • Highway & Curves Ready",
-                            color = AmberPrimary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
+                        RideMapCanvas(
+                            route = routePoints,
+                            members = members,
+                            selectedRider = null,
+                            onSelectRider = {},
+                            isFollowRiderMode = false
                         )
                     }
                 }

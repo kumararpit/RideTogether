@@ -57,9 +57,10 @@ import com.example.ui.theme.SurfaceCard
 fun JoinRideScreen(
     onBack: () -> Unit,
     onJoinRide: (code: String) -> Unit,
+    errorMessage: String? = null,
     modifier: Modifier = Modifier
 ) {
-    var codeInput by remember { mutableStateOf("ABC123") }
+    var codeInput by remember { mutableStateOf("") }
     var codeError by remember { mutableStateOf(false) }
 
     Surface(
@@ -129,6 +130,23 @@ fun JoinRideScreen(
                             fontSize = 11.sp,
                             modifier = Modifier.padding(top = 2.dp)
                         )
+
+                        if (!errorMessage.isNullOrBlank()) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Surface(
+                                color = Color(0xFF7F1D1D).copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = errorMessage,
+                                    color = Color(0xFFFCA5A5),
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(8.dp),
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
 
                         Spacer(modifier = Modifier.height(14.dp))
 

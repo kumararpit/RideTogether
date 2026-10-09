@@ -1,0 +1,116 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidUser(data) {
+      return data.id is string
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 100
+        && data.email is string && data.email.size() > 0
+        && (!('photoUrl' in data) || data.photoUrl is string)
+        && data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidRide(data) {
+      return data.id is string
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 100
+        && data.inviteCode is string && data.inviteCode.size() >= 4 && data.inviteCode.size() <= 12
+        && data.leaderId is string
+        && data.status in ['CREATED', 'LOBBY', 'ACTIVE', 'COMPLETED', 'CANCELLED']
+        && data.startLocationName is string
+        && data.destinationName is string
+        && data.startLat is number
+        && data.startLng is number
+        && data.destLat is number
+        && data.destLng is number
+        && data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidRider(data) {
+      return data.id is string
+        && data.userId is string
+        && data.rideId is string
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 100
+        && data.role in ['LEADER', 'MEMBER']
+        && data.status in ['RIDING', 'STOPPED', 'EMERGENCY', 'OFFLINE']
+        && data.latitude is number
+        && data.longitude is number;
+    }
+
+    function isValidQuickMessage(data) {
+      return data.id is string
+        && data.rideId is string
+        && data.senderId is string
+        && data.senderName is string
+        && data.type is string
+        && data.text is string && data.text.size() > 0 && data.text.size() <= 200;
+    }
+
+    function isValidSos(data) {
+      return data.id is string
+        && data.rideId is string
+        && data.riderId is string
+        && data.riderName is string
+        && data.latitude is number
+        && data.longitude is number
+        && data.isResolved is bool;
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data);
+      allow delete: if false;
+    }
+
+    // Rides collection
+    match /rides/{rideId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated()
+        && request.resource.data.leaderId == request.auth.uid
+        && isValidRide(request.resource.data);
+      allow update: if isAuthenticated() && isValidRide(request.resource.data);
+      allow delete: if isAuthenticated() && resource.data.leaderId == request.auth.uid;
+
+      // Riders subcollection
+      match /riders/{riderId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated()
+          && request.resource.data.userId == request.auth.uid
+          && isValidRider(request.resource.data);
+        allow update: if isAuthenticated()
+          && (request.resource.data.userId == request.auth.uid || resource.data.userId == request.auth.uid)
+          && isValidRider(request.resource.data);
+        allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      }
+
+      // Quick Messages subcollection
+      match /messages/{messageId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated()
+          && request.resource.data.senderId == request.auth.uid
+          && isValidQuickMessage(request.resource.data);
+        allow update: if false;
+        allow delete: if false;
+      }
+
+      // SOS Events subcollection
+      match /sos/{sosId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated()
+          && request.resource.data.riderId == request.auth.uid
+          && isValidSos(request.resource.data);
+        allow update: if isAuthenticated() && isValidSos(request.resource.data);
+        allow delete: if false;
+      }
+    }
+  }
+}

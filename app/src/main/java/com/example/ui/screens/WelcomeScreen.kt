@@ -60,6 +60,7 @@ fun WelcomeScreen(
     onNameChange: (String) -> Unit,
     onCreateRideClick: () -> Unit,
     onJoinRideClick: () -> Unit,
+    onSignOutClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var nameInput by remember { mutableStateOf(currentName) }
@@ -219,6 +220,21 @@ fun WelcomeScreen(
                         .fillMaxWidth()
                         .padding(top = 4.dp)
                 )
+
+                if (onSignOutClick != null) {
+                    androidx.compose.material3.TextButton(
+                        onClick = onSignOutClick,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("sign_out_button")
+                    ) {
+                        Text(
+                            text = "Sign Out",
+                            color = Color(0xFFEF5350),
+                            fontSize = 14.sp
+                        )
+                    }
+                }
             }
         }
     }
