@@ -3,6 +3,7 @@ package com.example.ui.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.BuildConfig
 import com.example.R
 import com.example.data.firebase.AuthRepository
 import com.example.data.firebase.RideRepository
@@ -42,9 +43,16 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     val osrmRoutingService = OsrmRoutingService()
     val placeSearchService = PlaceSearchService()
 
-    private val db = FirebaseFirestore.getInstance(
-        application.getString(R.string.firestore_database_id)
-    )
+    private val db = run {
+        val databaseId = BuildConfig.FIRESTORE_DATABASE_ID.ifBlank {
+            try {
+                application.getString(R.string.firestore_database_id)
+            } catch (e: Exception) {
+                "ai-studio-android-ridetoge-ff1218fd-f019-458f-ad73-f84981c73561"
+            }
+        }
+        FirebaseFirestore.getInstance(databaseId)
+    }
 
     val authRepository = AuthRepository()
     val repository = RideRepository(
