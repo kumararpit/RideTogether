@@ -143,17 +143,31 @@ fun SignInScreen(
                         if (!errorMessage.isNullOrBlank()) {
                             Spacer(modifier = Modifier.height(14.dp))
                             Surface(
-                                color = Color(0xFF7F1D1D).copy(alpha = 0.5f),
-                                shape = RoundedCornerShape(8.dp),
+                                color = Color(0xFF7F1D1D).copy(alpha = 0.45f),
+                                shape = RoundedCornerShape(10.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.4f)),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text(
-                                    text = errorMessage,
-                                    color = Color(0xFFFCA5A5),
-                                    fontSize = 12.sp,
-                                    modifier = Modifier.padding(10.dp),
-                                    textAlign = TextAlign.Center
-                                )
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Text(
+                                        text = errorMessage,
+                                        color = Color(0xFFFCA5A5),
+                                        fontSize = 12.sp,
+                                        textAlign = TextAlign.Center,
+                                        lineHeight = 16.sp,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    if (errorMessage.contains("Google Account", ignoreCase = true) || errorMessage.contains("credentials", ignoreCase = true)) {
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        Text(
+                                            text = "Tip: Make sure you are signed into Google Play Services on this device or emulator.",
+                                            color = Color(0xFFE2E8F0),
+                                            fontSize = 11.sp,
+                                            textAlign = TextAlign.Center,
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                    }
+                                }
                             }
                         }
 

@@ -1,6 +1,8 @@
 package com.example.data.firebase
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.util.Log
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
@@ -43,8 +45,18 @@ class AuthRepository(
         awaitClose { fbAuth.removeAuthStateListener(listener) }
     }
 
+    private fun Context.findActivity(): Activity? {
+        var ctx = this
+        while (ctx is ContextWrapper) {
+            if (ctx is Activity) return ctx
+            ctx = ctx.baseContext
+        }
+        return null
+    }
+
     suspend fun signInWithGoogle(context: Context): Result<FirebaseUser> {
-        val credentialManager = CredentialManager.create(context)
+        val activityContext = context.findActivity() ?: context
+        val credentialManager = CredentialManager.create(activityContext)
         val serverClientId = resolveWebClientId(context)
 
         if (serverClientId.isBlank()) {
@@ -53,29 +65,31 @@ class AuthRepository(
             )
         }
 
-        val googleIdOption = GetSignInWithGoogleOption.Builder(serverClientId)
-            .build()
-
-        val request = GetCredentialRequest.Builder()
-            .addCredentialOption(googleIdOption)
-            .build()
-
         return try {
+            // Priority 1: Interactive GetSignInWithGoogleOption (Standard button dialog)
+            val googleIdOption = GetSignInWithGoogleOption.Builder(serverClientId)
+                .build()
+
+            val primaryRequest = GetCredentialRequest.Builder()
+                .addCredentialOption(googleIdOption)
+                .build()
+
             val response = try {
-                credentialManager.getCredential(context = context, request = request)
+                credentialManager.getCredential(context = activityContext, request = primaryRequest)
             } catch (e: GetCredentialException) {
-                // If GetSignInWithGoogleOption fails with [16] or NoCredentialException, attempt GetGoogleIdOption fallback with filterByAuthorizedAccounts = false
-                Log.w("AuthRepository", "Primary Google sign-in option encountered ${e.message}, trying GetGoogleIdOption fallback")
-                val fallbackGoogleId = com.google.android.libraries.identity.googleid.GetGoogleIdOption.Builder()
+                // If primary request encounters NoCredentialException or error 16, try GetGoogleIdOption without authorized-account filter
+                Log.w("AuthRepository", "Primary Google sign-in encountered ${e.javaClass.simpleName}: ${e.message}, attempting GetGoogleIdOption fallback")
+                val fallbackOption = com.google.android.libraries.identity.googleid.GetGoogleIdOption.Builder()
                     .setServerClientId(serverClientId)
                     .setFilterByAuthorizedAccounts(false)
                     .setAutoSelectEnabled(false)
                     .build()
                 val fallbackRequest = GetCredentialRequest.Builder()
-                    .addCredentialOption(fallbackGoogleId)
+                    .addCredentialOption(fallbackOption)
                     .build()
-                credentialManager.getCredential(context = context, request = fallbackRequest)
+                credentialManager.getCredential(context = activityContext, request = fallbackRequest)
             }
+
             val credential = response.credential
 
             if (credential is CustomCredential &&
@@ -93,12 +107,19 @@ class AuthRepository(
         } catch (e: GetCredentialCancellationException) {
             Log.w("AuthRepository", "Google sign-in was cancelled by user: ${e.message}")
             Result.failure(e)
+        } catch (e: androidx.credentials.exceptions.NoCredentialException) {
+            Log.e("AuthRepository", "NoCredentialException during Google sign-in", e)
+            val friendlyMsg = "No Google Account found or authorized. Please ensure a Google Account is added to this device in Settings > Accounts, then tap Sign In again."
+            Result.failure(Exception(friendlyMsg, e))
         } catch (e: GetCredentialException) {
             Log.e("AuthRepository", "CredentialManager exception during Google sign-in", e)
-            val friendlyMsg = if (e.message?.contains("16") == true || e.message?.contains("Account reauth failed") == true) {
-                "Google Play account re-authentication required. Please check that a Google Account is active on your device and tap Sign In again."
-            } else {
-                e.localizedMessage ?: "Google sign-in failed. Please try again."
+            val msg = e.message.orEmpty()
+            val friendlyMsg = when {
+                msg.contains("16") || msg.contains("Account reauth failed") ->
+                    "Google Play account re-authentication required. Please check that a Google Account is active on your device and tap Sign In again."
+                msg.contains("No credentials available", ignoreCase = true) ->
+                    "No Google Account found on this device. Please sign in to a Google account in Android Settings > Accounts, then retry."
+                else -> e.localizedMessage ?: "Google sign-in failed. Please try again."
             }
             Result.failure(Exception(friendlyMsg, e))
         } catch (e: Exception) {
