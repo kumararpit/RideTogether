@@ -61,7 +61,21 @@ class AuthRepository(
             .build()
 
         return try {
-            val response = credentialManager.getCredential(context = context, request = request)
+            val response = try {
+                credentialManager.getCredential(context = context, request = request)
+            } catch (e: GetCredentialException) {
+                // If GetSignInWithGoogleOption fails with [16] or NoCredentialException, attempt GetGoogleIdOption fallback with filterByAuthorizedAccounts = false
+                Log.w("AuthRepository", "Primary Google sign-in option encountered ${e.message}, trying GetGoogleIdOption fallback")
+                val fallbackGoogleId = com.google.android.libraries.identity.googleid.GetGoogleIdOption.Builder()
+                    .setServerClientId(serverClientId)
+                    .setFilterByAuthorizedAccounts(false)
+                    .setAutoSelectEnabled(false)
+                    .build()
+                val fallbackRequest = GetCredentialRequest.Builder()
+                    .addCredentialOption(fallbackGoogleId)
+                    .build()
+                credentialManager.getCredential(context = context, request = fallbackRequest)
+            }
             val credential = response.credential
 
             if (credential is CustomCredential &&
@@ -81,7 +95,12 @@ class AuthRepository(
             Result.failure(e)
         } catch (e: GetCredentialException) {
             Log.e("AuthRepository", "CredentialManager exception during Google sign-in", e)
-            Result.failure(e)
+            val friendlyMsg = if (e.message?.contains("16") == true || e.message?.contains("Account reauth failed") == true) {
+                "Google Play account re-authentication required. Please check that a Google Account is active on your device and tap Sign In again."
+            } else {
+                e.localizedMessage ?: "Google sign-in failed. Please try again."
+            }
+            Result.failure(Exception(friendlyMsg, e))
         } catch (e: Exception) {
             Log.e("AuthRepository", "Authentication failed", e)
             Result.failure(e)
