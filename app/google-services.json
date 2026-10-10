@@ -12,7 +12,20 @@
           "package_name": "com.aistudio.ridetogether.vibe"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "186359431230-51m808otbribrtm5hhbt0qdavkhg2nes.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.aistudio.ridetogether.vibe",
+            "certificate_hash": "8f0a257eceb80a658806c61260bd3cc2766874e8"
+          }
+        },
+        {
+          "client_id": "186359431230-7s1n2cakafuueo0fbmba2751jmf8jsr3.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyCLdbh6aE85_P5DJ0scAC-Ye-FWjRmotxM"
@@ -20,7 +33,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "186359431230-7s1n2cakafuueo0fbmba2751jmf8jsr3.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }
