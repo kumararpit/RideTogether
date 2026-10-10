@@ -135,6 +135,10 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     private val _isFollowRiderMode = MutableStateFlow(true)
     val isFollowRiderMode: StateFlow<Boolean> = _isFollowRiderMode.asStateFlow()
 
+    // Room database for completed rides.
+    private val _completedRides = MutableStateFlow<List<com.example.data.db.CompletedRideEntity>>(emptyList())
+    val completedRides: StateFlow<List<com.example.data.db.CompletedRideEntity>> = _completedRides.asStateFlow()
+
     init {
         // Sync user state on auth change
         viewModelScope.launch {
@@ -163,6 +167,21 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
                 if (locUpdate != null) {
                     updateNavigationProgress(locUpdate.latLng, locUpdate.speedKmh)
                 }
+            }
+        }
+
+        // Load completed rides after viewModelScope is ready.
+        viewModelScope.launch {
+            try {
+                com.example.data.db.RideDatabase.getInstance(getApplication<Application>())
+                    .completedRideDao()
+                    .getAllCompletedRides()
+                    .collectLatest { rides ->
+                        _completedRides.value = rides
+                    }
+            } catch (e: Exception) {
+                android.util.Log.e("RideViewModel", "Failed to load completed rides from Room database", e)
+                _completedRides.value = emptyList()
             }
         }
     }
@@ -371,11 +390,6 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         repository.startRide()
         _currentScreen.value = AppScreen.LIVE_RIDE
     }
-
-    val completedRides = com.example.data.db.RideDatabase.getInstance(getApplication<Application>())
-        .completedRideDao()
-        .getAllCompletedRides()
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     fun endRide() {
         val ride = currentRide.value
