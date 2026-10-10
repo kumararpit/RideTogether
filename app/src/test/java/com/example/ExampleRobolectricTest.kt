@@ -270,4 +270,10 @@ class ExampleRobolectricTest {
         val distMeters = com.example.data.location.RouteGeometry.distanceToPolylineMeters(nearP2, route)
         assertTrue("Distance to polyline should be small (< 500m)", distMeters < 500.0)
     }
+
+    @Test
+    fun `test activity launch`() {
+        val scenario = androidx.test.core.app.ActivityScenario.launch(MainActivity::class.java)
+        assertNotNull(scenario)
+    }
 }

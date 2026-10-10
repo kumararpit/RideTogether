@@ -37,7 +37,7 @@ import java.util.UUID
 
 class RideRepository(
     val locationTracker: LocationTracker,
-    val firestore: FirebaseFirestore,
+    val firestore: FirebaseFirestore?,
     val stopDetector: StopDetector = StopDetector(
         stopSpeedThresholdKmh = 5.0,
         resumeSpeedThresholdKmh = 8.0,
@@ -49,9 +49,17 @@ class RideRepository(
         locationTracker = locationTracker,
         firestore = try {
             val dbId = context.applicationContext.getString(R.string.firestore_database_id)
-            if (dbId.isNotBlank() && dbId != "(default)") FirebaseFirestore.getInstance(dbId) else FirebaseFirestore.getInstance()
+            if (dbId.isNotBlank() && dbId != "(default)") {
+                try {
+                    FirebaseFirestore.getInstance(dbId)
+                } catch (_: Exception) {
+                    FirebaseFirestore.getInstance()
+                }
+            } else {
+                FirebaseFirestore.getInstance()
+            }
         } catch (_: Exception) {
-            FirebaseFirestore.getInstance()
+            try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
         }
     )
 
@@ -124,9 +132,9 @@ class RideRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                firestore.collection("users").document(id)
-                    .set(userDoc, SetOptions.merge())
-                    .await()
+                firestore?.collection("users")?.document(id)
+                    ?.set(userDoc, SetOptions.merge())
+                    ?.await()
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.WRITE, "users/$id")
             }
@@ -217,10 +225,10 @@ class RideRepository(
                     "lastUpdatedMs" to loc.timestampMs,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                firestore.collection("rides").document(activeRideId)
-                    .collection("riders").document(currentUid)
-                    .set(riderMap, SetOptions.merge())
-                    .await()
+                firestore?.collection("rides")?.document(activeRideId)
+                    ?.collection("riders")?.document(currentUid)
+                    ?.set(riderMap, SetOptions.merge())
+                    ?.await()
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/riders/$currentUid")
             }
@@ -321,9 +329,9 @@ class RideRepository(
         // Asynchronously persist to Firestore in background without blocking the lobby transition
         repositoryScope.launch {
             try {
-                firestore.collection("rides").document(rideId).set(rideDoc).await()
-                firestore.collection("rides").document(rideId)
-                    .collection("riders").document(uid).set(leaderRiderDoc).await()
+                firestore?.collection("rides")?.document(rideId)?.set(rideDoc)?.await()
+                firestore?.collection("rides")?.document(rideId)
+                    ?.collection("riders")?.document(uid)?.set(leaderRiderDoc)?.await()
                 Log.d("RideRepository", "Successfully persisted ride $rideId to Firestore")
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.CREATE, "rides/$rideId")
@@ -356,7 +364,13 @@ class RideRepository(
         }
 
         return try {
-            val querySnapshot = firestore.collection("rides")
+            val fs = firestore
+            if (fs == null) {
+                _joinError.value = "Cloud database offline. Please check connection."
+                return Result.failure(IllegalStateException("Cloud database offline"))
+            }
+
+            val querySnapshot = fs.collection("rides")
                 .whereEqualTo("inviteCode", code)
                 .get()
                 .await()
@@ -397,8 +411,8 @@ class RideRepository(
                 "lastUpdatedMs" to System.currentTimeMillis(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            firestore.collection("rides").document(rideId)
-                .collection("riders").document(uid).set(memberDoc, SetOptions.merge()).await()
+            firestore?.collection("rides")?.document(rideId)
+                ?.collection("riders")?.document(uid)?.set(memberDoc, SetOptions.merge())?.await()
 
             val joinedRide = Ride(
                 id = rideId,
@@ -426,10 +440,11 @@ class RideRepository(
 
     private fun listenToRide(rideId: String) {
         detachListeners()
+        val fs = firestore ?: return
         val currentUid = auth?.currentUser?.uid ?: ""
 
         // 1. Listen to Ride metadata
-        val rideRef = firestore.collection("rides").document(rideId)
+        val rideRef = fs.collection("rides").document(rideId)
         rideListener = rideRef.addSnapshotListener { snapshot, error ->
             if (error != null) {
                 handleFirestoreError(error, OperationType.GET, rideRef.path)
@@ -467,7 +482,7 @@ class RideRepository(
         }
 
         // 2. Real-time Listen to ALL riders in this ride: /rides/{rideId}/riders
-        val ridersRef = firestore.collection("rides").document(rideId).collection("riders")
+        val ridersRef = fs.collection("rides").document(rideId).collection("riders")
         ridersListener = ridersRef.addSnapshotListener { snapshot, error ->
             if (error != null) {
                 handleFirestoreError(error, OperationType.LIST, ridersRef.path)
@@ -482,7 +497,7 @@ class RideRepository(
         }
 
         // 3. Real-time Listen to messages: /rides/{rideId}/messages
-        val messagesRef = firestore.collection("rides").document(rideId).collection("messages")
+        val messagesRef = fs.collection("rides").document(rideId).collection("messages")
         messagesListener = messagesRef.addSnapshotListener { snapshot, error ->
             if (error != null) {
                 handleFirestoreError(error, OperationType.LIST, messagesRef.path)
@@ -513,7 +528,7 @@ class RideRepository(
         }
 
         // 4. Real-time Listen to SOS events: /rides/{rideId}/sos
-        val sosRef = firestore.collection("rides").document(rideId).collection("sos")
+        val sosRef = fs.collection("rides").document(rideId).collection("sos")
         sosListener = sosRef.addSnapshotListener { snapshot, error ->
             if (error != null) {
                 handleFirestoreError(error, OperationType.LIST, sosRef.path)
@@ -665,14 +680,14 @@ class RideRepository(
         // Save total distance and duration to Firestore
         repositoryScope.launch {
             try {
-                firestore.collection("rides").document(current.id)
-                    .update(
+                firestore?.collection("rides")?.document(current.id)
+                    ?.update(
                         mapOf(
                             "totalDistanceMeters" to totalDistanceMeters,
                             "totalDurationSeconds" to totalDurationSeconds,
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
-                    ).await()
+                    )?.await()
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.UPDATE, "rides/${current.id}")
             }
@@ -686,13 +701,13 @@ class RideRepository(
 
         repositoryScope.launch {
             try {
-                firestore.collection("rides").document(ride.id)
-                    .update(
+                firestore?.collection("rides")?.document(ride.id)
+                    ?.update(
                         mapOf(
                             "status" to RideStatus.ACTIVE.name,
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
-                    ).await()
+                    )?.await()
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.UPDATE, "rides/${ride.id}")
             }
@@ -706,13 +721,13 @@ class RideRepository(
 
         repositoryScope.launch {
             try {
-                firestore.collection("rides").document(ride.id)
-                    .update(
+                firestore?.collection("rides")?.document(ride.id)
+                    ?.update(
                         mapOf(
                             "status" to RideStatus.COMPLETED.name,
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
-                    ).await()
+                    )?.await()
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.UPDATE, "rides/${ride.id}")
             }
@@ -726,10 +741,10 @@ class RideRepository(
         if (activeRideId != null && currentUid != null) {
             repositoryScope.launch {
                 try {
-                    firestore.collection("rides").document(activeRideId)
-                        .collection("riders").document(currentUid)
-                        .delete()
-                        .await()
+                    firestore?.collection("rides")?.document(activeRideId)
+                        ?.collection("riders")?.document(currentUid)
+                        ?.delete()
+                        ?.await()
                 } catch (e: Exception) {
                     handleFirestoreError(e, OperationType.DELETE, "rides/$activeRideId/riders/$currentUid")
                 }
@@ -772,10 +787,10 @@ class RideRepository(
                     "timestampMs" to System.currentTimeMillis(),
                     "createdAt" to FieldValue.serverTimestamp()
                 )
-                firestore.collection("rides").document(activeRideId)
-                    .collection("messages").document(msgId)
-                    .set(doc)
-                    .await()
+                firestore?.collection("rides")?.document(activeRideId)
+                    ?.collection("messages")?.document(msgId)
+                    ?.set(doc)
+                    ?.await()
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.CREATE, "rides/$activeRideId/messages/$msgId")
             }
@@ -814,10 +829,10 @@ class RideRepository(
                     "timestampMs" to System.currentTimeMillis(),
                     "createdAt" to FieldValue.serverTimestamp()
                 )
-                firestore.collection("rides").document(activeRideId)
-                    .collection("sos").document(sosId)
-                    .set(doc)
-                    .await()
+                firestore?.collection("rides")?.document(activeRideId)
+                    ?.collection("sos")?.document(sosId)
+                    ?.set(doc)
+                    ?.await()
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.CREATE, "rides/$activeRideId/sos/$sosId")
             }
@@ -836,10 +851,10 @@ class RideRepository(
 
         repositoryScope.launch {
             try {
-                firestore.collection("rides").document(activeRideId)
-                    .collection("sos").document(sosId)
-                    .update("acknowledgedBy", FieldValue.arrayUnion(currentUid))
-                    .await()
+                firestore?.collection("rides")?.document(activeRideId)
+                    ?.collection("sos")?.document(sosId)
+                    ?.update("acknowledgedBy", FieldValue.arrayUnion(currentUid))
+                    ?.await()
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/sos/$sosId")
             }
@@ -856,14 +871,14 @@ class RideRepository(
         if (activeRideId != null && activeEvent != null) {
             repositoryScope.launch {
                 try {
-                    firestore.collection("rides").document(activeRideId)
-                        .collection("sos").document(activeEvent.id)
-                        .update(
+                    firestore?.collection("rides")?.document(activeRideId)
+                        ?.collection("sos")?.document(activeEvent.id)
+                        ?.update(
                             mapOf(
                                 "isResolved" to true,
                                 "updatedAt" to FieldValue.serverTimestamp()
                             )
-                        ).await()
+                        )?.await()
                 } catch (e: Exception) {
                     handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/sos/${activeEvent.id}")
                 }

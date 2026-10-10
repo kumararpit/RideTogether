@@ -44,21 +44,21 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     val osrmRoutingService = OsrmRoutingService()
     val placeSearchService = PlaceSearchService()
 
-    private val db: FirebaseFirestore = try {
+    private val db: FirebaseFirestore? = try {
         val databaseId = BuildConfig.FIRESTORE_DATABASE_ID.ifBlank { "(default)" }
         if (databaseId.isNotBlank() && databaseId != "(default)") {
             try {
                 FirebaseFirestore.getInstance(databaseId)
             } catch (e: Exception) {
                 android.util.Log.w("RideViewModel", "Failed to get Firestore for $databaseId, falling back to default", e)
-                FirebaseFirestore.getInstance()
+                try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
             }
         } else {
-            FirebaseFirestore.getInstance()
+            try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
         }
     } catch (e: Exception) {
         android.util.Log.e("RideViewModel", "Error initializing FirebaseFirestore: ${e.message}", e)
-        FirebaseFirestore.getInstance()
+        try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
     }
 
     val authRepository = AuthRepository()

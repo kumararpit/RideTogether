@@ -167,6 +167,7 @@ class AuthRepository(
             return BuildConfig.FIREBASE_WEB_CLIENT_ID
         }
 
-        return ""
+        // Priority 3: Fallback from google-services.json
+        return "186359431230-7s1n2cakafuueo0fbmba2751jmf8jsr3.apps.googleusercontent.com"
     }
 }
