@@ -107,22 +107,24 @@ class AuthRepository(
             Log.w("AuthRepository", "Google sign-in was cancelled by user: ${e.message}")
             Result.failure(e)
         } catch (e: androidx.credentials.exceptions.NoCredentialException) {
-            Log.e("AuthRepository", "NoCredentialException during Google sign-in", e)
-            val friendlyMsg = "No Google Account found or authorized. Please ensure a Google Account is added to this device in Settings > Accounts, then tap Sign In again."
+            Log.e("AuthRepository", "NoCredentialException during Google sign-in (Client ID: '$serverClientId')", e)
+            val friendlyMsg = "No Google Account found on this device or authorization failed. Please ensure a Google Account is signed in on your device (Android Settings > Accounts) and Google Play Services is enabled, then retry."
             Result.failure(Exception(friendlyMsg, e))
         } catch (e: GetCredentialException) {
-            Log.e("AuthRepository", "CredentialManager exception during Google sign-in", e)
+            Log.e("AuthRepository", "CredentialManager exception during Google sign-in: ${e.message}", e)
             val msg = e.message.orEmpty()
             val friendlyMsg = when {
                 msg.contains("16") || msg.contains("Account reauth failed") ->
-                    "Google Play account re-authentication required. Please check that a Google Account is active on your device and tap Sign In again."
+                    "Google Play account re-authentication required. Please check that a Google Account is active in Android Settings > Accounts, then tap Sign In again."
                 msg.contains("No credentials available", ignoreCase = true) ->
-                    "No Google Account found on this device. Please sign in to a Google account in Android Settings > Accounts, then retry."
+                    "No Google credentials available on this device. Please sign in to a Google account in Android Settings > Accounts, then retry."
+                msg.contains("Developer error", ignoreCase = true) || msg.contains("10:") ->
+                    "Google Sign-In configuration mismatch (Developer Error 10). Verify that the package name and SHA-1 certificate hash are registered with this OAuth client in Firebase Console."
                 else -> e.localizedMessage ?: "Google sign-in failed. Please try again."
             }
             Result.failure(Exception(friendlyMsg, e))
         } catch (e: Exception) {
-            Log.e("AuthRepository", "Authentication failed", e)
+            Log.e("AuthRepository", "Authentication failed: ${e.message}", e)
             Result.failure(e)
         }
     }
