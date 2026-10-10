@@ -10,7 +10,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -19,9 +21,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import com.example.ui.theme.AmberPrimary
 import com.example.ui.screens.CreateRideScreen
 import com.example.ui.screens.JoinRideScreen
 import com.example.ui.screens.LiveRideScreen
@@ -191,7 +195,12 @@ fun RideTogetherApp(viewModel: RideViewModel) {
                     onBack = { viewModel.navigateTo(AppScreen.WELCOME) }
                 )
             } else {
-                viewModel.navigateTo(AppScreen.WELCOME)
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(color = AmberPrimary)
+                }
             }
         }
 

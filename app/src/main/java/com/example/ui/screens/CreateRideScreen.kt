@@ -90,6 +90,7 @@ fun CreateRideScreen(
     var destCoords by remember { mutableStateOf<LatLng?>(defaultDest) }
 
     var nameError by remember { mutableStateOf(false) }
+    var isCreating by remember { mutableStateOf(false) }
 
     // Search state for Start
     var startSearchResults by remember { mutableStateOf<List<PlaceSearchResult>>(emptyList()) }
@@ -548,33 +549,52 @@ fun CreateRideScreen(
             ) {
                 Button(
                     onClick = {
-                        if (rideName.isBlank()) {
-                            nameError = true
+                        val finalName = if (rideName.isBlank()) {
+                            "${startLocationText.ifBlank { "Pune" }} → ${destinationText.ifBlank { "Lonavala" }}"
                         } else {
-                            onCreateRide(
-                                rideName,
-                                startLocationText,
-                                destinationText,
-                                startCoords,
-                                destCoords
-                            )
+                            rideName
                         }
+                        isCreating = true
+                        onCreateRide(
+                            finalName,
+                            startLocationText,
+                            destinationText,
+                            startCoords,
+                            destCoords
+                        )
                     },
+                    enabled = !isCreating,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(56.dp)
                         .testTag("submit_create_ride_button"),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = AmberPrimary,
-                        contentColor = Color.Black
+                        contentColor = Color.Black,
+                        disabledContainerColor = AmberPrimary.copy(alpha = 0.6f),
+                        disabledContentColor = Color.Black.copy(alpha = 0.7f)
                     ),
                     shape = RoundedCornerShape(14.dp)
                 ) {
-                    Text(
-                        text = "Create Ride & Open Lobby",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    if (isCreating) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = Color.Black,
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Opening Lobby...",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    } else {
+                        Text(
+                            text = "Create Ride & Open Lobby",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
         }
