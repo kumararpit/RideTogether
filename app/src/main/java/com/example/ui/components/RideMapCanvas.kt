@@ -453,49 +453,53 @@ fun RideMapCanvas(
                     )
                 )
 
-                // Name & Status Pill
-                val labelText = if (rider.isCurrentUser) "${rider.name} (You)" else rider.name
-                val bikeSuffix = if (rider.motorcycleModel.isNotBlank()) " [${rider.motorcycleModel}]" else ""
-                val statusText = when {
-                    rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_UNAVAILABLE -> "⚠️ No GPS"
-                    rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_STALE -> "⏳ Stale"
-                    rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED -> "🔌 Disconnected"
-                    rider.connectionStatus == com.example.data.model.ConnectionStatus.RECONNECTING -> "🔄 Reconnecting"
-                    rider.status == MemberStatus.EMERGENCY -> "🚨 SOS!"
-                    rider.status == MemberStatus.STOPPED -> "Stopped"
-                    rider.status == MemberStatus.RIDING -> "${rider.speedKmh.toInt()} km/h"
-                    rider.status == MemberStatus.OFFLINE -> "Offline"
-                    else -> "${rider.speedKmh.toInt()} km/h"
+                // Render full callout tag ONLY for selected rider, current user, or emergency
+                if (rider.isCurrentUser || isSelected || isEmergency) {
+                    val labelText = if (rider.isCurrentUser) "${rider.name} (You)" else rider.name
+                    val leaderBadge = if (rider.role == com.example.data.model.RideRole.LEADER) " ⭐" else ""
+                    val bikeSuffix = if (rider.motorcycleModel.isNotBlank()) " [${rider.motorcycleModel}]" else ""
+                    val distGapText = if (!rider.isCurrentUser && currentUser != null) " • Gap: ${rider.getFormattedDistanceTo(currentUser.location)}" else ""
+                    val statusText = when {
+                        rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_UNAVAILABLE -> "⚠️ No GPS"
+                        rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_STALE -> "⏳ Stale"
+                        rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED -> "🔌 Disconnected"
+                        rider.connectionStatus == com.example.data.model.ConnectionStatus.RECONNECTING -> "🔄 Reconnecting"
+                        rider.status == MemberStatus.EMERGENCY -> "🚨 SOS!"
+                        rider.status == MemberStatus.STOPPED -> "Stopped"
+                        rider.status == MemberStatus.RIDING -> "${rider.speedKmh.toInt()} km/h"
+                        rider.status == MemberStatus.OFFLINE -> "Offline"
+                        else -> "${rider.speedKmh.toInt()} km/h"
+                    }
+
+                    val fullTag = "$labelText$leaderBadge$bikeSuffix$distGapText • $statusText"
+                    val tagStyle = TextStyle(
+                        color = when {
+                            isEmergency -> StatusEmergencyRed
+                            rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_STALE -> StatusStoppedAmber
+                            rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED -> Color(0xFF90A4AE)
+                            else -> Color.White
+                        },
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    val layoutResult = textMeasurer.measure(fullTag, tagStyle)
+                    val textW = layoutResult.size.width.toFloat()
+                    val textH = layoutResult.size.height.toFloat()
+
+                    val boxTopLeft = Offset(screenPos.x - (textW / 2f) - 6f, screenPos.y - 38f)
+                    drawRoundRect(
+                        color = Color(0xDD121721),
+                        topLeft = boxTopLeft,
+                        size = androidx.compose.ui.geometry.Size(textW + 12f, textH + 6f),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(8f, 8f)
+                    )
+                    drawSafeText(
+                        text = fullTag,
+                        x = boxTopLeft.x + 6f,
+                        y = boxTopLeft.y + 3f,
+                        style = tagStyle
+                    )
                 }
-
-                val fullTag = "$labelText$bikeSuffix • $statusText"
-                val tagStyle = TextStyle(
-                    color = when {
-                        isEmergency -> StatusEmergencyRed
-                        rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_STALE -> StatusStoppedAmber
-                        rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED -> Color(0xFF90A4AE)
-                        else -> Color.White
-                    },
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                val layoutResult = textMeasurer.measure(fullTag, tagStyle)
-                val textW = layoutResult.size.width.toFloat()
-                val textH = layoutResult.size.height.toFloat()
-
-                val boxTopLeft = Offset(screenPos.x - (textW / 2f) - 6f, screenPos.y - 38f)
-                drawRoundRect(
-                    color = Color(0xDD121721),
-                    topLeft = boxTopLeft,
-                    size = androidx.compose.ui.geometry.Size(textW + 12f, textH + 6f),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(8f, 8f)
-                )
-                drawSafeText(
-                    text = fullTag,
-                    x = boxTopLeft.x + 6f,
-                    y = boxTopLeft.y + 3f,
-                    style = tagStyle
-                )
             }
         }
 

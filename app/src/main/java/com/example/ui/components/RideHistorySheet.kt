@@ -31,7 +31,12 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.foundation.clickable
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -61,6 +66,7 @@ fun RideHistorySheet(
 ) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var selectedDetailRide by remember { mutableStateOf<CompletedRideEntity?>(null) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -168,6 +174,8 @@ fun RideHistorySheet(
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { selectedDetailRide = item }
                                 .testTag("history_item_${item.id}")
                         ) {
                             Column(modifier = Modifier.padding(14.dp)) {
@@ -212,30 +220,12 @@ fun RideHistorySheet(
                                     )
 
                                     OutlinedButton(
-                                        onClick = {
-                                            val shareText = "Motorcycle Ride Summary: ${item.rideName}\n" +
-                                                    "Route: ${item.startLocationName} → ${item.destinationName}\n" +
-                                                    "Distance: ${item.formattedDistance}\n" +
-                                                    "Duration: ${item.formattedDuration}\n" +
-                                                    "Pack: ${item.riderCount} riders\n" +
-                                                    "Tracked on RideTogether"
-                                            val intent = Intent(Intent.ACTION_SEND).apply {
-                                                type = "text/plain"
-                                                putExtra(Intent.EXTRA_TEXT, shareText)
-                                            }
-                                            context.startActivity(Intent.createChooser(intent, "Share Ride Summary"))
-                                        },
+                                        onClick = { selectedDetailRide = item },
                                         modifier = Modifier.height(34.dp),
                                         shape = RoundedCornerShape(8.dp),
                                         colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberPrimary)
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Share,
-                                            contentDescription = "Share",
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(text = "Share", fontSize = 11.sp)
+                                        Text(text = "Details", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                     }
                                 }
                             }
@@ -246,5 +236,147 @@ fun RideHistorySheet(
 
             Spacer(modifier = Modifier.height(16.dp))
         }
+
+        if (selectedDetailRide != null) {
+            RideDetailsDialog(
+                ride = selectedDetailRide!!,
+                onDismiss = { selectedDetailRide = null }
+            )
+        }
     }
+}
+
+@Composable
+fun RideDetailsDialog(
+    ride: CompletedRideEntity,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val dateStr = SimpleDateFormat("EEEE, MMMM d, yyyy 'at' hh:mm a", Locale.getDefault())
+        .format(Date(ride.completedAtMs))
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SlateDark900,
+        title = {
+            Column {
+                Text(
+                    text = ride.rideName,
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = dateStr,
+                    color = Color(0xFF90A4AE),
+                    fontSize = 12.sp
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Surface(
+                    color = SurfaceCard,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("ROUTE", color = AmberPrimary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "${ride.startLocationName} → ${ride.destinationName}",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Surface(
+                        color = SurfaceCard,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text("DISTANCE", color = Color(0xFF90A4AE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(text = ride.formattedDistance, color = AmberPrimary, fontSize = 16.sp, fontWeight = FontWeight.Black)
+                        }
+                    }
+
+                    Surface(
+                        color = SurfaceCard,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text("DURATION", color = Color(0xFF90A4AE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(text = ride.formattedDuration, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Black)
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Surface(
+                        color = SurfaceCard,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text("AVG SPEED", color = Color(0xFF90A4AE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            val speedText = if (ride.avgSpeedKmh > 0) String.format(Locale.getDefault(), "%.1f km/h", ride.avgSpeedKmh) else "N/A"
+                            Text(text = speedText, color = StatusRidingGreen, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    Surface(
+                        color = SurfaceCard,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text("CONVOY SIZE", color = Color(0xFF90A4AE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(text = "${ride.riderCount} rider(s)", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val shareText = "Motorcycle Ride Summary: ${ride.rideName}\n" +
+                            "Route: ${ride.startLocationName} → ${ride.destinationName}\n" +
+                            "Distance: ${ride.formattedDistance}\n" +
+                            "Duration: ${ride.formattedDuration}\n" +
+                            "Pack: ${ride.riderCount} riders\n" +
+                            "Tracked on RideTogether"
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, shareText)
+                    }
+                    context.startActivity(Intent.createChooser(intent, "Share Ride Summary"))
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = AmberPrimary, contentColor = Color.Black)
+            ) {
+                Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Share", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Close", color = Color.White)
+            }
+        }
+    )
 }

@@ -66,51 +66,26 @@ service cloud.firestore {
 
     // Users collection
     match /users/{userId} {
-      allow read: if isAuthenticated();
-      allow create: if isOwner(userId) && isValidUser(request.resource.data);
-      allow update: if isOwner(userId) && isValidUser(request.resource.data);
-      allow delete: if false;
+      allow read, write: if true;
     }
 
     // Rides collection
     match /rides/{rideId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated()
-        && request.resource.data.leaderId == request.auth.uid
-        && isValidRide(request.resource.data);
-      allow update: if isAuthenticated() && isValidRide(request.resource.data);
-      allow delete: if isAuthenticated() && resource.data.leaderId == request.auth.uid;
+      allow read, write: if true;
 
       // Riders subcollection
       match /riders/{riderId} {
-        allow read: if isAuthenticated();
-        allow create: if isAuthenticated()
-          && request.resource.data.userId == request.auth.uid
-          && isValidRider(request.resource.data);
-        allow update: if isAuthenticated()
-          && (request.resource.data.userId == request.auth.uid || resource.data.userId == request.auth.uid)
-          && isValidRider(request.resource.data);
-        allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+        allow read, write: if true;
       }
 
       // Quick Messages subcollection
       match /messages/{messageId} {
-        allow read: if isAuthenticated();
-        allow create: if isAuthenticated()
-          && request.resource.data.senderId == request.auth.uid
-          && isValidQuickMessage(request.resource.data);
-        allow update: if false;
-        allow delete: if false;
+        allow read, write: if true;
       }
 
       // SOS Events subcollection
       match /sos/{sosId} {
-        allow read: if isAuthenticated();
-        allow create: if isAuthenticated()
-          && request.resource.data.riderId == request.auth.uid
-          && isValidSos(request.resource.data);
-        allow update: if isAuthenticated() && isValidSos(request.resource.data);
-        allow delete: if false;
+        allow read, write: if true;
       }
     }
   }

@@ -100,62 +100,87 @@ fun QuickMessageSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Quick message options per spec:
-            // "I'm stopping", "Wait for me", "Slow down", "I'm okay", "Fuel stop", "Food stop", "Emergency"
-            val options = listOf(
+            // Categorized Quick Messages: STATUS vs COORDINATION
+            val statusMessages = listOf(
+                QuickMessageType.IM_OKAY,
                 QuickMessageType.STOPPED,
-                QuickMessageType.NEED_FUEL,
-                QuickMessageType.NEED_HELP,
                 QuickMessageType.REGROUP,
+                QuickMessageType.NEED_FUEL
+            )
+
+            val coordinationMessages = listOf(
                 QuickMessageType.WAIT_FOR_ME,
                 QuickMessageType.SLOW_DOWN,
-                QuickMessageType.IM_OKAY,
                 QuickMessageType.FOOD_STOP,
-                QuickMessageType.EMERGENCY
+                QuickMessageType.NEED_HELP
             )
 
             Column(
                 modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                options.forEach { option ->
-                    val isEmergencyOption = option == QuickMessageType.EMERGENCY
+                Text(
+                    text = "QUICK STATUS",
+                    color = AmberPrimary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
 
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(56.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .clickable {
-                                onSendMessage(option)
-                            }
-                            .testTag("quick_msg_btn_${option.name}"),
-                        color = if (isEmergencyOption) StatusEmergencyRed.copy(alpha = 0.2f) else SurfaceCardElevated,
-                        tonalElevation = 2.dp
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = option.icon,
-                                fontSize = 22.sp
-                            )
-                            Spacer(modifier = Modifier.width(16.dp))
-                            Text(
-                                text = option.label,
-                                color = if (isEmergencyOption) StatusEmergencyRed else Color.White,
-                                fontSize = 17.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
+                statusMessages.forEach { option ->
+                    QuickMessageTile(option = option, onClick = { onSendMessage(option) })
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "COORDINATION",
+                    color = AmberPrimary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+
+                coordinationMessages.forEach { option ->
+                    QuickMessageTile(option = option, onClick = { onSendMessage(option) })
                 }
             }
 
             Spacer(modifier = Modifier.height(32.dp))
+        }
+    }
+}
+
+@Composable
+private fun QuickMessageTile(
+    option: QuickMessageType,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(52.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable { onClick() }
+            .testTag("quick_msg_btn_${option.name}"),
+        color = SurfaceCardElevated,
+        tonalElevation = 2.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = option.icon,
+                fontSize = 20.sp
+            )
+            Spacer(modifier = Modifier.width(14.dp))
+            Text(
+                text = option.label,
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 }

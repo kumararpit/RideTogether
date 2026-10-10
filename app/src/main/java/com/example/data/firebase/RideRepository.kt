@@ -326,16 +326,14 @@ class RideRepository(
             Log.w("RideRepository", "Failed attaching initial ride listener: ${e.message}")
         }
 
-        // Asynchronously persist to Firestore in background without blocking the lobby transition
-        repositoryScope.launch {
-            try {
-                firestore?.collection("rides")?.document(rideId)?.set(rideDoc)?.await()
-                firestore?.collection("rides")?.document(rideId)
-                    ?.collection("riders")?.document(uid)?.set(leaderRiderDoc)?.await()
-                Log.d("RideRepository", "Successfully persisted ride $rideId to Firestore")
-            } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.CREATE, "rides/$rideId")
-            }
+        // Persist to Firestore immediately so the document is present when other users join with code
+        try {
+            firestore?.collection("rides")?.document(rideId)?.set(rideDoc)?.await()
+            firestore?.collection("rides")?.document(rideId)
+                ?.collection("riders")?.document(uid)?.set(leaderRiderDoc)?.await()
+            Log.d("RideRepository", "Successfully persisted ride $rideId to Firestore")
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, "rides/$rideId")
         }
 
         return createdRide
@@ -363,6 +361,14 @@ class RideRepository(
             return Result.success(demoRide)
         }
 
+        // Check if current in-memory ride matches this code (e.g., created locally or active)
+        val activeLocal = _currentRide.value
+        if (activeLocal != null && activeLocal.inviteCode.equals(code, ignoreCase = true)) {
+            _joinError.value = null
+            listenToRide(activeLocal.id)
+            return Result.success(activeLocal)
+        }
+
         return try {
             val fs = firestore
             if (fs == null) {
@@ -370,10 +376,42 @@ class RideRepository(
                 return Result.failure(IllegalStateException("Cloud database offline"))
             }
 
-            val querySnapshot = fs.collection("rides")
+            var querySnapshot = fs.collection("rides")
                 .whereEqualTo("inviteCode", code)
                 .get()
                 .await()
+
+            if (querySnapshot.isEmpty) {
+                querySnapshot = fs.collection("rides")
+                    .whereEqualTo("inviteCode", inviteCode.trim())
+                    .get()
+                    .await()
+            }
+
+            if (querySnapshot.isEmpty) {
+                querySnapshot = fs.collection("rides")
+                    .whereEqualTo("inviteCode", code.lowercase())
+                    .get()
+                    .await()
+            }
+
+            if (querySnapshot.isEmpty) {
+                try {
+                    val allRides = fs.collection("rides").limit(50).get().await()
+                    val matchedDoc = allRides.documents.find { doc ->
+                        val ic = doc.getString("inviteCode").orEmpty().trim()
+                        ic.equals(code, ignoreCase = true) || ic.equals(inviteCode.trim(), ignoreCase = true)
+                    }
+                    if (matchedDoc != null) {
+                        querySnapshot = fs.collection("rides")
+                            .whereEqualTo("id", matchedDoc.id)
+                            .get()
+                            .await()
+                    }
+                } catch (e: Exception) {
+                    Log.w("RideRepository", "Fallback scan failed: ${e.message}")
+                }
+            }
 
             if (querySnapshot.isEmpty) {
                 _joinError.value = "No ride found with code: $code"
@@ -492,7 +530,12 @@ class RideRepository(
                 val ridersList = snapshot.documents.mapNotNull { doc ->
                     parseRiderDoc(doc, currentUid)
                 }
-                _members.value = ridersList
+                if (ridersList.isNotEmpty()) {
+                    _members.value = ridersList
+                } else if (_members.value.isNotEmpty()) {
+                    // Keep existing local members if remote snapshot is temporarily empty
+                    Log.d("RideRepository", "Remote riders snapshot empty, keeping ${_members.value.size} local members")
+                }
             }
         }
 
@@ -564,15 +607,23 @@ class RideRepository(
     }
 
     private fun parseRiderDoc(doc: DocumentSnapshot, currentUid: String): RiderMember? {
-        val id = doc.getString("userId") ?: doc.id
+        val id = doc.getString("userId") ?: doc.getString("id") ?: doc.id
         val name = doc.getString("name") ?: "Rider"
         val motorcycle = doc.getString("motorcycleModel") ?: ""
+
+        val rideLeaderId = _currentRide.value?.leaderId ?: ""
         val roleStr = doc.getString("role") ?: "MEMBER"
-        val role = runCatching { RideRole.valueOf(roleStr) }.getOrDefault(RideRole.MEMBER)
+        val isLeader = (id == rideLeaderId) || roleStr.equals("LEADER", ignoreCase = true)
+        val role = if (isLeader) RideRole.LEADER else RideRole.MEMBER
+
         val statusStr = doc.getString("status") ?: "RIDING"
         val status = runCatching { MemberStatus.valueOf(statusStr) }.getOrDefault(MemberStatus.RIDING)
-        val lat = doc.getDouble("latitude") ?: return null
-        val lng = doc.getDouble("longitude") ?: return null
+
+        val defaultLat = locationTracker.currentLocation.value?.latLng?.latitude ?: _currentRide.value?.startLocation?.latitude ?: 18.5204
+        val defaultLng = locationTracker.currentLocation.value?.latLng?.longitude ?: _currentRide.value?.startLocation?.longitude ?: 73.8567
+
+        val lat = doc.getDouble("latitude") ?: doc.getDouble("startLat") ?: defaultLat
+        val lng = doc.getDouble("longitude") ?: doc.getDouble("startLng") ?: defaultLng
         val speedKmh = doc.getDouble("speedKmh") ?: 0.0
         val headingDeg = (doc.getDouble("headingDeg") ?: 0.0).toFloat()
         val stoppedSec = doc.getLong("stoppedDurationSec") ?: 0L
@@ -758,6 +809,46 @@ class RideRepository(
         _activeSos.value = null
         _recentMessage.value = null
         stopDetector.reset()
+    }
+
+    fun transferLeadership(newLeaderId: String) {
+        val activeRideId = _currentRide.value?.id ?: return
+        val currentUid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return
+
+        val currentRideVal = _currentRide.value
+        if (currentRideVal != null) {
+            _currentRide.value = currentRideVal.copy(leaderId = newLeaderId)
+        }
+
+        _members.value = _members.value.map { member ->
+            when (member.id) {
+                newLeaderId -> member.copy(role = RideRole.LEADER)
+                currentUid -> member.copy(role = RideRole.MEMBER)
+                else -> member
+            }
+        }
+
+        repositoryScope.launch {
+            try {
+                firestore?.collection("rides")?.document(activeRideId)
+                    ?.update("leaderId", newLeaderId)
+                    ?.await()
+
+                firestore?.collection("rides")?.document(activeRideId)
+                    ?.collection("riders")?.document(newLeaderId)
+                    ?.update("role", "LEADER")
+                    ?.await()
+
+                firestore?.collection("rides")?.document(activeRideId)
+                    ?.collection("riders")?.document(currentUid)
+                    ?.update("role", "MEMBER")
+                    ?.await()
+
+                Log.d("RideRepository", "Transferred leadership of ride $activeRideId to $newLeaderId")
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/leader")
+            }
+        }
     }
 
     fun sendQuickMessage(type: QuickMessageType) {

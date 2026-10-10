@@ -1,10 +1,7 @@
 package com.example.ui.components
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,13 +12,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.GroupAdd
-import androidx.compose.material.icons.filled.Map
-import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -34,21 +33,26 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.Ride
+import com.example.data.model.RideRole
 import com.example.data.model.RiderMember
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.DividerColor
 import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
+import com.example.ui.theme.StatusEmergencyRed
 import com.example.ui.theme.SurfaceCard
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -56,13 +60,18 @@ import com.example.ui.theme.SurfaceCard
 fun RideSettingsSheet(
     ride: Ride?,
     currentRider: RiderMember?,
-    onAddMember: (name: String) -> Unit,
+    members: List<RiderMember> = emptyList(),
+    onTransferLeadership: ((newLeaderId: String) -> Unit)? = null,
     onEndRide: () -> Unit,
     onLeaveRide: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var showEndRideConfirm by remember { mutableStateOf(false) }
+    var selectedTargetRiderForLeader by remember { mutableStateOf<RiderMember?>(null) }
+
+    val isLeader = (currentRider?.role == RideRole.LEADER) || (ride?.leaderId == currentRider?.id)
+    val otherMembers = members.filter { !it.isCurrentUser && it.id != currentRider?.id }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -85,6 +94,7 @@ fun RideSettingsSheet(
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp, vertical = 8.dp)
         ) {
+            // Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -92,7 +102,7 @@ fun RideSettingsSheet(
             ) {
                 Column {
                     Text(
-                        text = "Ride Settings & Info",
+                        text = "Convoy Controls",
                         color = Color.White,
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold
@@ -119,171 +129,251 @@ fun RideSettingsSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Zero-Cost OpenStreetMap & MapLibre Architecture Card
+            // Current Role Badge Card
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 color = SurfaceCard,
-                shape = RoundedCornerShape(12.dp)
+                shape = RoundedCornerShape(14.dp)
             ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column {
+                        Text(
+                            text = "YOUR CONVOY ROLE",
+                            color = Color(0xFF90A4AE),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = if (isLeader) "Convoy Leader (Host)" else "Convoy Rider",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isLeader) AmberPrimary.copy(alpha = 0.25f) else SlateDark800)
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.Map,
-                                contentDescription = null,
-                                tint = AmberPrimary,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
+                            if (isLeader) {
+                                Icon(
+                                    imageVector = Icons.Default.Star,
+                                    contentDescription = null,
+                                    tint = AmberPrimary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                            }
                             Text(
-                                text = "MAP ENGINE: OPENSTREETMAP (₹0 COST)",
-                                color = AmberPrimary,
+                                text = if (isLeader) "LEADER" else "MEMBER",
+                                color = if (isLeader) AmberPrimary else Color(0xFFCFD8DC),
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
                             )
                         }
-
-                        Text(
-                            text = "🟢 Active",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
                     }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Text(
-                        text = "• MapLibre & OpenStreetMap tiles\n• No Google Cloud billing or credit card required\n• Compliant User-Agent & local disk cache\n• MapProvider abstraction for future custom tile servers",
-                        color = Color(0xFFCFD8DC),
-                        fontSize = 12.sp,
-                        lineHeight = 18.sp
-                    )
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            // Transfer Leadership Section (Leader only)
+            if (isLeader && otherMembers.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(16.dp))
 
-            // Stop Detection status card
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = SurfaceCard,
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Speed,
-                            contentDescription = null,
-                            tint = AmberPrimary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "AUTOMATIC STOP DETECTION",
-                            color = AmberPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                Text(
+                    text = "PASS LEADER ROLE TO RIDER",
+                    color = AmberPrimary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
-                    Text(
-                        text = "• Speed < 5 km/h for 2 minutes → Marked 🟡 STOPPED\n• Speed > 8 km/h → Resumes 🟢 RIDING\n• Hysteresis active between 5 and 8 km/h",
-                        color = Color(0xFFCFD8DC),
-                        fontSize = 12.sp,
-                        lineHeight = 18.sp
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Add Pack Member Button (useful for testing multi-rider group experience)
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = SurfaceCard,
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Add Pack Rider",
-                            color = Color.White,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = "Add a companion rider to test group map & relative distance",
-                            color = Color(0xFF90A4AE),
-                            fontSize = 11.sp
-                        )
+                    otherMembers.forEach { rider ->
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { selectedTargetRiderForLeader = rider },
+                            color = SurfaceCard
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(34.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(rider.avatarColorHex)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = rider.name.take(1).uppercase(),
+                                            color = Color.White,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column {
+                                        Text(text = rider.name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                        if (rider.motorcycleModel.isNotBlank()) {
+                                            Text(text = "🏍️ ${rider.motorcycleModel}", color = AmberPrimary, fontSize = 11.sp)
+                                        }
+                                    }
+                                }
+
+                                Button(
+                                    onClick = { selectedTargetRiderForLeader = rider },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = SlateDark800,
+                                        contentColor = AmberPrimary
+                                    ),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Icon(imageVector = Icons.Default.SwapHoriz, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Make Leader", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+            HorizontalDivider(color = DividerColor)
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Actions: Member gets ONLY "Leave Ride". Leader gets "Leave Ride" and "End Ride".
+            if (isLeader) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(
+                        onClick = onLeaveRide,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("leave_ride_button"),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("Leave Ride", color = Color(0xFFCFD8DC))
                     }
 
                     Button(
-                        onClick = {
-                            val names = listOf("Rahul", "Amit", "Vikas", "Sameer", "Karan", "Pooja")
-                            onAddMember(names.random())
-                        },
+                        onClick = { showEndRideConfirm = true },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("end_ride_button"),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = SlateDark800,
-                            contentColor = AmberPrimary
+                            containerColor = StatusEmergencyRed,
+                            contentColor = Color.White
                         ),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.testTag("add_pack_member_button")
+                        shape = RoundedCornerShape(10.dp)
                     ) {
-                        Icon(imageVector = Icons.Default.GroupAdd, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Add", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("End Ride", fontWeight = FontWeight.Bold)
                     }
                 }
-            }
-
-            Spacer(modifier = Modifier.height(18.dp))
-            HorizontalDivider(color = DividerColor)
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // Actions: Leave or End
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            } else {
+                // Non-leader members can ONLY leave the ride session
                 OutlinedButton(
                     onClick = onLeaveRide,
                     modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp)
+                        .fillMaxWidth()
+                        .height(50.dp)
                         .testTag("leave_ride_button"),
-                    shape = RoundedCornerShape(10.dp)
+                    shape = RoundedCornerShape(12.dp)
                 ) {
-                    Text("Leave Ride", color = Color(0xFFCFD8DC))
-                }
-
-                Button(
-                    onClick = onEndRide,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp)
-                        .testTag("end_ride_button"),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = AmberPrimary,
-                        contentColor = Color.Black
-                    ),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text("End Ride", fontWeight = FontWeight.Bold)
+                    Text("Leave Convoy Session", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 }
             }
 
-            Spacer(modifier = Modifier.height(30.dp))
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+
+        // Dialog to confirm Transfer Leadership
+        if (selectedTargetRiderForLeader != null && onTransferLeadership != null) {
+            val target = selectedTargetRiderForLeader!!
+            AlertDialog(
+                onDismissRequest = { selectedTargetRiderForLeader = null },
+                containerColor = SlateDark900,
+                title = {
+                    Text("Transfer Convoy Leadership?", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                },
+                text = {
+                    Text(
+                        text = "Appoint ${target.name} as the new Convoy Leader? They will receive full control over ride settings and termination.",
+                        color = Color(0xFFCFD8DC),
+                        fontSize = 13.sp
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            val targetId = target.id
+                            selectedTargetRiderForLeader = null
+                            onTransferLeadership(targetId)
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = AmberPrimary, contentColor = Color.Black)
+                    ) {
+                        Text("Make Leader", fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    OutlinedButton(onClick = { selectedTargetRiderForLeader = null }) {
+                        Text("Cancel", color = Color.White)
+                    }
+                }
+            )
+        }
+
+        // Dialog to confirm End Group Ride
+        if (showEndRideConfirm) {
+            AlertDialog(
+                onDismissRequest = { showEndRideConfirm = false },
+                containerColor = SlateDark900,
+                title = {
+                    Text("End Group Ride?", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                },
+                text = {
+                    Text(
+                        text = "As Convoy Leader, ending this ride will close the live radar and end navigation for all convoy members.",
+                        color = Color(0xFFCFD8DC),
+                        fontSize = 13.sp
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showEndRideConfirm = false
+                            onEndRide()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = StatusEmergencyRed, contentColor = Color.White)
+                    ) {
+                        Text("End Ride Session", fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    OutlinedButton(onClick = { showEndRideConfirm = false }) {
+                        Text("Cancel", color = Color.White)
+                    }
+                }
+            )
         }
     }
 }

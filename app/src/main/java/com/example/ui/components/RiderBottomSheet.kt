@@ -134,12 +134,16 @@ fun RiderBottomSheet(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(sortedMembers, key = { it.id }) { rider ->
+                    val gapText = if (userLoc != null && !rider.isCurrentUser) {
+                        "📏 Gap: ${rider.getFormattedDistanceTo(userLoc)}"
+                    } else if (rider.isCurrentUser) {
+                        "Current device (You)"
+                    } else ""
+
                     RiderCardItem(
                         rider = rider,
                         isSelected = rider.id == selectedRider?.id,
-                        relativePositionText = if (userLoc != null) {
-                            rider.getRelativePositionDescription(userLoc, currentUser.headingDeg)
-                        } else "",
+                        relativePositionText = gapText,
                         onClick = {
                             onSelectRider(rider)
                             onDismiss()

@@ -82,9 +82,15 @@ fun LiveRideScreen(
     val showSosConfirmDialog by viewModel.showSosConfirmDialog.collectAsState()
     val showSettingsSheet by viewModel.showSettingsSheet.collectAsState()
 
-    val currentUser = members.find { it.isCurrentUser }
-    val isMySosActive = activeSos != null && activeSos?.riderId == currentUser?.id
-    val isOtherRiderSos = activeSos != null && activeSos?.riderId != currentUser?.id
+    val currentUserId by viewModel.userId.collectAsState()
+    val currentUser = members.find { it.isCurrentUser || it.id == currentUserId }
+    val myUid = currentUser?.id ?: currentUserId
+
+    val isMySosActive = activeSos != null && (
+        activeSos?.riderId == myUid ||
+        activeSos?.riderId == currentUserId
+    )
+    val isOtherRiderSos = activeSos != null && !isMySosActive
 
     Box(modifier = modifier.fillMaxSize()) {
         // 1. Live Map View with road-following route and bike markers
@@ -123,13 +129,23 @@ fun LiveRideScreen(
 
             // Alert banner if another rider triggered SOS
             if (isOtherRiderSos && activeSos != null) {
-                val isAcked = activeSos!!.acknowledgedBy.contains(currentUser?.id ?: "")
+                val isAcked = activeSos!!.acknowledgedBy.contains(myUid) || activeSos!!.acknowledgedBy.contains(currentUserId)
                 SosAlertBanner(
                     sosEvent = activeSos!!,
                     onViewLocation = { sos ->
                         val target = members.find { it.id == sos.riderId }
                         if (target != null) {
                             viewModel.selectRider(target)
+                        } else {
+                            viewModel.selectRider(
+                                com.example.data.model.RiderMember(
+                                    id = sos.riderId,
+                                    name = sos.riderName,
+                                    role = com.example.data.model.RideRole.MEMBER,
+                                    status = com.example.data.model.MemberStatus.EMERGENCY,
+                                    location = sos.location
+                                )
+                            )
                         }
                     },
                     onAcknowledge = { viewModel.acknowledgeSos(activeSos!!.id) },
@@ -155,28 +171,31 @@ fun LiveRideScreen(
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)
         ) {
-            // Selected Rider Quick Detail Card (if a rider marker was tapped)
-            if (selectedRider != null) {
-                val rider = selectedRider!!
-                val userLoc = currentUser?.location
-                val distText = if (userLoc != null) rider.getFormattedDistanceTo(userLoc) else ""
+    val userLocationUpdate by viewModel.locationTracker.currentLocation.collectAsState()
+
+    // Selected Rider Quick Detail Card (if a rider marker was tapped)
+    if (selectedRider != null) {
+        val rider = selectedRider!!
+        val myLoc = currentUser?.location ?: userLocationUpdate?.latLng
+        val gapStr = if (myLoc != null && !rider.isCurrentUser) "📏 Gap: ${rider.getFormattedDistanceTo(myLoc)}" else "Current Device"
+                val isLeaderRider = rider.role == com.example.data.model.RideRole.LEADER || rider.id == ride?.leaderId
 
                 Surface(
                     modifier = Modifier
-                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
                         .fillMaxWidth()
                         .testTag("selected_rider_card"),
                     color = SlateDark900.copy(alpha = 0.95f),
-                    shape = RoundedCornerShape(16.dp),
-                    tonalElevation = 8.dp
+                    shape = RoundedCornerShape(12.dp),
+                    tonalElevation = 6.dp
                 ) {
                     Row(
-                        modifier = Modifier.padding(14.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(44.dp)
+                                .size(32.dp)
                                 .clip(CircleShape)
                                 .background(Color(rider.avatarColorHex)),
                             contentAlignment = Alignment.Center
@@ -184,42 +203,34 @@ fun LiveRideScreen(
                             Text(
                                 text = rider.name.take(1).uppercase(),
                                 color = Color.White,
-                                fontSize = 18.sp,
+                                fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold
                             )
                         }
 
-                        Spacer(modifier = Modifier.width(12.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
 
                         Column(modifier = Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     text = if (rider.isCurrentUser) "${rider.name} (You)" else rider.name,
                                     color = Color.White,
-                                    fontSize = 16.sp,
+                                    fontSize = 14.sp,
                                     fontWeight = FontWeight.Bold
                                 )
-                                if (rider.motorcycleModel.isNotBlank()) {
-                                    Spacer(modifier = Modifier.width(6.dp))
+                                if (isLeaderRider) {
+                                    Spacer(modifier = Modifier.width(4.dp))
                                     Text(
-                                        text = "• ${rider.motorcycleModel}",
-                                        color = AmberPrimary,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold
+                                        text = "⭐",
+                                        fontSize = 10.sp
                                     )
                                 }
                             }
-                            val updateAgoSec = ((System.currentTimeMillis() - rider.lastUpdatedMs) / 1000).coerceAtLeast(0)
-                            val updateText = when {
-                                rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED -> "Signal lost"
-                                rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_STALE || updateAgoSec > 25 -> "${updateAgoSec}s ago (stale)"
-                                updateAgoSec < 5 -> "Live now"
-                                else -> "${updateAgoSec}s ago"
-                            }
                             Text(
-                                text = if (rider.isCurrentUser) "Current device • $updateText" else "Distance: $distText • $updateText",
-                                color = Color(0xFFCFD8DC),
-                                fontSize = 12.sp
+                                text = gapStr,
+                                color = AmberPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
                             )
                         }
 
@@ -232,13 +243,13 @@ fun LiveRideScreen(
 
                         IconButton(
                             onClick = { viewModel.selectRider(null) },
-                            modifier = Modifier.size(36.dp)
+                            modifier = Modifier.size(32.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Close,
                                 contentDescription = "Close",
                                 tint = Color.White.copy(alpha = 0.7f),
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(16.dp)
                             )
                         }
                     }
@@ -370,14 +381,20 @@ fun LiveRideScreen(
 
         if (showQuickMessageSheet) {
             QuickMessageSheet(
-                onSendMessage = { type -> viewModel.sendQuickMessage(type) },
+                onSendMessage = { type ->
+                    viewModel.sendQuickMessage(type)
+                    viewModel.openQuickMessageSheet(false)
+                },
                 onDismiss = { viewModel.openQuickMessageSheet(false) }
             )
         }
 
         if (showSosConfirmDialog) {
             SosConfirmDialog(
-                onConfirm = { viewModel.triggerSos() },
+                onConfirm = {
+                    viewModel.triggerSos()
+                    viewModel.openSosConfirmDialog(false)
+                },
                 onDismiss = { viewModel.openSosConfirmDialog(false) }
             )
         }
@@ -386,7 +403,8 @@ fun LiveRideScreen(
             RideSettingsSheet(
                 ride = ride,
                 currentRider = currentUser,
-                onAddMember = { name -> viewModel.addPackMember(name) },
+                members = members,
+                onTransferLeadership = { newLeaderId -> viewModel.transferLeadership(newLeaderId) },
                 onEndRide = {
                     viewModel.openSettingsSheet(false)
                     viewModel.endRide()

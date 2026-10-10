@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.TwoWheeler
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -375,7 +376,35 @@ fun CreateRideScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                // Swap Start & Destination Button
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    androidx.compose.material3.OutlinedButton(
+                        onClick = {
+                            val tempText = startLocationText
+                            val tempCoords = startCoords
+                            startLocationText = destinationText
+                            startCoords = destCoords
+                            destinationText = tempText
+                            destCoords = tempCoords
+                            rideName = "$startLocationText → $destinationText"
+                        },
+                        shape = androidx.compose.foundation.shape.CircleShape,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberPrimary),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.6f)),
+                        modifier = Modifier
+                            .height(36.dp)
+                            .testTag("swap_start_dest_button")
+                    ) {
+                        Icon(imageVector = Icons.Default.SwapVert, contentDescription = "Swap", tint = AmberPrimary, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Swap Start & Destination", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // Destination Search Field
                 Surface(
@@ -547,6 +576,7 @@ fun CreateRideScreen(
                     .fillMaxWidth()
                     .padding(vertical = 20.dp)
             ) {
+                val isFormValid = rideName.isNotBlank() && startLocationText.isNotBlank() && destinationText.isNotBlank()
                 Button(
                     onClick = {
                         val finalName = if (rideName.isBlank()) {
@@ -563,7 +593,7 @@ fun CreateRideScreen(
                             destCoords
                         )
                     },
-                    enabled = !isCreating,
+                    enabled = !isCreating && isFormValid,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(56.dp)
@@ -571,8 +601,8 @@ fun CreateRideScreen(
                     colors = ButtonDefaults.buttonColors(
                         containerColor = AmberPrimary,
                         contentColor = Color.Black,
-                        disabledContainerColor = AmberPrimary.copy(alpha = 0.6f),
-                        disabledContentColor = Color.Black.copy(alpha = 0.7f)
+                        disabledContainerColor = AmberPrimary.copy(alpha = 0.4f),
+                        disabledContentColor = Color.Black.copy(alpha = 0.5f)
                     ),
                     shape = RoundedCornerShape(14.dp)
                 ) {

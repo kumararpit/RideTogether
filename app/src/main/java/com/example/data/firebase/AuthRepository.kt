@@ -108,7 +108,16 @@ class AuthRepository(
             Result.failure(e)
         } catch (e: androidx.credentials.exceptions.NoCredentialException) {
             Log.e("AuthRepository", "NoCredentialException during Google sign-in (Client ID: '$serverClientId')", e)
-            val friendlyMsg = "No Google Account found on this device or authorization failed. Please ensure a Google Account is signed in on your device (Android Settings > Accounts) and Google Play Services is enabled, then retry."
+            val msg = e.message.orEmpty()
+            val friendlyMsg = if (
+                msg.contains("Developer console is not set up correctly", ignoreCase = true) ||
+                msg.contains("Developer error", ignoreCase = true) ||
+                msg.contains("10:") || msg.contains("28444")
+            ) {
+                "Google Sign-In configuration mismatch (Developer Error 10). Verify that package 'com.aistudio.ridetogether.vibe' and SHA-1 '8F:0A:25:7E:CE:B8:0A:65:88:06:C6:12:60:BD:3C:C2:76:68:74:E8' are registered in Firebase Console for Client ID '$serverClientId'."
+            } else {
+                "No Google Account found on this device or authorization failed. Please ensure a Google Account is signed in on your device (Android Settings > Accounts) and Google Play Services is enabled, then retry."
+            }
             Result.failure(Exception(friendlyMsg, e))
         } catch (e: GetCredentialException) {
             Log.e("AuthRepository", "CredentialManager exception during Google sign-in: ${e.message}", e)
@@ -118,8 +127,8 @@ class AuthRepository(
                     "Google Play account re-authentication required. Please check that a Google Account is active in Android Settings > Accounts, then tap Sign In again."
                 msg.contains("No credentials available", ignoreCase = true) ->
                     "No Google credentials available on this device. Please sign in to a Google account in Android Settings > Accounts, then retry."
-                msg.contains("Developer error", ignoreCase = true) || msg.contains("10:") ->
-                    "Google Sign-In configuration mismatch (Developer Error 10). Verify that the package name and SHA-1 certificate hash are registered with this OAuth client in Firebase Console."
+                msg.contains("Developer error", ignoreCase = true) || msg.contains("10:") || msg.contains("Developer console is not set up correctly", ignoreCase = true) || msg.contains("28444") ->
+                    "Google Sign-In configuration mismatch (Developer Error 10). Verify that package 'com.aistudio.ridetogether.vibe' and SHA-1 '8F:0A:25:7E:CE:B8:0A:65:88:06:C6:12:60:BD:3C:C2:76:68:74:E8' are registered in Firebase Console for Client ID '$serverClientId'."
                 else -> e.localizedMessage ?: "Google sign-in failed. Please try again."
             }
             Result.failure(Exception(friendlyMsg, e))
@@ -128,6 +137,8 @@ class AuthRepository(
             Result.failure(e)
         }
     }
+
+
 
     suspend fun signOut(context: Context) {
         try {

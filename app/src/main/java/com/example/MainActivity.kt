@@ -18,7 +18,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -117,6 +116,8 @@ fun RideTogetherApp(viewModel: RideViewModel) {
                 onNameChange = { viewModel.setUserName(it) },
                 currentMotorcycle = motorcycleModel,
                 onMotorcycleChange = { viewModel.setMotorcycleModel(it) },
+                activeRide = ride,
+                onRejoinRideClick = { viewModel.rejoinActiveRide() },
                 onCreateRideClick = {
                     if (currentUser != null) {
                         viewModel.navigateTo(AppScreen.CREATE_RIDE)

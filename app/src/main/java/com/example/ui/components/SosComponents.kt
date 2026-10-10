@@ -35,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -182,6 +183,8 @@ fun SosAlertBanner(
     isAcknowledged: Boolean = false,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+
     Surface(
         modifier = modifier
             .fillMaxWidth()
@@ -191,88 +194,136 @@ fun SosAlertBanner(
         color = StatusEmergencyRed,
         tonalElevation = 10.dp
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(12.dp)
         ) {
-            Icon(
-                imageVector = Icons.Default.Warning,
-                contentDescription = "Emergency",
-                tint = Color.White,
-                modifier = Modifier.size(28.dp)
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = "Emergency",
+                    tint = Color.White,
+                    modifier = Modifier.size(28.dp)
+                )
 
-            Spacer(modifier = Modifier.width(10.dp))
+                Spacer(modifier = Modifier.width(10.dp))
 
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "🚨 SOS: ${sosEvent.riderName.uppercase()}",
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Black
-                )
-                Text(
-                    text = "Needs immediate assistance",
-                    color = Color.White,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                val updateAgoSec = ((System.currentTimeMillis() - sosEvent.timestampMs) / 1000).coerceAtLeast(0)
-                Text(
-                    text = if (updateAgoSec < 10) "GPS: Live signal" else "GPS: ${updateAgoSec}s ago",
-                    color = Color.White.copy(alpha = 0.85f),
-                    fontSize = 11.sp
-                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "🚨 SOS: ${sosEvent.riderName.uppercase()}",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Black
+                    )
+                    Text(
+                        text = "Needs immediate assistance",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    val updateAgoSec = ((System.currentTimeMillis() - sosEvent.timestampMs) / 1000).coerceAtLeast(0)
+                    Text(
+                        text = if (updateAgoSec < 10) "GPS: Live signal" else "GPS: ${updateAgoSec}s ago",
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 11.sp
+                    )
+                }
             }
 
-            Spacer(modifier = Modifier.width(6.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            if (onAcknowledge != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (onAcknowledge != null) {
+                    Button(
+                        onClick = onAcknowledge,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isAcknowledged) StatusRidingGreen else Color.White,
+                            contentColor = if (isAcknowledged) Color.Black else StatusEmergencyRed
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .height(38.dp)
+                            .testTag("acknowledge_sos_button")
+                    ) {
+                        Text(
+                            text = if (isAcknowledged) "✓ ACKNOWLEDGED" else "ACK",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+
                 Button(
-                    onClick = onAcknowledge,
+                    onClick = { onViewLocation(sosEvent) },
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isAcknowledged) StatusRidingGreen else Color.White,
-                        contentColor = if (isAcknowledged) Color.Black else StatusEmergencyRed
+                        containerColor = Color.White,
+                        contentColor = StatusEmergencyRed
                     ),
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier
                         .height(38.dp)
-                        .testTag("acknowledge_sos_button")
+                        .testTag("view_sos_location_button")
                 ) {
+                    Icon(
+                        imageVector = Icons.Default.NearMe,
+                        contentDescription = "Map",
+                        tint = StatusEmergencyRed,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = if (isAcknowledged) "✓ ACK" else "ACK",
+                        text = "Map",
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp
                     )
                 }
-                Spacer(modifier = Modifier.width(4.dp))
-            }
 
-            Button(
-                onClick = { onViewLocation(sosEvent) },
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.White,
-                    contentColor = StatusEmergencyRed
-                ),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier
-                    .height(38.dp)
-                    .testTag("view_sos_location_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.NearMe,
-                    contentDescription = "View",
-                    tint = StatusEmergencyRed,
-                    modifier = Modifier.size(15.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = "Map",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp
-                )
+                Spacer(modifier = Modifier.width(6.dp))
+
+                Button(
+                    onClick = {
+                        val gmmIntentUri = android.net.Uri.parse("google.navigation:q=${sosEvent.location.latitude},${sosEvent.location.longitude}")
+                        val mapIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, gmmIntentUri).apply {
+                            setPackage("com.google.android.apps.maps")
+                        }
+                        try {
+                            context.startActivity(mapIntent)
+                        } catch (_: Exception) {
+                            val webUri = android.net.Uri.parse("https://www.google.com/maps/dir/?api=1&destination=${sosEvent.location.latitude},${sosEvent.location.longitude}")
+                            context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, webUri))
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AmberPrimary,
+                        contentColor = SlateDark900
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .height(38.dp)
+                        .testTag("get_directions_sos_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.NearMe,
+                        contentDescription = "Get Directions",
+                        tint = SlateDark900,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "Directions",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
             }
         }
     }
@@ -312,7 +363,7 @@ fun ActiveSosBar(
                 Spacer(modifier = Modifier.width(10.dp))
                 Column {
                     Text(
-                        text = "YOUR SOS IS ACTIVE",
+                        text = "SOS SENT! Group will be here to help soon",
                         color = StatusEmergencyRed,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Black
@@ -320,7 +371,7 @@ fun ActiveSosBar(
                     val ackText = if (acknowledgedCount > 0) {
                         "$acknowledgedCount pack member(s) acknowledged"
                     } else {
-                        "Broadcasting location to pack"
+                        "Broadcasting location to pack in real-time"
                     }
                     Text(
                         text = ackText,

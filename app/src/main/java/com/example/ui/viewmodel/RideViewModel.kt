@@ -45,7 +45,11 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     val placeSearchService = PlaceSearchService()
 
     private val db: FirebaseFirestore? = try {
-        val databaseId = BuildConfig.FIRESTORE_DATABASE_ID.ifBlank { "(default)" }
+        val context = application.applicationContext
+        val resId = context.resources.getIdentifier("firestore_database_id", "string", context.packageName)
+        val configDbId = if (resId != 0) context.getString(resId) else ""
+        val databaseId = configDbId.ifBlank { BuildConfig.FIRESTORE_DATABASE_ID }.ifBlank { "(default)" }
+
         if (databaseId.isNotBlank() && databaseId != "(default)") {
             try {
                 FirebaseFirestore.getInstance(databaseId)
@@ -208,6 +212,19 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
             authRepository.signOut(context)
             leaveRide()
             _currentScreen.value = AppScreen.WELCOME
+        }
+    }
+
+    fun transferLeadership(newLeaderId: String) {
+        repository.transferLeadership(newLeaderId)
+    }
+
+    fun rejoinActiveRide() {
+        val ride = currentRide.value ?: return
+        if (ride.status == com.example.data.model.RideStatus.ACTIVE) {
+            _currentScreen.value = AppScreen.LIVE_RIDE
+        } else {
+            _currentScreen.value = AppScreen.RIDE_LOBBY
         }
     }
 

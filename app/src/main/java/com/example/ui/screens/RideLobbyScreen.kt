@@ -23,7 +23,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
@@ -261,7 +263,47 @@ fun RideLobbyScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Pre-Ride Readiness Checklist Card
+            Surface(
+                color = SurfaceCard,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth().testTag("preride_checklist_card")
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = "PRE-RIDE READINESS CHECKLIST",
+                        color = AmberPrimary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = com.example.ui.theme.StatusRidingGreen, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Location Permission", color = Color.White, fontSize = 12.sp)
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.GpsFixed, contentDescription = null, tint = com.example.ui.theme.StatusRidingGreen, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("GPS Active", color = Color.White, fontSize = 12.sp)
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = com.example.ui.theme.StatusRidingGreen, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Live Radar", color = Color.White, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
 
             // Riders Waiting in Lobby
             Row(
@@ -276,9 +318,10 @@ fun RideLobbyScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Waiting for departure",
-                    color = Color(0xFF78909C),
-                    fontSize = 11.sp
+                    text = "${members.size}/${members.size} Ready to Depart",
+                    color = com.example.ui.theme.StatusRidingGreen,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
                 )
             }
 
@@ -327,14 +370,31 @@ fun RideLobbyScreen(
                                         fontSize = 15.sp,
                                         fontWeight = FontWeight.Bold
                                     )
-                                    if (rider.role == RideRole.LEADER) {
+                                    val isRiderLeader = (rider.role == RideRole.LEADER) || (rider.id == ride.leaderId)
+                                    if (isRiderLeader) {
                                         Spacer(modifier = Modifier.width(6.dp))
-                                        Icon(
-                                            imageVector = Icons.Default.Star,
-                                            contentDescription = "Leader",
-                                            tint = AmberPrimary,
-                                            modifier = Modifier.size(12.dp)
-                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(AmberPrimary.copy(alpha = 0.25f))
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Star,
+                                                    contentDescription = "Leader",
+                                                    tint = AmberPrimary,
+                                                    modifier = Modifier.size(10.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(2.dp))
+                                                Text(
+                                                    text = "LEADER",
+                                                    color = AmberPrimary,
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                                 Text(
