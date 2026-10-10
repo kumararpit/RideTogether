@@ -44,28 +44,21 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     val osrmRoutingService = OsrmRoutingService()
     val placeSearchService = PlaceSearchService()
 
-    private val db: FirebaseFirestore = run {
-        try {
-            val databaseId = BuildConfig.FIRESTORE_DATABASE_ID.ifBlank {
-                try {
-                    application.getString(R.string.firestore_database_id)
-                } catch (e: Exception) {
-                    "ai-studio-android-ridetoge-ff1218fd-f019-458f-ad73-f84981c73561"
-                }
-            }
-            if (databaseId.isNotBlank() && databaseId != "(default)") {
-                FirebaseFirestore.getInstance(databaseId)
-            } else {
-                FirebaseFirestore.getInstance()
-            }
-        } catch (_: Exception) {
+    private val db: FirebaseFirestore = try {
+        val databaseId = BuildConfig.FIRESTORE_DATABASE_ID.ifBlank { "(default)" }
+        if (databaseId.isNotBlank() && databaseId != "(default)") {
             try {
-                FirebaseFirestore.getInstance()
-            } catch (_: Exception) {
-                // If offline / uninitialized in test, fallback or dummy
+                FirebaseFirestore.getInstance(databaseId)
+            } catch (e: Exception) {
+                android.util.Log.w("RideViewModel", "Failed to get Firestore for $databaseId, falling back to default", e)
                 FirebaseFirestore.getInstance()
             }
+        } else {
+            FirebaseFirestore.getInstance()
         }
+    } catch (e: Exception) {
+        android.util.Log.e("RideViewModel", "Error initializing FirebaseFirestore: ${e.message}", e)
+        FirebaseFirestore.getInstance()
     }
 
     val authRepository = AuthRepository()
@@ -270,7 +263,10 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 _currentScreen.value = AppScreen.RIDE_LOBBY
                 fetchRouteForRide(resolvedStart, resolvedDest)
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                android.util.Log.e("RideViewModel", "createRide failed, transitioning to lobby anyway", e)
+                _currentScreen.value = AppScreen.RIDE_LOBBY
+            }
         }
     }
 

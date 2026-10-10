@@ -23,8 +23,8 @@ android {
 
     // Web client ID defaults to empty so google-services.json is the single source of truth
     buildConfigField("String", "FIREBASE_WEB_CLIENT_ID", "\"\"")
-    buildConfigField("String", "FIRESTORE_DATABASE_ID", "\"ai-studio-android-ridetoge-ff1218fd-f019-458f-ad73-f84981c73561\"")
-    buildConfigField("String", "FIREBASE_PROJECT_ID", "\"gen-lang-client-0349632077\"")
+    buildConfigField("String", "FIRESTORE_DATABASE_ID", "\"(default)\"")
+    buildConfigField("String", "FIREBASE_PROJECT_ID", "\"ridetogether-f558a\"")
   }
 
   signingConfigs {

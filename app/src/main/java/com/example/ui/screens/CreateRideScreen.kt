@@ -139,10 +139,12 @@ fun CreateRideScreen(
                 .navigationBarsPadding()
                 .imePadding()
                 .padding(horizontal = 24.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            Column {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+            ) {
                 // Header Row
                 Row(
                     modifier = Modifier
