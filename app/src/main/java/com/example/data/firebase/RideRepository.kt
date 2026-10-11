@@ -26,10 +26,12 @@ import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import java.security.SecureRandom
@@ -65,7 +67,8 @@ class RideRepository(
 
     private val auth: FirebaseAuth?
         get() = try { FirebaseAuth.getInstance() } catch (_: Exception) { null }
-    private val repositoryScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val repositoryJob = SupervisorJob()
+    private val repositoryScope = CoroutineScope(Dispatchers.Default + repositoryJob)
 
     private val _currentRide = MutableStateFlow<Ride?>(null)
     val currentRide: StateFlow<Ride?> = _currentRide.asStateFlow()
@@ -109,9 +112,11 @@ class RideRepository(
 
         // Stale & connection health detector loop: checks every 5 seconds for stale riders
         repositoryScope.launch {
-            while (true) {
+            while (isActive) {
                 kotlinx.coroutines.delay(5000L)
-                checkRidersStaleness()
+                if (isActive) {
+                    checkRidersStaleness()
+                }
             }
         }
     }
@@ -326,14 +331,16 @@ class RideRepository(
             Log.w("RideRepository", "Failed attaching initial ride listener: ${e.message}")
         }
 
-        // Persist to Firestore immediately so the document is present when other users join with code
-        try {
-            firestore?.collection("rides")?.document(rideId)?.set(rideDoc)?.await()
-            firestore?.collection("rides")?.document(rideId)
-                ?.collection("riders")?.document(uid)?.set(leaderRiderDoc)?.await()
-            Log.d("RideRepository", "Successfully persisted ride $rideId to Firestore")
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.CREATE, "rides/$rideId")
+        // Persist to Firestore asynchronously so creation never blocks the caller or test thread
+        repositoryScope.launch(Dispatchers.IO) {
+            try {
+                firestore?.collection("rides")?.document(rideId)?.set(rideDoc)?.await()
+                firestore?.collection("rides")?.document(rideId)
+                    ?.collection("riders")?.document(uid)?.set(leaderRiderDoc)?.await()
+                Log.d("RideRepository", "Successfully persisted ride $rideId to Firestore")
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.CREATE, "rides/$rideId")
+            }
         }
 
         return createdRide
@@ -975,6 +982,11 @@ class RideRepository(
                 }
             }
         }
+    }
+
+    fun cleanup() {
+        detachListeners()
+        repositoryJob.cancelChildren()
     }
 
     private fun detachListeners() {

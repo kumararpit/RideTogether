@@ -194,6 +194,7 @@ class ExampleRobolectricTest {
         )
         assertEquals(3, repo.currentRide.value?.routePoints?.size)
         assertEquals(64000.0, repo.currentRide.value?.totalDistanceMeters ?: 0.0, 0.1)
+        repo.cleanup()
     }
 
     @Test
@@ -204,7 +205,7 @@ class ExampleRobolectricTest {
             rideId = "ride-101",
             userId = "user-1",
             userName = "Arpit",
-            motorcycleModel = "Triumph Tiger 900",
+            motorcycleModel = "Hunter 350",
             latitude = 18.5204,
             longitude = 73.8567,
             accuracyMeters = 8.0f,
@@ -275,5 +276,6 @@ class ExampleRobolectricTest {
     fun `test activity launch`() {
         val scenario = androidx.test.core.app.ActivityScenario.launch(MainActivity::class.java)
         assertNotNull(scenario)
+        scenario.close()
     }
 }

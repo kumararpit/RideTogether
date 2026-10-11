@@ -99,6 +99,8 @@ fun RideTogetherApp(viewModel: RideViewModel) {
     val authError by viewModel.authError.collectAsState()
     val context = LocalContext.current
 
+    val completedRides by viewModel.completedRides.collectAsState()
+
     var pendingScreen by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<AppScreen?>(null) }
 
     LaunchedEffect(currentUser) {
@@ -117,6 +119,8 @@ fun RideTogetherApp(viewModel: RideViewModel) {
                 currentMotorcycle = motorcycleModel,
                 onMotorcycleChange = { viewModel.setMotorcycleModel(it) },
                 activeRide = ride,
+                activeRiderCount = members.size,
+                isCurrentUserInActiveRide = members.any { it.isCurrentUser },
                 onRejoinRideClick = { viewModel.rejoinActiveRide() },
                 onCreateRideClick = {
                     if (currentUser != null) {
@@ -136,7 +140,8 @@ fun RideTogetherApp(viewModel: RideViewModel) {
                 },
                 onSignOutClick = { viewModel.signOut(context) },
                 isSignedIn = (currentUser != null),
-                userEmail = currentUser?.email
+                userEmail = currentUser?.email,
+                pastRides = completedRides
             )
         }
 

@@ -221,6 +221,7 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
 
     fun rejoinActiveRide() {
         val ride = currentRide.value ?: return
+        com.example.data.location.RideLocationService.startService(getApplication())
         if (ride.status == com.example.data.model.RideStatus.ACTIVE) {
             _currentScreen.value = AppScreen.LIVE_RIDE
         } else {
@@ -405,6 +406,7 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startRide() {
         repository.startRide()
+        com.example.data.location.RideLocationService.startService(getApplication())
         _currentScreen.value = AppScreen.LIVE_RIDE
     }
 
@@ -436,11 +438,13 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        com.example.data.location.RideLocationService.stopService(getApplication())
         repository.endRide()
         _currentScreen.value = AppScreen.RIDE_SUMMARY
     }
 
     fun leaveRide() {
+        com.example.data.location.RideLocationService.stopService(getApplication())
         repository.leaveRide()
         _routeResult.value = null
         _currentScreen.value = AppScreen.WELCOME
