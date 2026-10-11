@@ -10,6 +10,17 @@ enum class RideStatus {
     CANCELLED
 }
 
+enum class MovementState {
+    RIDING,
+    STOPPED,
+    UNKNOWN
+}
+
+enum class EmergencyState {
+    NONE,
+    ACTIVE
+}
+
 enum class MemberStatus {
     RIDING,
     STOPPED,
@@ -41,6 +52,8 @@ data class RiderMember(
     val avatarColorHex: Long = 0xFFFF9800,
     val role: RideRole = RideRole.MEMBER,
     val status: MemberStatus = MemberStatus.RIDING,
+    val movementState: MovementState = MovementState.RIDING,
+    val emergencyState: EmergencyState = EmergencyState.NONE,
     val connectionStatus: ConnectionStatus = ConnectionStatus.CONNECTED,
     val location: LatLng,
     val speedKmh: Double = 0.0,

@@ -184,6 +184,47 @@ fun SosAlertBanner(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    var isMinimizedLocally by remember { mutableStateOf(false) }
+
+    if (isMinimizedLocally && isAcknowledged) {
+        // Compact minimized badge for recipient local UI space
+        Surface(
+            modifier = modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 4.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .testTag("sos_alert_banner_minimized"),
+            color = StatusEmergencyRed,
+            tonalElevation = 6.dp
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(text = "🚨", fontSize = 16.sp)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "SOS: ${sosEvent.riderName.uppercase()} (ACKNOWLEDGED)",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                OutlinedButton(
+                    onClick = { isMinimizedLocally = false },
+                    modifier = Modifier.height(30.dp),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(text = "Expand", color = Color.White, fontSize = 10.sp)
+                }
+            }
+        }
+        return
+    }
 
     Surface(
         modifier = modifier
@@ -260,7 +301,10 @@ fun SosAlertBanner(
             ) {
                 if (onAcknowledge != null) {
                     Button(
-                        onClick = onAcknowledge,
+                        onClick = {
+                            onAcknowledge()
+                            isMinimizedLocally = true
+                        },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (isAcknowledged) StatusRidingGreen else Color.White,
                             contentColor = if (isAcknowledged) Color.Black else StatusEmergencyRed

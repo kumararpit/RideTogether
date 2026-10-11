@@ -93,6 +93,7 @@ fun TurnByTurnNavHeader(
     isOffRoute: Boolean,
     isRerouting: Boolean,
     onReroute: () -> Unit,
+    distanceToNextManeuverMeters: Double = 0.0,
     isAudioMuted: Boolean = false,
     onToggleAudioMute: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -167,14 +168,19 @@ fun TurnByTurnNavHeader(
                             fontWeight = FontWeight.Black
                         )
                         Text(
-                            text = "Tap reroute to find road path",
+                            text = "Recalculating road path...",
                             color = Color.White.copy(alpha = 0.8f),
                             fontSize = 13.sp
                         )
                     } else if (currentStep != null) {
+                        val formattedDist = if (distanceToNextManeuverMeters >= 1000) {
+                            String.format(java.util.Locale.getDefault(), "%.1f km", distanceToNextManeuverMeters / 1000.0)
+                        } else {
+                            "${kotlin.math.round(distanceToNextManeuverMeters).toInt()} m"
+                        }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = "In ${currentStep.formattedDistance}",
+                                text = "In $formattedDist",
                                 color = Color.White,
                                 fontSize = 18.sp,
                                 fontWeight = FontWeight.Black
@@ -185,7 +191,7 @@ fun TurnByTurnNavHeader(
                             color = Color.White.copy(alpha = 0.95f),
                             fontSize = 14.sp,
                             fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
                     } else {

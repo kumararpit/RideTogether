@@ -110,6 +110,16 @@ class RideRepository(
                 }
             }
         }
+
+        // 10-second keep-alive heartbeat loop to refresh rider telemetry even when stationary at stoplights
+        repositoryScope.launch {
+            while (isActive) {
+                kotlinx.coroutines.delay(10000L)
+                if (isActive) {
+                    sendRiderHeartbeat()
+                }
+            }
+        }
     }
 
     fun initCurrentUser(id: String, name: String, motorcycleModel: String = "") {
@@ -131,15 +141,107 @@ class RideRepository(
                 firestore?.collection("users")?.document(id)
                     ?.set(userDoc, SetOptions.merge())
                     ?.await()
+
+                fetchActiveRideForUser()
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.WRITE, "users/$id")
             }
         }
     }
 
+    suspend fun fetchActiveRideForUser(): Ride? {
+        val uid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return _currentRide.value
+        val fs = firestore ?: return _currentRide.value
+
+        return try {
+            val snapshot = fs.collection("rides")
+                .whereIn("status", listOf("CREATED", "LOBBY", "ACTIVE"))
+                .get()
+                .await()
+
+            val activeDoc = snapshot.documents.find { doc ->
+                val leaderId = doc.getString("leaderId") ?: ""
+                leaderId == uid
+            }
+
+            if (activeDoc != null) {
+                val rideId = activeDoc.id
+                val rideName = activeDoc.getString("name") ?: "Group Ride"
+                val startLocName = activeDoc.getString("startLocationName") ?: "Start"
+                val destLocName = activeDoc.getString("destinationName") ?: "Destination"
+                val startLat = activeDoc.getDouble("startLat") ?: 18.5204
+                val startLng = activeDoc.getDouble("startLng") ?: 73.8567
+                val destLat = activeDoc.getDouble("destLat") ?: 18.7546
+                val destLng = activeDoc.getDouble("destLng") ?: 73.4062
+                val leaderId = activeDoc.getString("leaderId") ?: ""
+                val code = activeDoc.getString("inviteCode") ?: ""
+                val statusStr = activeDoc.getString("status") ?: "LOBBY"
+                val status = runCatching { RideStatus.valueOf(statusStr) }.getOrDefault(RideStatus.LOBBY)
+
+                val restoredRide = Ride(
+                    id = rideId,
+                    name = rideName,
+                    startLocationName = startLocName,
+                    destinationName = destLocName,
+                    startLocation = LatLng(startLat, startLng),
+                    destinationLocation = LatLng(destLat, destLng),
+                    leaderId = leaderId,
+                    inviteCode = code,
+                    status = status
+                )
+                _currentRide.value = restoredRide
+                listenToRide(rideId)
+                restoredRide
+            } else {
+                _currentRide.value
+            }
+        } catch (e: Exception) {
+            Log.w("RideRepository", "fetchActiveRideForUser failed: ${e.message}")
+            _currentRide.value
+        }
+    }
+
     fun setMotorcycleModel(model: String) {
         currentMotorcycleModel = model
         initCurrentUser(currentUserId, currentUserName, model)
+    }
+
+    private fun sendRiderHeartbeat() {
+        val activeRide = _currentRide.value ?: return
+        val currentUid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return
+        val nowMs = System.currentTimeMillis()
+
+        // Refresh current user's lastUpdatedMs locally
+        val currentList = _members.value
+        if (currentList.isNotEmpty()) {
+            val updatedList = currentList.map { rider ->
+                if (rider.isCurrentUser) {
+                    rider.copy(
+                        lastUpdatedMs = nowMs,
+                        connectionStatus = com.example.data.model.ConnectionStatus.CONNECTED
+                    )
+                } else {
+                    rider
+                }
+            }
+            _members.value = updatedList
+        }
+
+        // Sync heartbeat timestamp to Firestore
+        repositoryScope.launch {
+            try {
+                firestore?.collection("rides")?.document(activeRide.id)
+                    ?.collection("riders")?.document(currentUid)
+                    ?.update(
+                        mapOf(
+                            "lastUpdatedMs" to nowMs,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )?.await()
+            } catch (e: Exception) {
+                Log.w("RideRepository", "Heartbeat sync skipped/failed: ${e.message}")
+            }
+        }
     }
 
     private fun checkRidersStaleness() {
@@ -155,8 +257,8 @@ class RideRepository(
                 val lastUp = if (rider.lastUpdatedMs > 0L) rider.lastUpdatedMs else now
                 val diffMs = (now - lastUp).coerceAtLeast(0L)
                 val newConn = when {
-                    diffMs > 60000L -> com.example.data.model.ConnectionStatus.DISCONNECTED
-                    diffMs > 25000L -> com.example.data.model.ConnectionStatus.LOCATION_STALE
+                    diffMs > 120000L -> com.example.data.model.ConnectionStatus.DISCONNECTED
+                    diffMs > 45000L -> com.example.data.model.ConnectionStatus.LOCATION_STALE
                     else -> com.example.data.model.ConnectionStatus.CONNECTED
                 }
                 if (newConn != rider.connectionStatus) {
@@ -695,6 +797,18 @@ class RideRepository(
             else -> 0xFFAB47BC
         }
 
+        val movementState = when {
+            status == MemberStatus.STOPPED || stoppedSec > 0L -> com.example.data.model.MovementState.STOPPED
+            status == MemberStatus.RIDING -> com.example.data.model.MovementState.RIDING
+            else -> com.example.data.model.MovementState.UNKNOWN
+        }
+
+        val emergencyState = if (status == MemberStatus.EMERGENCY || _activeSos.value?.riderId == id) {
+            com.example.data.model.EmergencyState.ACTIVE
+        } else {
+            com.example.data.model.EmergencyState.NONE
+        }
+
         return RiderMember(
             id = id,
             name = name,
@@ -702,6 +816,8 @@ class RideRepository(
             avatarColorHex = avatarColorHex,
             role = role,
             status = status,
+            movementState = movementState,
+            emergencyState = emergencyState,
             connectionStatus = connectionStatus,
             location = LatLng(lat, lng),
             speedKmh = speedKmh,
@@ -986,18 +1102,24 @@ class RideRepository(
         val activeRideId = _currentRide.value?.id ?: return
         val currentUid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return
 
-        // Update local state immediately
+        // Update local state immediately if active emergency is unresolved
         val currentSos = _activeSos.value
-        if (currentSos != null && currentSos.id == sosId && !currentSos.acknowledgedBy.contains(currentUid)) {
+        if (currentSos != null && currentSos.id == sosId && !currentSos.isResolved && !currentSos.acknowledgedBy.contains(currentUid)) {
             _activeSos.value = currentSos.copy(acknowledgedBy = currentSos.acknowledgedBy + currentUid)
         }
 
         repositoryScope.launch {
             try {
-                firestore?.collection("rides")?.document(activeRideId)
-                    ?.collection("sos")?.document(sosId)
-                    ?.update("acknowledgedBy", FieldValue.arrayUnion(currentUid))
-                    ?.await()
+                val sosRef = firestore?.collection("rides")?.document(activeRideId)?.collection("sos")?.document(sosId)
+                if (sosRef != null) {
+                    firestore.runTransaction { transaction ->
+                        val snapshot = transaction.get(sosRef)
+                        val isResolved = snapshot.getBoolean("isResolved") ?: false
+                        if (!isResolved) {
+                            transaction.update(sosRef, "acknowledgedBy", FieldValue.arrayUnion(currentUid))
+                        }
+                    }.await()
+                }
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/sos/$sosId")
             }
@@ -1014,14 +1136,22 @@ class RideRepository(
         if (activeRideId != null && activeEvent != null) {
             repositoryScope.launch {
                 try {
-                    firestore?.collection("rides")?.document(activeRideId)
-                        ?.collection("sos")?.document(activeEvent.id)
-                        ?.update(
-                            mapOf(
-                                "isResolved" to true,
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            )
-                        )?.await()
+                    val sosRef = firestore?.collection("rides")?.document(activeRideId)?.collection("sos")?.document(activeEvent.id)
+                    if (sosRef != null) {
+                        firestore.runTransaction { transaction ->
+                            val snapshot = transaction.get(sosRef)
+                            if (snapshot.exists()) {
+                                transaction.update(
+                                    sosRef,
+                                    mapOf(
+                                        "isResolved" to true,
+                                        "resolvedAtMs" to System.currentTimeMillis(),
+                                        "updatedAt" to FieldValue.serverTimestamp()
+                                    )
+                                )
+                            }
+                        }.await()
+                    }
                 } catch (e: Exception) {
                     handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/sos/${activeEvent.id}")
                 }

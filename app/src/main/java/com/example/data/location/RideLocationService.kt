@@ -17,11 +17,13 @@ import com.example.MainActivity
 class RideLocationService : Service() {
 
     private var isServiceRunning = false
+    private var locationTracker: LocationTracker? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        locationTracker = LocationTracker(applicationContext)
         createNotificationChannel()
     }
 
@@ -63,12 +65,14 @@ class RideLocationService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
-        Log.d(TAG, "RideLocationService started successfully")
+        locationTracker?.startTracking()
+        Log.d(TAG, "RideLocationService started successfully with location tracking")
     }
 
     private fun stopTrackingService() {
         if (!isServiceRunning) return
         isServiceRunning = false
+        locationTracker?.stopTracking()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
         Log.d(TAG, "RideLocationService stopped")

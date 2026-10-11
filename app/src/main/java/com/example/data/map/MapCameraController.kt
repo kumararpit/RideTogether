@@ -5,6 +5,7 @@ import com.example.data.model.LatLng
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.max
 
 enum class MapCameraMode {
     FOLLOWING,
@@ -12,19 +13,42 @@ enum class MapCameraMode {
     OVERVIEW
 }
 
+enum class OrientationMode {
+    HEADING_UP,
+    NORTH_UP
+}
+
 data class MapCameraState(
     val center: LatLng = LatLng(18.5204, 73.8567),
     val zoom: Int = 16,
     val heading: Float = 0f,
-    val mode: MapCameraMode = MapCameraMode.FOLLOWING
-)
+    val mode: MapCameraMode = MapCameraMode.FOLLOWING,
+    val orientationMode: OrientationMode = OrientationMode.HEADING_UP,
+    val bounds: Pair<LatLng, LatLng>? = null
+) {
+    val effectiveHeading: Float
+        get() = if (orientationMode == OrientationMode.NORTH_UP) 0f else heading
+}
 
 class MapCameraController {
 
     private val _state = MutableStateFlow(MapCameraState())
     val state: StateFlow<MapCameraState> = _state.asStateFlow()
 
-    fun processLocation(location: LocationUpdate) {
+    fun setOrientationMode(mode: OrientationMode) {
+        _state.value = _state.value.copy(orientationMode = mode)
+    }
+
+    fun toggleOrientationMode() {
+        val newMode = if (_state.value.orientationMode == OrientationMode.HEADING_UP) {
+            OrientationMode.NORTH_UP
+        } else {
+            OrientationMode.HEADING_UP
+        }
+        _state.value = _state.value.copy(orientationMode = newMode)
+    }
+
+    fun processLocation(location: LocationUpdate, distanceToNextManeuverMeters: Double? = null) {
         val currentState = _state.value
         if (currentState.mode != MapCameraMode.FOLLOWING) return
 
@@ -36,10 +60,12 @@ class MapCameraController {
         }
 
         val smoothedHeading = interpolateHeading(currentState.heading, targetHeading, 0.25f)
+        val targetZoom = calculateAdaptiveZoom(speedKmh, distanceToNextManeuverMeters)
 
         _state.value = currentState.copy(
             center = location.latLng,
-            heading = smoothedHeading
+            heading = smoothedHeading,
+            zoom = targetZoom
         )
     }
 
@@ -52,11 +78,12 @@ class MapCameraController {
     fun recenter(riderLocation: LatLng?, headingDeg: Float? = null) {
         val newCenter = riderLocation ?: _state.value.center
         val newHeading = headingDeg?.takeIf { it in 0f..360f } ?: _state.value.heading
-        _state.value = MapCameraState(
+        _state.value = _state.value.copy(
             center = newCenter,
             zoom = 16,
             heading = newHeading,
-            mode = MapCameraMode.FOLLOWING
+            mode = MapCameraMode.FOLLOWING,
+            bounds = null
         )
     }
 
@@ -70,20 +97,46 @@ class MapCameraController {
         val centerLat = (minLat + maxLat) / 2.0
         val centerLng = (minLng + maxLng) / 2.0
 
-        _state.value = MapCameraState(
+        val latDelta = maxLat - minLat
+        val lngDelta = maxLng - minLng
+        val maxDelta = max(latDelta, lngDelta)
+
+        val calculatedZoom = when {
+            maxDelta > 2.0 -> 8
+            maxDelta > 1.0 -> 9
+            maxDelta > 0.5 -> 10
+            maxDelta > 0.2 -> 11
+            maxDelta > 0.1 -> 12
+            maxDelta > 0.05 -> 13
+            maxDelta > 0.02 -> 14
+            else -> 15
+        }
+
+        _state.value = _state.value.copy(
             center = LatLng(centerLat, centerLng),
-            zoom = 12,
-            heading = 0f,
-            mode = MapCameraMode.OVERVIEW
+            zoom = calculatedZoom,
+            mode = MapCameraMode.OVERVIEW,
+            bounds = Pair(LatLng(minLat, minLng), LatLng(maxLat, maxLng))
         )
     }
 
     fun setZoom(newZoom: Int) {
         val clampedZoom = newZoom.coerceIn(3, 18)
-        _state.value = _state.value.copy(zoom = clampedZoom)
+        _state.value = _state.value.copy(zoom = clampedZoom, mode = MapCameraMode.FREE_EXPLORE)
     }
 
     companion object {
+        fun calculateAdaptiveZoom(speedKmh: Double, distanceToNextManeuverMeters: Double? = null): Int {
+            if (distanceToNextManeuverMeters != null && distanceToNextManeuverMeters in 0.0..150.0) {
+                return 17
+            }
+            return when {
+                speedKmh >= 70.0 -> 15
+                speedKmh >= 30.0 -> 16
+                else -> 17
+            }
+        }
+
         fun shortestPathAngleDelta(fromAngle: Float, toAngle: Float): Float {
             var diff = (toAngle - fromAngle) % 360f
             if (diff > 180f) diff -= 360f

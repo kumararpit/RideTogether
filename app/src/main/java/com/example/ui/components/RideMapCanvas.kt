@@ -9,10 +9,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -24,13 +22,11 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.FilterCenterFocus
-import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Remove
@@ -60,7 +56,9 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -75,6 +73,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.example.data.map.MapCameraMode
+import com.example.data.map.OrientationMode
 import com.example.data.map.TileMath
 import com.example.data.model.LatLng
 import com.example.data.model.MemberStatus
@@ -83,11 +83,9 @@ import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
 import com.example.ui.theme.StatusEmergencyRed
-import com.example.ui.theme.StatusOfflineGray
 import com.example.ui.theme.StatusRidingGreen
 import com.example.ui.theme.StatusStoppedAmber
 import kotlin.math.PI
-import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -101,6 +99,7 @@ fun RideMapCanvas(
     onSelectRider: (RiderMember?) -> Unit,
     isFollowRiderMode: Boolean = true,
     onFollowRiderChange: (Boolean) -> Unit = {},
+    distanceToNextManeuverMeters: Double? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -121,7 +120,7 @@ fun RideMapCanvas(
     var isDarkTacticalStyle by remember { mutableStateOf(true) }
 
     // Synchronize camera state machine when follow mode or rider location updates
-    LaunchedEffect(currentUser?.location, currentUser?.speedKmh, currentUser?.headingDeg, isFollowRiderMode) {
+    LaunchedEffect(currentUser?.location, currentUser?.speedKmh, currentUser?.headingDeg, isFollowRiderMode, distanceToNextManeuverMeters) {
         if (currentUser != null && isFollowRiderMode) {
             val locUpdate = com.example.data.location.LocationUpdate(
                 latLng = currentUser.location,
@@ -129,12 +128,12 @@ fun RideMapCanvas(
                 headingDeg = currentUser.headingDeg,
                 accuracyMeters = 10f
             )
-            cameraController.processLocation(locUpdate)
+            cameraController.processLocation(locUpdate, distanceToNextManeuverMeters)
             val st = cameraController.state.value
             centerLat = st.center.latitude
             centerLng = st.center.longitude
             zoomLevel = st.zoom
-            if (st.mode == com.example.data.map.MapCameraMode.FOLLOWING) {
+            if (st.mode == MapCameraMode.FOLLOWING) {
                 panOffsetX = 0f
                 panOffsetY = 0f
             }
@@ -174,6 +173,14 @@ fun RideMapCanvas(
         val tileSizeDp = 256.dp
         val tileSizePx = with(density) { tileSizeDp.toPx() }
 
+        // Camera Anchor: (0.5w, 0.65h) in FOLLOWING mode, (0.5w, 0.5h) in FREE_EXPLORE or OVERVIEW
+        val anchorX = widthPx / 2f
+        val anchorY = if (cameraState.mode == MapCameraMode.FOLLOWING) heightPx * 0.65f else heightPx / 2f
+        val pivotX = anchorX + panOffsetX
+        val pivotY = anchorY + panOffsetY
+
+        val effectiveHeading = cameraState.effectiveHeading
+
         // Dark tactical color filter for high-contrast night/adventure rides
         val darkTacticalColorFilter = remember {
             ColorFilter.colorMatrix(ColorMatrix(floatArrayOf(
@@ -184,73 +191,176 @@ fun RideMapCanvas(
             )))
         }
 
-        // Calculate center tile coordinates
+        // Center tile coordinates
         val centerTileXDouble = TileMath.lonToTileX(centerLng, zoomLevel)
         val centerTileYDouble = TileMath.latToTileY(centerLat, zoomLevel)
 
-        // Web Mercator coordinate conversion to Screen Pixels
-        fun latLngToScreen(latLng: LatLng): Offset {
+        // Web Mercator coordinate conversion to Unrotated Screen Pixels
+        fun latLngToUnrotatedScreen(latLng: LatLng): Offset {
             val tileX = TileMath.lonToTileX(latLng.longitude, zoomLevel)
             val tileY = TileMath.latToTileY(latLng.latitude, zoomLevel)
-            val x = (widthPx / 2f) + panOffsetX + ((tileX - centerTileXDouble) * tileSizePx).toFloat()
-            val y = (heightPx / 2f) + panOffsetY + ((tileY - centerTileYDouble) * tileSizePx).toFloat()
+            val x = anchorX + panOffsetX + ((tileX - centerTileXDouble) * tileSizePx).toFloat()
+            val y = anchorY + panOffsetY + ((tileY - centerTileYDouble) * tileSizePx).toFloat()
             return Offset(x, y)
         }
 
-        // 1. Real Slippy Map Tiles Layer
-        val centerTileXInt = centerTileXDouble.toInt()
-        val centerTileYInt = centerTileYDouble.toInt()
-        val maxTileIndex = (1 shl zoomLevel) - 1
+        // Coordinate conversion to Rotated Screen Pixels (for overlay markers and hit testing)
+        fun unrotatedToRotatedScreen(unrotated: Offset): Offset {
+            if (effectiveHeading == 0f) return unrotated
+            val rad = Math.toRadians(-effectiveHeading.toDouble())
+            val cosA = cos(rad)
+            val sinA = sin(rad)
+            val dx = unrotated.x - pivotX
+            val dy = unrotated.y - pivotY
+            val rx = (pivotX + dx * cosA - dy * sinA).toFloat()
+            val ry = (pivotY + dx * sinA + dy * cosA).toFloat()
+            return Offset(rx, ry)
+        }
 
-        val halfTilesX = ceil(widthPx / (tileSizePx * 2f)).toInt() + 1
-        val halfTilesY = ceil(heightPx / (tileSizePx * 2f)).toInt() + 1
-        val rangeX = -halfTilesX..halfTilesX
-        val rangeY = -halfTilesY..halfTilesY
+        fun latLngToRotatedScreen(latLng: LatLng): Offset {
+            return unrotatedToRotatedScreen(latLngToUnrotatedScreen(latLng))
+        }
 
-        Box(modifier = Modifier.fillMaxSize()) {
-            for (dx in rangeX) {
-                for (dy in rangeY) {
-                    val tileX = (centerTileXInt + dx).coerceIn(0, maxTileIndex)
-                    val tileY = (centerTileYInt + dy).coerceIn(0, maxTileIndex)
-                    val tileScreenX = (widthPx / 2f) + panOffsetX + ((tileX - centerTileXDouble) * tileSizePx).toFloat()
-                    val tileScreenY = (heightPx / 2f) + panOffsetY + ((tileY - centerTileYDouble) * tileSizePx).toFloat()
-
-                    val tileUrl = TileMath.getOsmTileUrl(zoomLevel, tileX, tileY)
-
-                    AsyncImage(
-                        model = ImageRequest.Builder(context)
-                            .data(tileUrl)
-                            .addHeader("User-Agent", TileMath.OSM_USER_AGENT)
-                            .crossfade(true)
-                            .build(),
-                        contentDescription = "Map tile",
-                        contentScale = ContentScale.FillBounds,
-                        colorFilter = if (isDarkTacticalStyle) darkTacticalColorFilter else null,
-                        modifier = Modifier
-                            .offset { IntOffset(tileScreenX.roundToInt(), tileScreenY.roundToInt()) }
-                            .size(tileSizeDp)
+        // 1. Single Camera Transform Container (Holds Tiles Layer & Route Lines Canvas)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    rotationZ = -effectiveHeading
+                    transformOrigin = TransformOrigin(
+                        pivotX / widthPx,
+                        pivotY / heightPx
                     )
+                }
+        ) {
+            // A. Real Slippy Map Tiles Layer with 100% Rotated Viewport Coverage
+            val tileRange = TileMath.calculateVisibleTileRange(
+                widthPx = widthPx,
+                heightPx = heightPx,
+                anchorX = anchorX,
+                anchorY = anchorY,
+                panOffsetX = panOffsetX,
+                panOffsetY = panOffsetY,
+                centerTileXDouble = centerTileXDouble,
+                centerTileYDouble = centerTileYDouble,
+                zoomLevel = zoomLevel,
+                tileSizePx = tileSizePx,
+                effectiveHeadingDeg = effectiveHeading
+            )
+
+            Box(modifier = Modifier.fillMaxSize()) {
+                for (tileX in tileRange.minX..tileRange.maxX) {
+                    for (tileY in tileRange.minY..tileRange.maxY) {
+                        val tileUnrotatedX = anchorX + panOffsetX + ((tileX - centerTileXDouble) * tileSizePx).toFloat()
+                        val tileUnrotatedY = anchorY + panOffsetY + ((tileY - centerTileYDouble) * tileSizePx).toFloat()
+
+                        val tileUrl = TileMath.getOsmTileUrl(zoomLevel, tileX, tileY)
+
+                        AsyncImage(
+                            model = ImageRequest.Builder(context)
+                                .data(tileUrl)
+                                .addHeader("User-Agent", TileMath.OSM_USER_AGENT)
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = "Map tile",
+                            contentScale = ContentScale.FillBounds,
+                            colorFilter = if (isDarkTacticalStyle) darkTacticalColorFilter else null,
+                            modifier = Modifier
+                                .offset { IntOffset(tileUnrotatedX.roundToInt(), tileUnrotatedY.roundToInt()) }
+                                .size(tileSizeDp)
+                        )
+                    }
+                }
+            }
+
+            // B. Map Vector Elements (Route Line & Start/Finish Points inside rotated container)
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                if (route.size >= 2) {
+                    val routePath = Path()
+                    val routePoints = route.map { latLngToUnrotatedScreen(it) }
+
+                    routePath.moveTo(routePoints.first().x, routePoints.first().y)
+                    for (i in 1 until routePoints.size) {
+                        routePath.lineTo(routePoints[i].x, routePoints[i].y)
+                    }
+
+                    // 1. Dark Road Shadow
+                    drawPath(
+                        path = routePath,
+                        color = Color(0xAA0B0F19),
+                        style = Stroke(width = 18f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                    )
+
+                    // 2. High-contrast Orange/Amber Casing
+                    drawPath(
+                        path = routePath,
+                        color = Color(0xFFE65100),
+                        style = Stroke(width = 12f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                    )
+
+                    // 3. Vibrant Road Line
+                    drawPath(
+                        path = routePath,
+                        color = AmberPrimary,
+                        style = Stroke(width = 7.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                    )
+
+                    // 4. Center lane guide
+                    drawPath(
+                        path = routePath,
+                        color = Color(0xFFFFF9C4),
+                        style = Stroke(width = 2.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                    )
+
+                    // Direction chevrons/dots along road every 15 points
+                    if (routePoints.size > 15) {
+                        val step = (routePoints.size / 10).coerceAtLeast(4)
+                        for (k in step until routePoints.size - 2 step step) {
+                            val pt = routePoints[k]
+                            drawCircle(color = Color.White, radius = 3.5f, center = pt)
+                            drawCircle(color = Color(0xFFE65100), radius = 2f, center = pt)
+                        }
+                    }
+
+                    // Start Marker
+                    val startScreen = routePoints.first()
+                    drawCircle(color = Color(0x664CAF50), radius = 16f, center = startScreen)
+                    drawCircle(color = StatusRidingGreen, radius = 10f, center = startScreen)
+                    drawCircle(color = Color.White, radius = 5f, center = startScreen)
+
+                    // Destination Marker
+                    val destScreen = routePoints.last()
+                    drawCircle(color = Color(0x66F44336), radius = 18f, center = destScreen)
+                    drawCircle(color = StatusEmergencyRed, radius = 11f, center = destScreen)
+                    drawCircle(color = Color.White, radius = 5f, center = destScreen)
                 }
             }
         }
 
-        // 2. Map Vector Elements & Rider Markers Canvas
+        // 2. Unrotated Overlay Canvas (Rider Markers, Upright Labels, Gestures)
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
                 .testTag("ride_map_canvas")
-                .pointerInput(Unit) {
+                .pointerInput(effectiveHeading) {
                     detectTransformGestures { _, pan, zoom, _ ->
                         if (zoom != 1f) {
-                            val newZoom = (zoomLevel * zoom).roundToInt().coerceIn(3, 19)
+                            val newZoom = (zoomLevel * zoom).roundToInt().coerceIn(3, 18)
                             if (newZoom != zoomLevel) {
                                 zoomLevel = newZoom
                                 cameraController.setZoom(newZoom)
                             }
                         }
                         if (pan != Offset.Zero) {
-                            panOffsetX += pan.x
-                            panOffsetY += pan.y
+                            val rad = Math.toRadians(effectiveHeading.toDouble())
+                            val cosH = cos(rad).toFloat()
+                            val sinH = sin(rad).toFloat()
+
+                            val unrotatedDx = pan.x * cosH + pan.y * sinH
+                            val unrotatedDy = -pan.x * sinH + pan.y * cosH
+
+                            panOffsetX += unrotatedDx
+                            panOffsetY += unrotatedDy
                         }
                         cameraController.onUserGesture()
                         onFollowRiderChange(false)
@@ -273,13 +383,6 @@ fun RideMapCanvas(
         ) {
             val canvasW = size.width
             val canvasH = size.height
-            val headingRotation = if (isFollowRiderMode && currentUser != null && currentUser.headingDeg in 0f..360f && currentUser.speedKmh >= 3.0) {
-                currentUser.headingDeg
-            } else {
-                cameraController.state.value.heading
-            }
-
-            rotate(degrees = -headingRotation, pivot = Offset(canvasW / 2f, canvasH / 2f)) {
 
             // Safe text drawing helper
             fun drawSafeText(
@@ -301,86 +404,32 @@ fun RideMapCanvas(
                 )
             }
 
-            // Draw Route Line if available
+            // Draw Start & Finish text tags upright at their rotated screen positions
             if (route.size >= 2) {
-                val routePath = Path()
-                val routePoints = route.map { latLngToScreen(it) }
-
-                routePath.moveTo(routePoints.first().x, routePoints.first().y)
-                for (i in 1 until routePoints.size) {
-                    routePath.lineTo(routePoints[i].x, routePoints[i].y)
-                }
-
-                // 1. Dark Road Shadow
-                drawPath(
-                    path = routePath,
-                    color = Color(0xAA0B0F19),
-                    style = Stroke(width = 18f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                )
-
-                // 2. High-contrast Orange/Amber Casing
-                drawPath(
-                    path = routePath,
-                    color = Color(0xFFE65100),
-                    style = Stroke(width = 12f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                )
-
-                // 3. Vibrant Road Line
-                drawPath(
-                    path = routePath,
-                    color = AmberPrimary,
-                    style = Stroke(width = 7.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                )
-
-                // 4. Center lane guide
-                drawPath(
-                    path = routePath,
-                    color = Color(0xFFFFF9C4),
-                    style = Stroke(width = 2.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                )
-
-                // Direction chevrons/dots along road every 15 points
-                if (routePoints.size > 15) {
-                    val step = (routePoints.size / 10).coerceAtLeast(4)
-                    for (k in step until routePoints.size - 2 step step) {
-                        val pt = routePoints[k]
-                        drawCircle(color = Color.White, radius = 3.5f, center = pt)
-                        drawCircle(color = Color(0xFFE65100), radius = 2f, center = pt)
-                    }
-                }
-
-                // Start Marker
-                val startScreen = routePoints.first()
-                drawCircle(color = Color(0x664CAF50), radius = 16f, center = startScreen)
-                drawCircle(color = StatusRidingGreen, radius = 10f, center = startScreen)
-                drawCircle(color = Color.White, radius = 5f, center = startScreen)
+                val startRotated = latLngToRotatedScreen(route.first())
                 drawSafeText(
                     text = "START",
-                    x = startScreen.x - 20f,
-                    y = startScreen.y + 14f,
+                    x = startRotated.x - 20f,
+                    y = startRotated.y + 14f,
                     style = TextStyle(color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Black)
                 )
 
-                // Destination Marker
-                val destScreen = routePoints.last()
-                drawCircle(color = Color(0x66F44336), radius = 18f, center = destScreen)
-                drawCircle(color = StatusEmergencyRed, radius = 11f, center = destScreen)
-                drawCircle(color = Color.White, radius = 5f, center = destScreen)
+                val destRotated = latLngToRotatedScreen(route.last())
                 drawSafeText(
                     text = "FINISH",
-                    x = destScreen.x - 22f,
-                    y = destScreen.y - 28f,
+                    x = destRotated.x - 22f,
+                    y = destRotated.y - 28f,
                     style = TextStyle(color = AmberPrimary, fontSize = 11.sp, fontWeight = FontWeight.Black)
                 )
             }
 
-            // Draw Rider Markers
+            // Draw Rider Markers at rotated screen positions
             riderScreenPositions.clear()
             for (rider in members) {
-                val screenPos = latLngToScreen(rider.location)
+                val screenPos = latLngToRotatedScreen(rider.location)
                 riderScreenPositions[rider.id] = screenPos
 
-                // Skip drawing markers that are far outside the viewport
+                // Skip drawing markers far outside the viewport
                 if (screenPos.x < -150f || screenPos.x > canvasW + 150f ||
                     screenPos.y < -150f || screenPos.y > canvasH + 150f) {
                     continue
@@ -478,7 +527,9 @@ fun RideMapCanvas(
                 }
 
                 // Layer E: Directional Arrowhead ▲ inside marker disc
-                val angleRad = (rider.headingDeg - 90f) * (PI.toFloat() / 180f)
+                // Relative to screen top, arrow direction is (rider.headingDeg - effectiveHeading)
+                val arrowAngleDeg = rider.headingDeg - effectiveHeading
+                val angleRad = (arrowAngleDeg - 90f) * (PI.toFloat() / 180f)
                 val arrowLen = markerRadius * 0.7f
 
                 val tipX = screenPos.x + cos(angleRad) * arrowLen
@@ -537,7 +588,6 @@ fun RideMapCanvas(
                     style = tagStyle
                 )
             }
-            }
         }
 
         // Live Speed HUD for Current User (top-left)
@@ -586,7 +636,11 @@ fun RideMapCanvas(
                             imageVector = Icons.Default.Explore,
                             contentDescription = "Compass",
                             tint = AmberPrimary,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier
+                                .size(20.dp)
+                                .graphicsLayer {
+                                    rotationZ = -effectiveHeading
+                                }
                         )
                         Text(
                             text = "${currentUser.headingDeg.toInt()}°",
@@ -599,12 +653,32 @@ fun RideMapCanvas(
             }
         }
 
-        // Floating Map Controls (Zoom In, Zoom Out, Re-center) on Right Side
+        // Floating Map Controls (Compass Toggle, Recenter, Overview, Zoom In, Zoom Out, Style)
         Column(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .padding(end = 16.dp)
         ) {
+            // Compass Toggle Button (Heading-Up vs North-Up)
+            SmallFloatingActionButton(
+                onClick = {
+                    cameraController.toggleOrientationMode()
+                },
+                modifier = Modifier.testTag("compass_toggle_button"),
+                containerColor = SlateDark800,
+                contentColor = if (cameraState.orientationMode == OrientationMode.NORTH_UP) AmberPrimary else Color.White
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Explore,
+                    contentDescription = "Toggle Compass Orientation",
+                    modifier = Modifier.graphicsLayer {
+                        rotationZ = -cameraState.heading
+                    }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
             // Re-center on current user button
             FloatingActionButton(
                 onClick = {

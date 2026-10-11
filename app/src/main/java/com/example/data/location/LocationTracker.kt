@@ -64,7 +64,6 @@ class LocationTracker(private val context: Context) {
         try {
             val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, updateIntervalMs)
                 .setMinUpdateIntervalMillis(3000L)
-                .setMinUpdateDistanceMeters(5f)
                 .build()
 
             fusedClient.requestLocationUpdates(

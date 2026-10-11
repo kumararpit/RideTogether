@@ -68,6 +68,70 @@ class NavEngineAndSosTest {
     }
 
     @Test
+    fun `test dynamic distance to next maneuver decreases continuously`() {
+        val navEngine = NavEngine()
+
+        val p1 = LatLng(18.5200, 73.8500)
+        val p1Mid = LatLng(18.5225, 73.8500) // Waypoint along step 1
+        val p2 = LatLng(18.5250, 73.8500)    // Maneuver point (~555m north)
+        val p3 = LatLng(18.5250, 73.8600)    // Final destination (~1000m east)
+
+        val d12 = p1.distanceTo(p2) * 1000.0
+        val d23 = p2.distanceTo(p3) * 1000.0
+
+        val step1 = NavigationStep("Head north on Main St", "Main St", d12, 60.0)
+        val step2 = NavigationStep("Turn right on East Ave", "East Ave", d23, 90.0)
+
+        val route = RouteResult(
+            coordinates = listOf(p1, p1Mid, p2, p3),
+            totalDistanceMeters = d12 + d23,
+            totalDurationSeconds = 150.0,
+            steps = listOf(step1, step2)
+        )
+
+        navEngine.setRoute(route)
+
+        // Fix at start
+        val pStart = navEngine.processLocation(LocationUpdate(p1, speedKmh = 30.0, headingDeg = 0f, accuracyMeters = 5f))
+        val initialManeuverDist = pStart.distanceToNextManeuverMeters
+        assertTrue("Initial maneuver distance should be around 550m", initialManeuverDist in 500.0..600.0)
+
+        // Fix halfway along step 1 (at p1Mid)
+        val pMidProgress = navEngine.processLocation(LocationUpdate(p1Mid, speedKmh = 30.0, headingDeg = 0f, accuracyMeters = 5f))
+
+        assertTrue(
+            "Maneuver distance halfway along segment (${pMidProgress.distanceToNextManeuverMeters}m) must be strictly less than initial distance (${initialManeuverDist}m)",
+            pMidProgress.distanceToNextManeuverMeters < initialManeuverDist
+        )
+    }
+
+    @Test
+    fun `test stationary traffic stop retains route baseline ETA without fabricating 54 kmh speed`() {
+        val navEngine = NavEngine()
+
+        val p1 = LatLng(18.5200, 73.8500)
+        val p2 = LatLng(18.5300, 73.8500)
+
+        val route = RouteResult(
+            coordinates = listOf(p1, p2),
+            totalDistanceMeters = 1100.0,
+            totalDurationSeconds = 120.0, // ~33 km/h baseline
+            steps = listOf(NavigationStep("Go straight", "Main St", 1100.0, 120.0))
+        )
+
+        navEngine.setRoute(route)
+
+        // Fix 1: rider stopped at light (speed = 0 km/h)
+        val pStopped = navEngine.processLocation(LocationUpdate(p1, speedKmh = 0.0, headingDeg = 0f, accuracyMeters = 5f))
+
+        // Remaining duration should equal route baseline duration (~120s), not fabricated 15 m/s (~73s)
+        assertTrue(
+            "Stationary stop duration (${pStopped.remainingDurationSeconds}s) should be derived from route baseline duration (near 120s)",
+            pStopped.remainingDurationSeconds in 100.0..130.0
+        )
+    }
+
+    @Test
     fun `test adaptive rerouting accuracy filter and deviation thresholds`() {
         val p1 = LatLng(18.5204, 73.8567)
         val p2 = LatLng(18.7546, 73.4062)

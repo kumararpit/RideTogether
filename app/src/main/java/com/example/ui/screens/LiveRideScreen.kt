@@ -68,6 +68,7 @@ fun LiveRideScreen(
     val recentMessage by viewModel.recentMessage.collectAsState()
 
     // Navigation & Routing states
+    val navProgress by viewModel.navEngine.progress.collectAsState()
     val isRerouting by viewModel.isRerouting.collectAsState()
     val isOffRoute by viewModel.isOffRoute.collectAsState()
     val isFollowMode by viewModel.isFollowRiderMode.collectAsState()
@@ -100,7 +101,8 @@ fun LiveRideScreen(
             selectedRider = selectedRider,
             onSelectRider = { viewModel.selectRider(it) },
             isFollowRiderMode = isFollowMode,
-            onFollowRiderChange = { viewModel.setFollowRiderMode(it) }
+            onFollowRiderChange = { viewModel.setFollowRiderMode(it) },
+            distanceToNextManeuverMeters = navProgress.distanceToNextManeuverMeters
         )
 
         // 2. Top Header, Turn-by-Turn Nav HUD, and Alert Overlay Stack
@@ -126,6 +128,7 @@ fun LiveRideScreen(
                 isOffRoute = isOffRoute,
                 isRerouting = isRerouting,
                 onReroute = { viewModel.rerouteFromCurrentLocation() },
+                distanceToNextManeuverMeters = navProgress.distanceToNextManeuverMeters,
                 isAudioMuted = isAudioMuted,
                 onToggleAudioMute = { viewModel.toggleAudioMute() }
             )

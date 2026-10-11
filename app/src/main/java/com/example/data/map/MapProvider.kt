@@ -96,6 +96,13 @@ class MapLibreMapProvider(
     }
 }
 
+data class TileRange(
+    val minX: Int,
+    val maxX: Int,
+    val minY: Int,
+    val maxY: Int
+)
+
 object TileMath {
     // Compliant User-Agent header per OpenStreetMap Tile Usage Policy
     const val OSM_USER_AGENT = "RideTogether-Android-Personal-App/1.0 (arpitkumar1101@gmail.com)"
@@ -132,5 +139,72 @@ object TileMath {
         val subdomains = listOf("a", "b", "c")
         val sub = subdomains[Math.floorMod(x + y, subdomains.size)]
         return "https://$sub.tile.opentopomap.org/$zoom/$x/$y.png"
+    }
+
+    /**
+     * Calculates the minimum and maximum tile indices required to completely cover a rotated viewport.
+     */
+    fun calculateVisibleTileRange(
+        widthPx: Float,
+        heightPx: Float,
+        anchorX: Float,
+        anchorY: Float,
+        panOffsetX: Float,
+        panOffsetY: Float,
+        centerTileXDouble: Double,
+        centerTileYDouble: Double,
+        zoomLevel: Int,
+        tileSizePx: Float,
+        effectiveHeadingDeg: Float,
+        tileMargin: Int = 1
+    ): TileRange {
+        val maxTileIndex = (1 shl zoomLevel) - 1
+        val pivotX = anchorX + panOffsetX
+        val pivotY = anchorY + panOffsetY
+
+        val headingRad = Math.toRadians(effectiveHeadingDeg.toDouble())
+        val cosH = kotlin.math.cos(headingRad)
+        val sinH = kotlin.math.sin(headingRad)
+
+        val screenCorners = listOf(
+            Pair(0f, 0f),
+            Pair(widthPx, 0f),
+            Pair(widthPx, heightPx),
+            Pair(0f, heightPx)
+        )
+
+        var minTileX = Double.MAX_VALUE
+        var maxTileX = -Double.MAX_VALUE
+        var minTileY = Double.MAX_VALUE
+        var maxTileY = -Double.MAX_VALUE
+
+        for ((sx, sy) in screenCorners) {
+            val dx = sx - pivotX
+            val dy = sy - pivotY
+
+            // Inverse rotation by +effectiveHeading to find unrotated content space coordinate
+            val unrotatedX = pivotX + dx * cosH - dy * sinH
+            val unrotatedY = pivotY + dx * sinH + dy * cosH
+
+            val tileX = centerTileXDouble + (unrotatedX - anchorX - panOffsetX) / tileSizePx
+            val tileY = centerTileYDouble + (unrotatedY - anchorY - panOffsetY) / tileSizePx
+
+            if (tileX < minTileX) minTileX = tileX
+            if (tileX > maxTileX) maxTileX = tileX
+            if (tileY < minTileY) minTileY = tileY
+            if (tileY > maxTileY) maxTileY = tileY
+        }
+
+        val rangeMinX = (kotlin.math.floor(minTileX).toInt() - tileMargin).coerceIn(0, maxTileIndex)
+        val rangeMaxX = (kotlin.math.ceil(maxTileX).toInt() + tileMargin).coerceIn(0, maxTileIndex)
+        val rangeMinY = (kotlin.math.floor(minTileY).toInt() - tileMargin).coerceIn(0, maxTileIndex)
+        val rangeMaxY = (kotlin.math.ceil(maxTileY).toInt() + tileMargin).coerceIn(0, maxTileIndex)
+
+        return TileRange(
+            minX = rangeMinX,
+            maxX = rangeMaxX,
+            minY = rangeMinY,
+            maxY = rangeMaxY
+        )
     }
 }

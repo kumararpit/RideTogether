@@ -157,6 +157,15 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        // Check for active uncompleted ride on initialization
+        viewModelScope.launch {
+            try {
+                repository.fetchActiveRideForUser()
+            } catch (e: Exception) {
+                android.util.Log.w("RideViewModel", "Failed restoring active ride: ${e.message}")
+            }
+        }
+
         // Monitor location updates for live route progress, distance, ETA, and adaptive off-route detection
         viewModelScope.launch {
             locationTracker.currentLocation.collectLatest { locUpdate ->
@@ -178,6 +187,40 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 android.util.Log.e("RideViewModel", "Failed to load completed rides from Room database", e)
                 _completedRides.value = emptyList()
+            }
+        }
+
+        // Observe ride status changes: when ride completes, automatically persist CompletedRideEntity for members
+        viewModelScope.launch {
+            repository.currentRide.collectLatest { ride ->
+                if (ride != null && ride.status == com.example.data.model.RideStatus.COMPLETED) {
+                    val memberList = repository.members.value
+                    val existingRides = _completedRides.value
+                    if (existingRides.none { it.id == ride.id }) {
+                        try {
+                            val distMeters = if (ride.actualRecordedDistanceMeters > 0) ride.actualRecordedDistanceMeters else ride.totalDistanceMeters
+                            val durationSec = ride.totalDurationSeconds
+                            val avgSpeed = if (durationSec > 60 && distMeters > 500) ((distMeters / 1000.0) / (durationSec / 3600.0)) else 0.0
+
+                            val entity = com.example.data.db.CompletedRideEntity(
+                                id = ride.id,
+                                rideName = ride.name,
+                                startLocationName = ride.startLocationName,
+                                destinationName = ride.destinationName,
+                                distanceMeters = distMeters,
+                                durationSeconds = durationSec,
+                                avgSpeedKmh = avgSpeed,
+                                riderCount = memberList.size.coerceAtLeast(1),
+                                completedAtMs = System.currentTimeMillis(),
+                                hadEmergency = memberList.any { it.status == MemberStatus.EMERGENCY }
+                            )
+                            com.example.data.db.RideDatabase.getInstance(getApplication()).completedRideDao().insertRide(entity)
+                            android.util.Log.d("RideViewModel", "Saved completed ride ${ride.id} to local Room history for member")
+                        } catch (e: Exception) {
+                            android.util.Log.w("RideViewModel", "Failed auto-saving completed ride for member: ${e.message}")
+                        }
+                    }
+                }
             }
         }
     }
