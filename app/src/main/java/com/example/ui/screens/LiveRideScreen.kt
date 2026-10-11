@@ -119,12 +119,15 @@ fun LiveRideScreen(
             )
 
             // Google Maps-style Turn-by-Turn Navigation HUD
+            val isAudioMuted by viewModel.navAudioGuidance.isMuted.collectAsState()
             TurnByTurnNavHeader(
                 currentStep = currentStep,
                 nextStep = nextStep,
                 isOffRoute = isOffRoute,
                 isRerouting = isRerouting,
-                onReroute = { viewModel.rerouteFromCurrentLocation() }
+                onReroute = { viewModel.rerouteFromCurrentLocation() },
+                isAudioMuted = isAudioMuted,
+                onToggleAudioMute = { viewModel.toggleAudioMute() }
             )
 
             // Alert banner if another rider triggered SOS

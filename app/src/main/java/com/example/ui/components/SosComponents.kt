@@ -226,11 +226,28 @@ fun SosAlertBanner(
                         fontWeight = FontWeight.Bold
                     )
                     val updateAgoSec = ((System.currentTimeMillis() - sosEvent.timestampMs) / 1000).coerceAtLeast(0)
-                    Text(
-                        text = if (updateAgoSec < 10) "GPS: Live signal" else "GPS: ${updateAgoSec}s ago",
-                        color = Color.White.copy(alpha = 0.85f),
-                        fontSize = 11.sp
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(top = 2.dp)
+                    ) {
+                        val (badgeText, badgeBg) = when (sosEvent.locationSource) {
+                            "FRESH_LOCATION_FIX" -> Pair("FRESH GPS FIX", StatusRidingGreen)
+                            "LAST_KNOWN_LOCATION" -> Pair("LAST KNOWN LOCATION (${updateAgoSec}s ago)", AmberPrimary)
+                            else -> Pair("LOCATION UNAVAILABLE", Color.Gray)
+                        }
+                        Surface(
+                            color = badgeBg,
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = badgeText,
+                                color = Color.Black,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Black,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
                 }
             }
 

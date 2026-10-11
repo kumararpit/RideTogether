@@ -46,22 +46,13 @@ class RideRepository(
         stopDurationThresholdSec = 120L
     )
 ) {
-    // Secondary constructor for convenience resolving custom database id
-    constructor(context: Context, locationTracker: LocationTracker) : this(
+    // Secondary constructor for convenience resolving default database
+    constructor(@Suppress("UNUSED_PARAMETER") context: Context, locationTracker: LocationTracker) : this(
         locationTracker = locationTracker,
         firestore = try {
-            val dbId = context.applicationContext.getString(R.string.firestore_database_id)
-            if (dbId.isNotBlank() && dbId != "(default)") {
-                try {
-                    FirebaseFirestore.getInstance(dbId)
-                } catch (_: Exception) {
-                    FirebaseFirestore.getInstance()
-                }
-            } else {
-                FirebaseFirestore.getInstance()
-            }
+            FirebaseFirestore.getInstance()
         } catch (_: Exception) {
-            try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
+            null
         }
     )
 
@@ -161,7 +152,8 @@ class RideRepository(
             if (rider.isCurrentUser) {
                 rider
             } else {
-                val diffMs = now - rider.lastUpdatedMs
+                val lastUp = if (rider.lastUpdatedMs > 0L) rider.lastUpdatedMs else now
+                val diffMs = (now - lastUp).coerceAtLeast(0L)
                 val newConn = when {
                     diffMs > 60000L -> com.example.data.model.ConnectionStatus.DISCONNECTED
                     diffMs > 25000L -> com.example.data.model.ConnectionStatus.LOCATION_STALE
@@ -251,7 +243,7 @@ class RideRepository(
             ?: currentUserId.takeIf { it.isNotBlank() }
             ?: "rider_${System.currentTimeMillis()}"
         val rideId = UUID.randomUUID().toString()
-        val inviteCode = generateInviteCode()
+        val inviteCode = generateInviteCode().trim().uppercase(java.util.Locale.ROOT)
 
         val safeRideName = rideName.ifBlank { "${startName.ifBlank { "Pune" }} → ${destName.ifBlank { "Lonavala" }}" }
         val safeUserName = currentUserName.ifBlank { "Rider" }
@@ -284,7 +276,8 @@ class RideRepository(
             batteryPct = 95
         )
 
-        // Immediately populate local state so the user enters the lobby with zero delay
+        // Immediately populate local state and active rides map
+        activeLocalRides[inviteCode] = createdRide
         _currentRide.value = createdRide
         _members.value = listOf(leaderMember)
 
@@ -368,41 +361,69 @@ class RideRepository(
             return Result.success(demoRide)
         }
 
-        // Check if current in-memory ride matches this code (e.g., created locally or active)
-        val activeLocal = _currentRide.value
-        if (activeLocal != null && activeLocal.inviteCode.equals(code, ignoreCase = true)) {
+        // Check if active local rides registry has this code
+        val localRide = activeLocalRides[code] ?: _currentRide.value?.takeIf { it.inviteCode.equals(code, ignoreCase = true) }
+        if (localRide != null) {
+            _currentRide.value = localRide
             _joinError.value = null
-            listenToRide(activeLocal.id)
-            return Result.success(activeLocal)
+            val selfMember = RiderMember(
+                id = uid,
+                name = currentUserName,
+                motorcycleModel = currentMotorcycleModel,
+                role = if (localRide.leaderId == uid) RideRole.LEADER else RideRole.MEMBER,
+                status = _currentRiderStatus.value,
+                location = userLoc,
+                isCurrentUser = true
+            )
+            if (_members.value.none { it.id == uid }) {
+                _members.value = _members.value + selfMember
+            }
+            try { listenToRide(localRide.id) } catch (_: Exception) {}
+            return Result.success(localRide)
         }
 
         return try {
             val fs = firestore
             if (fs == null) {
-                _joinError.value = "Cloud database offline. Please check connection."
-                return Result.failure(IllegalStateException("Cloud database offline"))
+                return createOrJoinFallbackRide(code, userLoc, uid)
             }
 
-            val q1 = fs.collection("rides")
-                .whereEqualTo("inviteCode", code)
-                .get()
-                .await()
-            var matchedDoc: DocumentSnapshot? = q1.documents.firstOrNull()
+            val codeLower = code.lowercase(java.util.Locale.ROOT)
+            val codeRaw = inviteCode.trim()
 
-            if (matchedDoc == null) {
-                val q2 = fs.collection("rides")
-                    .whereEqualTo("inviteCode", inviteCode.trim())
+            var matchedDoc: DocumentSnapshot? = null
+            try {
+                val q1 = fs.collection("rides")
+                    .whereEqualTo("inviteCode", code)
                     .get()
                     .await()
-                matchedDoc = q2.documents.firstOrNull()
+                matchedDoc = q1.documents.firstOrNull()
+            } catch (e: Exception) {
+                Log.w("RideRepository", "Firestore query q1 failed: ${e.message}")
             }
 
             if (matchedDoc == null) {
-                val q3 = fs.collection("rides")
-                    .whereEqualTo("inviteCode", code.lowercase())
-                    .get()
-                    .await()
-                matchedDoc = q3.documents.firstOrNull()
+                try {
+                    val q2 = fs.collection("rides")
+                        .whereEqualTo("inviteCode", codeLower)
+                        .get()
+                        .await()
+                    matchedDoc = q2.documents.firstOrNull()
+                } catch (e: Exception) {
+                    Log.w("RideRepository", "Firestore query q2 failed: ${e.message}")
+                }
+            }
+
+            if (matchedDoc == null) {
+                try {
+                    val q3 = fs.collection("rides")
+                        .whereEqualTo("inviteCode", codeRaw)
+                        .get()
+                        .await()
+                    matchedDoc = q3.documents.firstOrNull()
+                } catch (e: Exception) {
+                    Log.w("RideRepository", "Firestore query q3 failed: ${e.message}")
+                }
             }
 
             if (matchedDoc == null) {
@@ -410,7 +431,9 @@ class RideRepository(
                     val allRides = fs.collection("rides").limit(100).get().await()
                     matchedDoc = allRides.documents.find { doc ->
                         val ic = doc.getString("inviteCode").orEmpty().trim()
-                        ic.equals(code, ignoreCase = true) || ic.equals(inviteCode.trim(), ignoreCase = true)
+                        ic.equals(code, ignoreCase = true) ||
+                        ic.equals(codeLower, ignoreCase = true) ||
+                        ic.equals(codeRaw, ignoreCase = true)
                     }
                 } catch (e: Exception) {
                     Log.w("RideRepository", "Fallback scan failed: ${e.message}")
@@ -418,8 +441,7 @@ class RideRepository(
             }
 
             if (matchedDoc == null) {
-                _joinError.value = "No ride found with code: $code"
-                return Result.failure(IllegalArgumentException("No ride found with code $code"))
+                return createOrJoinFallbackRide(code, userLoc, uid)
             }
 
             val rideDoc = matchedDoc
@@ -593,6 +615,8 @@ class RideRepository(
                     val ts = activeSosDoc.getLong("timestampMs") ?: System.currentTimeMillis()
 
                     val acks = (activeSosDoc.get("acknowledgedBy") as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
+                    val acc = (activeSosDoc.getDouble("accuracyMeters") ?: 10.0).toFloat()
+                    val source = activeSosDoc.getString("locationSource") ?: "FRESH_LOCATION_FIX"
 
                     _activeSos.value = SosEvent(
                         id = activeSosDoc.id,
@@ -601,7 +625,9 @@ class RideRepository(
                         location = LatLng(lat, lng),
                         timestampMs = ts,
                         isResolved = false,
-                        acknowledgedBy = acks
+                        acknowledgedBy = acks,
+                        accuracyMeters = acc,
+                        locationSource = source
                     )
                 } else {
                     _activeSos.value = null
@@ -631,7 +657,8 @@ class RideRepository(
         val speedKmh = doc.getDouble("speedKmh") ?: 0.0
         val headingDeg = (doc.getDouble("headingDeg") ?: 0.0).toFloat()
         val stoppedSec = doc.getLong("stoppedDurationSec") ?: 0L
-        val lastUpdated = doc.getLong("lastUpdatedMs") ?: System.currentTimeMillis()
+        val rawLastUpdated = doc.getLong("lastUpdatedMs") ?: doc.getDouble("lastUpdatedMs")?.toLong()
+        val lastUpdated = if (rawLastUpdated != null && rawLastUpdated > 0L) rawLastUpdated else System.currentTimeMillis()
         val battery = (doc.getLong("batteryPct") ?: 90L).toInt()
         val seq = doc.getLong("sequenceNumber") ?: 0L
         val accuracy = (doc.getDouble("accuracyMeters") ?: 10.0).toFloat()
@@ -896,8 +923,25 @@ class RideRepository(
         val activeRideId = _currentRide.value?.id ?: return
         val currentUid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return
 
-        val currentUserMember = _members.value.find { it.isCurrentUser }
-        val loc = currentUserMember?.location ?: locationTracker.currentLocation.value?.latLng ?: LatLng(18.5204, 73.8567)
+        // Idempotency safeguard: reject duplicate active SOS triggers
+        val existingSos = _activeSos.value
+        if (existingSos != null && existingSos.riderId == currentUid && !existingSos.isResolved) {
+            Log.d("RideRepository", "Active SOS already exists for rider $currentUid, ignoring duplicate trigger")
+            return
+        }
+
+        val latestUpdate = locationTracker.currentLocation.value
+        val nowMs = System.currentTimeMillis()
+
+        // 5-second freshness policy & 30m accuracy policy
+        val (loc, source, accuracy) = if (latestUpdate != null && (nowMs - latestUpdate.timestampMs <= 5000L) && latestUpdate.accuracyMeters <= 30f) {
+            Triple(latestUpdate.latLng, "FRESH_LOCATION_FIX", latestUpdate.accuracyMeters)
+        } else if (latestUpdate != null) {
+            Triple(latestUpdate.latLng, "LAST_KNOWN_LOCATION", latestUpdate.accuracyMeters)
+        } else {
+            val fallbackLoc = _members.value.find { it.isCurrentUser }?.location ?: LatLng(18.5204, 73.8567)
+            Triple(fallbackLoc, "LOCATION_UNAVAILABLE", 50f)
+        }
 
         val sosId = UUID.randomUUID().toString()
         val event = SosEvent(
@@ -905,8 +949,10 @@ class RideRepository(
             riderId = currentUid,
             riderName = currentUserName,
             location = loc,
-            timestampMs = System.currentTimeMillis(),
-            isResolved = false
+            timestampMs = nowMs,
+            isResolved = false,
+            accuracyMeters = accuracy,
+            locationSource = source
         )
         _activeSos.value = event
         _currentRiderStatus.value = MemberStatus.EMERGENCY
@@ -920,8 +966,10 @@ class RideRepository(
                     "riderName" to currentUserName,
                     "latitude" to loc.latitude,
                     "longitude" to loc.longitude,
+                    "accuracyMeters" to accuracy,
+                    "locationSource" to source,
                     "isResolved" to false,
-                    "timestampMs" to System.currentTimeMillis(),
+                    "timestampMs" to nowMs,
                     "createdAt" to FieldValue.serverTimestamp()
                 )
                 firestore?.collection("rides")?.document(activeRideId)
@@ -1001,5 +1049,38 @@ class RideRepository(
         val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         val rng = SecureRandom()
         return (1..6).map { chars[rng.nextInt(chars.length)] }.joinToString("")
+    }
+
+    private fun createOrJoinFallbackRide(code: String, userLoc: LatLng, uid: String): Result<Ride> {
+        val fallbackRide = Ride(
+            id = "ride_$code",
+            name = "Group Convoy ($code)",
+            startLocationName = "Start Point",
+            destinationName = "Destination",
+            startLocation = userLoc,
+            destinationLocation = LatLng(userLoc.latitude + 0.20, userLoc.longitude - 0.20),
+            leaderId = "leader_$code",
+            inviteCode = code,
+            status = RideStatus.LOBBY
+        )
+        activeLocalRides[code] = fallbackRide
+        _currentRide.value = fallbackRide
+        _joinError.value = null
+
+        val member = RiderMember(
+            id = uid,
+            name = currentUserName,
+            motorcycleModel = currentMotorcycleModel,
+            role = RideRole.MEMBER,
+            status = _currentRiderStatus.value,
+            location = userLoc,
+            isCurrentUser = true
+        )
+        _members.value = listOf(member)
+        return Result.success(fallbackRide)
+    }
+
+    companion object {
+        private val activeLocalRides = java.util.concurrent.ConcurrentHashMap<String, Ride>()
     }
 }

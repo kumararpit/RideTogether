@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import android.annotation.SuppressLint
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -10,6 +11,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -39,6 +42,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -88,6 +92,7 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
+@SuppressLint("UnusedBoxWithConstraintsScope")
 @Composable
 fun RideMapCanvas(
     route: List<LatLng>,
@@ -105,20 +110,34 @@ fun RideMapCanvas(
     val currentUser = members.find { it.isCurrentUser }
     val initialCenter = currentUser?.location ?: if (route.isNotEmpty()) route[0] else LatLng(18.5204, 73.8567)
 
+    val cameraController = remember { com.example.data.map.MapCameraController() }
+    val cameraState by cameraController.state.collectAsState()
+
     var centerLat by remember { mutableStateOf(initialCenter.latitude) }
     var centerLng by remember { mutableStateOf(initialCenter.longitude) }
-    var zoomLevel by remember { mutableIntStateOf(14) } // OSM Slippy tile zoom level (1..18)
+    var zoomLevel by remember { mutableIntStateOf(if (route.isNotEmpty()) 16 else 14) }
     var panOffsetX by remember { mutableFloatStateOf(0f) }
     var panOffsetY by remember { mutableFloatStateOf(0f) }
     var isDarkTacticalStyle by remember { mutableStateOf(true) }
 
-    // Follow user if follow mode is active
-    LaunchedEffect(currentUser?.location, isFollowRiderMode) {
+    // Synchronize camera state machine when follow mode or rider location updates
+    LaunchedEffect(currentUser?.location, currentUser?.speedKmh, currentUser?.headingDeg, isFollowRiderMode) {
         if (currentUser != null && isFollowRiderMode) {
-            panOffsetX = 0f
-            panOffsetY = 0f
-            centerLat = currentUser.location.latitude
-            centerLng = currentUser.location.longitude
+            val locUpdate = com.example.data.location.LocationUpdate(
+                latLng = currentUser.location,
+                speedKmh = currentUser.speedKmh,
+                headingDeg = currentUser.headingDeg,
+                accuracyMeters = 10f
+            )
+            cameraController.processLocation(locUpdate)
+            val st = cameraController.state.value
+            centerLat = st.center.latitude
+            centerLng = st.center.longitude
+            zoomLevel = st.zoom
+            if (st.mode == com.example.data.map.MapCameraMode.FOLLOWING) {
+                panOffsetX = 0f
+                panOffsetY = 0f
+            }
         }
     }
 
@@ -221,10 +240,19 @@ fun RideMapCanvas(
                 .fillMaxSize()
                 .testTag("ride_map_canvas")
                 .pointerInput(Unit) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        panOffsetX += dragAmount.x
-                        panOffsetY += dragAmount.y
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        if (zoom != 1f) {
+                            val newZoom = (zoomLevel * zoom).roundToInt().coerceIn(3, 19)
+                            if (newZoom != zoomLevel) {
+                                zoomLevel = newZoom
+                                cameraController.setZoom(newZoom)
+                            }
+                        }
+                        if (pan != Offset.Zero) {
+                            panOffsetX += pan.x
+                            panOffsetY += pan.y
+                        }
+                        cameraController.onUserGesture()
                         onFollowRiderChange(false)
                     }
                 }
@@ -245,6 +273,13 @@ fun RideMapCanvas(
         ) {
             val canvasW = size.width
             val canvasH = size.height
+            val headingRotation = if (isFollowRiderMode && currentUser != null && currentUser.headingDeg in 0f..360f && currentUser.speedKmh >= 3.0) {
+                currentUser.headingDeg
+            } else {
+                cameraController.state.value.heading
+            }
+
+            rotate(degrees = -headingRotation, pivot = Offset(canvasW / 2f, canvasH / 2f)) {
 
             // Safe text drawing helper
             fun drawSafeText(
@@ -354,152 +389,154 @@ fun RideMapCanvas(
                 val isSelected = rider.id == selectedRider?.id
                 val isEmergency = rider.status == MemberStatus.EMERGENCY
 
-                // GPS Accuracy Pulse for Current User
+                // Zoom-Adaptive Marker Disc Radius
+                val markerRadius = when {
+                    zoomLevel >= 16 -> 22f
+                    zoomLevel >= 14 -> 18f
+                    else -> 14f
+                }
+
+                val isDisconnectedOrOffline = rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED || rider.status == MemberStatus.OFFLINE
+                val isStopped = rider.status == MemberStatus.STOPPED
+
+                // Distinct Theme Color for Rider Types according to design spec
+                val markerFillColor = when {
+                    isEmergency -> StatusEmergencyRed
+                    rider.isCurrentUser -> Color(0xFF1E88E5) // Vibrant Navigation Blue ("You")
+                    rider.role == com.example.data.model.RideRole.LEADER -> Color(0xFFD32F2F) // Leader Crimson Red
+                    isStopped -> Color(0xFFFFB300) // Stopped Amber Yellow
+                    isDisconnectedOrOffline -> Color(0xFF607D8B) // Muted Slate Gray
+                    else -> Color(rider.avatarColorHex) // Unique Group Rider Accent Color
+                }
+
+                // Layer A1: GPS Accuracy Pulse for Current User
                 if (rider.isCurrentUser) {
                     drawCircle(
-                        color = Color(0x3329B6F6),
-                        radius = 26f,
+                        color = Color(0x331E88E5),
+                        radius = markerRadius + 10f,
                         center = screenPos
                     )
                 }
 
-                // Draw Emergency Beacon Radiating Waves
+                // Layer A2: Emergency Beacon Radiating Waves
                 if (isEmergency) {
                     drawCircle(
                         color = StatusEmergencyRed.copy(alpha = radarAlpha),
-                        radius = 28f * radarRadiusFactor,
+                        radius = (markerRadius + 12f) * radarRadiusFactor,
                         center = screenPos,
                         style = Stroke(width = 4f)
                     )
                     drawCircle(
                         color = StatusEmergencyRed.copy(alpha = 0.25f),
-                        radius = 20f,
+                        radius = markerRadius + 8f,
                         center = screenPos
                     )
                 }
 
-                // If selected: Draw focus ring
+                // Layer A3: Selected Focus Ring
                 if (isSelected) {
                     drawCircle(
                         color = Color.White,
-                        radius = 24f,
+                        radius = markerRadius + 8f,
                         center = screenPos,
-                        style = Stroke(width = 3f)
+                        style = Stroke(width = 3.5f)
                     )
                 }
 
-                // Base Marker Disc
-                val markerColor = when (rider.status) {
-                    MemberStatus.EMERGENCY -> StatusEmergencyRed
-                    MemberStatus.STOPPED -> StatusStoppedAmber
-                    MemberStatus.RIDING -> StatusRidingGreen
-                    MemberStatus.OFFLINE -> StatusOfflineGray
-                }
-
-                // Shadow
+                // Layer B: Soft Drop Shadow
                 drawCircle(
-                    color = Color.Black.copy(alpha = 0.5f),
-                    radius = 16f,
+                    color = Color.Black.copy(alpha = 0.45f),
+                    radius = markerRadius + 1f,
                     center = Offset(screenPos.x + 2f, screenPos.y + 4f)
                 )
 
-                // Outer border & fill
+                // Layer C: Base Disc Fill
                 drawCircle(
-                    color = Color(rider.avatarColorHex),
-                    radius = 15f,
+                    color = markerFillColor,
+                    radius = markerRadius,
                     center = screenPos
                 )
-                drawCircle(
-                    color = Color.White,
-                    radius = 15f,
-                    center = screenPos,
-                    style = Stroke(width = 2.5f)
-                )
 
-                // Status indicator pip
-                val pipCenter = Offset(screenPos.x + 10f, screenPos.y + 10f)
-                drawCircle(color = Color.Black, radius = 6f, center = pipCenter)
-                drawCircle(color = markerColor, radius = 5f, center = pipCenter)
-
-                // Heading arrow
-                if (rider.status == MemberStatus.RIDING && rider.speedKmh > 0) {
-                    val angleRad = (rider.headingDeg - 90f) * (PI.toFloat() / 180f)
-                    val tipX = screenPos.x + cos(angleRad) * 22f
-                    val tipY = screenPos.y + sin(angleRad) * 22f
-                    val base1X = screenPos.x + cos(angleRad + 2.5f) * 14f
-                    val base1Y = screenPos.y + sin(angleRad + 2.5f) * 14f
-                    val base2X = screenPos.x + cos(angleRad - 2.5f) * 14f
-                    val base2Y = screenPos.y + sin(angleRad - 2.5f) * 14f
-
-                    val arrowPath = Path().apply {
-                        moveTo(tipX, tipY)
-                        lineTo(base1X, base1Y)
-                        lineTo(base2X, base2Y)
-                        close()
-                    }
-                    drawPath(arrowPath, color = markerColor)
-                }
-
-                // Rider Initials
-                val initials = rider.name.take(1).uppercase()
-                drawSafeText(
-                    text = initials,
-                    x = screenPos.x - 5f,
-                    y = screenPos.y - 8f,
-                    style = TextStyle(
+                // Layer D: Outer Casing / Border (Dashed for Offline/Stale, Solid White for Online)
+                if (isDisconnectedOrOffline) {
+                    drawCircle(
+                        color = Color.White.copy(alpha = 0.8f),
+                        radius = markerRadius,
+                        center = screenPos,
+                        style = Stroke(
+                            width = 2.5f,
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f))
+                        )
+                    )
+                } else {
+                    drawCircle(
                         color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.ExtraBold
-                    )
-                )
-
-                // Render full callout tag ONLY for selected rider, current user, or emergency
-                if (rider.isCurrentUser || isSelected || isEmergency) {
-                    val labelText = if (rider.isCurrentUser) "${rider.name} (You)" else rider.name
-                    val leaderBadge = if (rider.role == com.example.data.model.RideRole.LEADER) " ⭐" else ""
-                    val bikeSuffix = if (rider.motorcycleModel.isNotBlank()) " [${rider.motorcycleModel}]" else ""
-                    val distGapText = if (!rider.isCurrentUser && currentUser != null) " • Gap: ${rider.getFormattedDistanceTo(currentUser.location)}" else ""
-                    val statusText = when {
-                        rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_UNAVAILABLE -> "⚠️ No GPS"
-                        rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_STALE -> "⏳ Stale"
-                        rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED -> "🔌 Disconnected"
-                        rider.connectionStatus == com.example.data.model.ConnectionStatus.RECONNECTING -> "🔄 Reconnecting"
-                        rider.status == MemberStatus.EMERGENCY -> "🚨 SOS!"
-                        rider.status == MemberStatus.STOPPED -> "Stopped"
-                        rider.status == MemberStatus.RIDING -> "${rider.speedKmh.toInt()} km/h"
-                        rider.status == MemberStatus.OFFLINE -> "Offline"
-                        else -> "${rider.speedKmh.toInt()} km/h"
-                    }
-
-                    val fullTag = "$labelText$leaderBadge$bikeSuffix$distGapText • $statusText"
-                    val tagStyle = TextStyle(
-                        color = when {
-                            isEmergency -> StatusEmergencyRed
-                            rider.connectionStatus == com.example.data.model.ConnectionStatus.LOCATION_STALE -> StatusStoppedAmber
-                            rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED -> Color(0xFF90A4AE)
-                            else -> Color.White
-                        },
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    val layoutResult = textMeasurer.measure(fullTag, tagStyle)
-                    val textW = layoutResult.size.width.toFloat()
-                    val textH = layoutResult.size.height.toFloat()
-
-                    val boxTopLeft = Offset(screenPos.x - (textW / 2f) - 6f, screenPos.y - 38f)
-                    drawRoundRect(
-                        color = Color(0xDD121721),
-                        topLeft = boxTopLeft,
-                        size = androidx.compose.ui.geometry.Size(textW + 12f, textH + 6f),
-                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(8f, 8f)
-                    )
-                    drawSafeText(
-                        text = fullTag,
-                        x = boxTopLeft.x + 6f,
-                        y = boxTopLeft.y + 3f,
-                        style = tagStyle
+                        radius = markerRadius,
+                        center = screenPos,
+                        style = Stroke(width = 2.5f)
                     )
                 }
+
+                // Layer E: Directional Arrowhead ▲ inside marker disc
+                val angleRad = (rider.headingDeg - 90f) * (PI.toFloat() / 180f)
+                val arrowLen = markerRadius * 0.7f
+
+                val tipX = screenPos.x + cos(angleRad) * arrowLen
+                val tipY = screenPos.y + sin(angleRad) * arrowLen
+
+                val leftX = screenPos.x + cos(angleRad + 2.4f) * (arrowLen * 0.75f)
+                val leftY = screenPos.y + sin(angleRad + 2.4f) * (arrowLen * 0.75f)
+
+                val rightX = screenPos.x + cos(angleRad - 2.4f) * (arrowLen * 0.75f)
+                val rightY = screenPos.y + sin(angleRad - 2.4f) * (arrowLen * 0.75f)
+
+                val innerX = screenPos.x + cos(angleRad + PI.toFloat()) * (arrowLen * 0.25f)
+                val innerY = screenPos.y + sin(angleRad + PI.toFloat()) * (arrowLen * 0.25f)
+
+                val arrowPath = Path().apply {
+                    moveTo(tipX, tipY)
+                    lineTo(leftX, leftY)
+                    lineTo(innerX, innerY)
+                    lineTo(rightX, rightY)
+                    close()
+                }
+                drawPath(arrowPath, color = Color.White)
+
+                // Layer F: Leader Crown Indicator 👑
+                if (rider.role == com.example.data.model.RideRole.LEADER) {
+                    drawSafeText(
+                        text = "👑",
+                        x = screenPos.x - 7f,
+                        y = screenPos.y - markerRadius - 16f,
+                        style = TextStyle(fontSize = 12.sp)
+                    )
+                }
+
+                // Layer G: Minimalist Pill Badge (First Name Only e.g. "You", "Rohan", "Aman")
+                val firstName = if (rider.isCurrentUser) "You" else rider.name.split(" ").firstOrNull() ?: rider.name
+                val tagStyle = TextStyle(
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                val layoutResult = textMeasurer.measure(firstName, tagStyle)
+                val textW = layoutResult.size.width.toFloat()
+                val textH = layoutResult.size.height.toFloat()
+
+                val boxTopLeft = Offset(screenPos.x - (textW / 2f) - 8f, screenPos.y + markerRadius + 4f)
+                drawRoundRect(
+                    color = markerFillColor,
+                    topLeft = boxTopLeft,
+                    size = androidx.compose.ui.geometry.Size(textW + 16f, textH + 4f),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(10f, 10f)
+                )
+                drawSafeText(
+                    text = firstName,
+                    x = boxTopLeft.x + 8f,
+                    y = boxTopLeft.y + 2f,
+                    style = tagStyle
+                )
+            }
             }
         }
 
@@ -573,6 +610,7 @@ fun RideMapCanvas(
                 onClick = {
                     panOffsetX = 0f
                     panOffsetY = 0f
+                    cameraController.recenter(currentUser?.location, currentUser?.headingDeg)
                     if (currentUser != null) {
                         centerLat = currentUser.location.latitude
                         centerLng = currentUser.location.longitude
@@ -594,21 +632,19 @@ fun RideMapCanvas(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Fit Entire Group in View
+            // Fit Entire Group / Route Overview
             SmallFloatingActionButton(
                 onClick = {
-                    if (members.isNotEmpty()) {
-                        val allPoints = members.map { it.location } + route
-                        val minLat = allPoints.minOf { it.latitude }
-                        val maxLat = allPoints.maxOf { it.latitude }
-                        val minLng = allPoints.minOf { it.longitude }
-                        val maxLng = allPoints.maxOf { it.longitude }
-
-                        centerLat = (minLat + maxLat) / 2.0
-                        centerLng = (minLng + maxLng) / 2.0
+                    val allPoints = members.map { it.location } + route
+                    if (allPoints.isNotEmpty()) {
+                        cameraController.showOverview(allPoints)
+                        val st = cameraController.state.value
+                        centerLat = st.center.latitude
+                        centerLng = st.center.longitude
+                        zoomLevel = st.zoom
                         panOffsetX = 0f
                         panOffsetY = 0f
-                        zoomLevel = 12
+                        onFollowRiderChange(false)
                     }
                 },
                 modifier = Modifier.testTag("fit_group_button"),

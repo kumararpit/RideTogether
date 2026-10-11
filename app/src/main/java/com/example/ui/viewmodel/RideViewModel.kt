@@ -43,26 +43,18 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     val locationTracker = LocationTracker(application)
     val osrmRoutingService = OsrmRoutingService()
     val placeSearchService = PlaceSearchService()
+    val navEngine = com.example.data.location.NavEngine()
+    val navAudioGuidance = com.example.data.location.NavAudioGuidance(application)
+
+    private var consecutiveOffRouteFixes = 0
+    private var lastRerouteTimestampMs = 0L
+    private val REROUTE_COOLDOWN_MS = 15000L
 
     private val db: FirebaseFirestore? = try {
-        val context = application.applicationContext
-        val resId = context.resources.getIdentifier("firestore_database_id", "string", context.packageName)
-        val configDbId = if (resId != 0) context.getString(resId) else ""
-        val databaseId = configDbId.ifBlank { BuildConfig.FIRESTORE_DATABASE_ID }.ifBlank { "(default)" }
-
-        if (databaseId.isNotBlank() && databaseId != "(default)") {
-            try {
-                FirebaseFirestore.getInstance(databaseId)
-            } catch (e: Exception) {
-                android.util.Log.w("RideViewModel", "Failed to get Firestore for $databaseId, falling back to default", e)
-                try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
-            }
-        } else {
-            try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
-        }
+        FirebaseFirestore.getInstance()
     } catch (e: Exception) {
         android.util.Log.e("RideViewModel", "Error initializing FirebaseFirestore: ${e.message}", e)
-        try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
+        null
     }
 
     val authRepository = AuthRepository()
@@ -165,11 +157,11 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Monitor location updates for live route progress, distance, ETA, and off-route detection
+        // Monitor location updates for live route progress, distance, ETA, and adaptive off-route detection
         viewModelScope.launch {
             locationTracker.currentLocation.collectLatest { locUpdate ->
                 if (locUpdate != null) {
-                    updateNavigationProgress(locUpdate.latLng, locUpdate.speedKmh)
+                    updateNavigationProgress(locUpdate)
                 }
             }
         }
@@ -229,45 +221,48 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun updateNavigationProgress(userLoc: LatLng, speedKmh: Double) {
-        val route = _routeResult.value?.coordinates ?: currentRide.value?.routePoints
-        if (route.isNullOrEmpty()) return
+    private fun updateNavigationProgress(locUpdate: com.example.data.location.LocationUpdate) {
+        val navProg = navEngine.processLocation(locUpdate)
 
-        val closestIdx = RouteGeometry.findClosestPointIndex(userLoc, route)
-        if (closestIdx >= 0) {
-            val distToRouteM = RouteGeometry.distanceToPolylineMeters(userLoc, route)
-            _isOffRoute.value = distToRouteM > 120.0
+        _remainingDistanceMeters.value = navProg.remainingRouteDistanceMeters
+        _remainingDurationSeconds.value = navProg.remainingDurationSeconds
+        _currentStepIndex.value = navProg.currentManeuverIndex
+        _isOffRoute.value = navProg.isOffRoute
 
-            val remDistMeters = RouteGeometry.remainingDistanceMeters(closestIdx, route)
-            _remainingDistanceMeters.value = remDistMeters
+        // Voice Guidance Instruction Announcement
+        val currentStep = navEngine.getCurrentStep()
+        if (currentStep != null && _currentScreen.value == AppScreen.LIVE_RIDE) {
+            navAudioGuidance.speakManeuver(
+                instruction = currentStep.instruction,
+                maneuverIndex = navProg.currentManeuverIndex,
+                distanceMeters = navProg.distanceToNextManeuverMeters
+            )
+        }
 
-            val effectiveSpeedMps = if (speedKmh > 10.0) {
-                (speedKmh * 1000.0) / 3600.0
+        // Adaptive Off-Route Detection with Accuracy Filtering and 15s Cooldown
+        val accuracy = locUpdate.accuracyMeters
+        val points = _routeResult.value?.coordinates ?: currentRide.value?.routePoints
+        if (accuracy <= 30f && !points.isNullOrEmpty()) {
+            val distMeters = RouteGeometry.distanceToPolylineMeters(locUpdate.latLng, points)
+            val adaptiveThreshold = (accuracy * 2.5).toDouble().coerceAtLeast(75.0)
+
+            if (distMeters > adaptiveThreshold) {
+                consecutiveOffRouteFixes++
             } else {
-                35.0 * 1000.0 / 3600.0
-            }
-            _remainingDurationSeconds.value = if (effectiveSpeedMps > 0) {
-                remDistMeters / effectiveSpeedMps
-            } else {
-                0.0
+                consecutiveOffRouteFixes = 0
             }
 
-            val steps = _routeResult.value?.steps ?: currentRide.value?.navigationSteps
-            if (!steps.isNullOrEmpty()) {
-                val totalMeters = _routeResult.value?.totalDistanceMeters ?: remDistMeters
-                val traversedMeters = (totalMeters - remDistMeters).coerceAtLeast(0.0)
-                var accumulated = 0.0
-                var stepIdx = 0
-                for (i in steps.indices) {
-                    accumulated += steps[i].distanceMeters
-                    if (accumulated >= traversedMeters) {
-                        stepIdx = i
-                        break
-                    }
-                }
-                _currentStepIndex.value = stepIdx.coerceIn(0, steps.size - 1)
+            val now = System.currentTimeMillis()
+            if (consecutiveOffRouteFixes >= 3 && (now - lastRerouteTimestampMs) >= REROUTE_COOLDOWN_MS && !_isRerouting.value) {
+                consecutiveOffRouteFixes = 0
+                lastRerouteTimestampMs = now
+                rerouteFromCurrentLocation()
             }
         }
+    }
+
+    fun toggleAudioMute(): Boolean {
+        return navAudioGuidance.toggleMute()
     }
 
     fun toggleFollowRiderMode() {
@@ -326,6 +321,7 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val result = osrmRoutingService.fetchRoute(start, destination)
                 _routeResult.value = result
+                navEngine.setRoute(result)
                 _currentStepIndex.value = 0
                 _remainingDistanceMeters.value = result.totalDistanceMeters
                 _remainingDurationSeconds.value = result.totalDurationSeconds
@@ -353,6 +349,7 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val result = osrmRoutingService.fetchRoute(userLoc, dest)
                 _routeResult.value = result
+                navEngine.setRoute(result)
                 _currentStepIndex.value = 0
                 _remainingDistanceMeters.value = result.totalDistanceMeters
                 _remainingDurationSeconds.value = result.totalDurationSeconds

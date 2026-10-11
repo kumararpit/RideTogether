@@ -96,7 +96,9 @@ data class SosEvent(
     val location: LatLng,
     val timestampMs: Long = System.currentTimeMillis(),
     val isResolved: Boolean = false,
-    val acknowledgedBy: List<String> = emptyList()
+    val acknowledgedBy: List<String> = emptyList(),
+    val accuracyMeters: Float = 10f,
+    val locationSource: String = "FRESH_LOCATION_FIX"
 )
 
 data class NavigationStep(

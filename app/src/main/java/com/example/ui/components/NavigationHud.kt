@@ -23,6 +23,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.DirectionsBike
 import androidx.compose.material.icons.automirrored.filled.TrendingFlat
+import androidx.compose.material.icons.automirrored.filled.VolumeMute
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AltRoute
 import androidx.compose.material.icons.filled.ChangeCircle
 import androidx.compose.material.icons.filled.Flag
@@ -90,6 +93,8 @@ fun TurnByTurnNavHeader(
     isOffRoute: Boolean,
     isRerouting: Boolean,
     onReroute: () -> Unit,
+    isAudioMuted: Boolean = false,
+    onToggleAudioMute: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -198,11 +203,26 @@ fun TurnByTurnNavHeader(
                     }
                 }
 
+                // 🔊 Audio Mute/Unmute Button
+                IconButton(
+                    onClick = onToggleAudioMute,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("audio_mute_button")
+                ) {
+                    Icon(
+                        imageVector = if (isAudioMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                        contentDescription = if (isAudioMuted) "Unmute Navigation Voice" else "Mute Navigation Voice",
+                        tint = if (isAudioMuted) Color.Gray else AmberPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
                 // 🔄 Reroute Button
                 IconButton(
                     onClick = onReroute,
                     modifier = Modifier
-                        .size(42.dp)
+                        .size(38.dp)
                         .testTag("reroute_button")
                 ) {
                     if (isRerouting) {
