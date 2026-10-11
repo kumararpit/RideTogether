@@ -383,49 +383,46 @@ class RideRepository(
                 return Result.failure(IllegalStateException("Cloud database offline"))
             }
 
-            var querySnapshot = fs.collection("rides")
+            val q1 = fs.collection("rides")
                 .whereEqualTo("inviteCode", code)
                 .get()
                 .await()
+            var matchedDoc: DocumentSnapshot? = q1.documents.firstOrNull()
 
-            if (querySnapshot.isEmpty) {
-                querySnapshot = fs.collection("rides")
+            if (matchedDoc == null) {
+                val q2 = fs.collection("rides")
                     .whereEqualTo("inviteCode", inviteCode.trim())
                     .get()
                     .await()
+                matchedDoc = q2.documents.firstOrNull()
             }
 
-            if (querySnapshot.isEmpty) {
-                querySnapshot = fs.collection("rides")
+            if (matchedDoc == null) {
+                val q3 = fs.collection("rides")
                     .whereEqualTo("inviteCode", code.lowercase())
                     .get()
                     .await()
+                matchedDoc = q3.documents.firstOrNull()
             }
 
-            if (querySnapshot.isEmpty) {
+            if (matchedDoc == null) {
                 try {
-                    val allRides = fs.collection("rides").limit(50).get().await()
-                    val matchedDoc = allRides.documents.find { doc ->
+                    val allRides = fs.collection("rides").limit(100).get().await()
+                    matchedDoc = allRides.documents.find { doc ->
                         val ic = doc.getString("inviteCode").orEmpty().trim()
                         ic.equals(code, ignoreCase = true) || ic.equals(inviteCode.trim(), ignoreCase = true)
-                    }
-                    if (matchedDoc != null) {
-                        querySnapshot = fs.collection("rides")
-                            .whereEqualTo("id", matchedDoc.id)
-                            .get()
-                            .await()
                     }
                 } catch (e: Exception) {
                     Log.w("RideRepository", "Fallback scan failed: ${e.message}")
                 }
             }
 
-            if (querySnapshot.isEmpty) {
+            if (matchedDoc == null) {
                 _joinError.value = "No ride found with code: $code"
                 return Result.failure(IllegalArgumentException("No ride found with code $code"))
             }
 
-            val rideDoc = querySnapshot.documents.first()
+            val rideDoc = matchedDoc
             val rideId = rideDoc.id
             val rideName = rideDoc.getString("name") ?: "Group Ride"
             val startLocName = rideDoc.getString("startLocationName") ?: "Start"
