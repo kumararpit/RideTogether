@@ -48,6 +48,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
 import com.example.data.model.MemberStatus
+import com.example.ui.theme.CustomIcons
 import com.example.data.model.RideRole
 import com.example.data.model.RiderMember
 import com.example.ui.theme.AmberPrimary
@@ -402,12 +403,21 @@ fun RiderCardItem(
 
                     // Motorcycle model if present
                     if (rider.motorcycleModel.isNotBlank()) {
-                        Text(
-                            text = "🏍️ ${rider.motorcycleModel}",
-                            color = AmberPrimary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = CustomIcons.MotorcycleLogo,
+                                contentDescription = "Motorcycle",
+                                tint = AmberPrimary,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = rider.motorcycleModel,
+                                color = AmberPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                         Spacer(modifier = Modifier.height(2.dp))
                     }
 

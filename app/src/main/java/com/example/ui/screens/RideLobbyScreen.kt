@@ -51,6 +51,7 @@ import com.example.data.model.RideRole
 import com.example.data.model.RiderMember
 import com.example.ui.components.RiderStatusBadge
 import com.example.ui.theme.AmberPrimary
+import com.example.ui.theme.CustomIcons
 import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
 import com.example.ui.theme.SurfaceCard
@@ -397,11 +398,28 @@ fun RideLobbyScreen(
                                         }
                                     }
                                 }
-                                Text(
-                                    text = if (rider.motorcycleModel.isNotBlank()) "🏍️ ${rider.motorcycleModel}" else if (rider.isCurrentUser) "Ride Host" else "Ready to roll",
-                                    color = if (rider.motorcycleModel.isNotBlank()) AmberPrimary else Color(0xFF90A4AE),
-                                    fontSize = 12.sp
-                                )
+                                if (rider.motorcycleModel.isNotBlank()) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = CustomIcons.MotorcycleLogo,
+                                            contentDescription = "Motorcycle",
+                                            tint = AmberPrimary,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = rider.motorcycleModel,
+                                            color = AmberPrimary,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                } else {
+                                    Text(
+                                        text = if (rider.isCurrentUser) "Ride Host" else "Ready to roll",
+                                        color = Color(0xFF90A4AE),
+                                        fontSize = 12.sp
+                                    )
+                                }
                             }
 
                             RiderStatusBadge(

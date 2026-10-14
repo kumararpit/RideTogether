@@ -58,6 +58,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+import com.example.ui.theme.CustomIcons
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RideHistorySheet(
@@ -144,8 +146,13 @@ fun RideHistorySheet(
                             .padding(32.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Text(text = "🏍️", fontSize = 36.sp)
-                        Spacer(modifier = Modifier.height(10.dp))
+                        Icon(
+                            imageVector = CustomIcons.EmptyHistory,
+                            contentDescription = "No rides",
+                            tint = Color(0xFF78909C),
+                            modifier = Modifier.size(64.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
                         Text(
                             text = "No Recorded Rides Yet",
                             color = Color.White,
