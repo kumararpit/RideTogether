@@ -61,6 +61,7 @@ data class RiderMember(
     val accuracyMeters: Float = 10f,
     val sequenceNumber: Long = 0L,
     val lastUpdatedMs: Long = System.currentTimeMillis(),
+    val serverTimestampMs: Long = 0L,
     val stoppedDurationSec: Long = 0,
     val isCurrentUser: Boolean = false,
     val batteryPct: Int = 85

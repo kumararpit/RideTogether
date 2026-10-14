@@ -179,7 +179,7 @@ class ExampleRobolectricTest {
         assertEquals("Arpit", repo.activeSos.value?.riderName)
 
         // Test SOS resolve
-        repo.resolveSos()
+        repo.resolveSosInternal()
         assertEquals(null, repo.activeSos.value)
 
         // Test Route Update

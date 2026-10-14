@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.TwoWheeler
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -51,10 +52,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.location.LocationTracker
 import com.example.data.location.OsrmRoutingService
 import com.example.data.location.PlaceSearchResult
 import com.example.data.location.PlaceSearchService
@@ -77,8 +80,10 @@ fun CreateRideScreen(
     placeSearchService: PlaceSearchService = remember { PlaceSearchService() },
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val routingService = remember { OsrmRoutingService() }
+    val locationTracker = remember(context) { LocationTracker(context) }
 
     val defaultStart = currentGpsLocation ?: LatLng(18.5204, 73.8567)
     val defaultDest = LatLng(18.7546, 73.4062)
@@ -86,6 +91,20 @@ fun CreateRideScreen(
     var rideName by remember { mutableStateOf("Pune → Lonavala") }
     var startLocationText by remember { mutableStateOf("Pune") }
     var startCoords by remember { mutableStateOf<LatLng?>(defaultStart) }
+    var startLocationAccuracyMeters by remember { mutableStateOf<Float?>(null) }
+
+    var isGpsFixLoading by remember { mutableStateOf(false) }
+    var gpsFixError by remember { mutableStateOf<String?>(null) }
+    var gpsFixJob by remember { mutableStateOf<Job?>(null) }
+    var gpsRequestId by remember { mutableStateOf(0) }
+
+    fun cancelGpsRequestAndMarkManual() {
+        gpsFixJob?.cancel()
+        gpsRequestId++
+        isGpsFixLoading = false
+        gpsFixError = null
+        startLocationAccuracyMeters = null
+    }
 
     var destinationText by remember { mutableStateOf("Lonavala") }
     var destCoords by remember { mutableStateOf<LatLng?>(defaultDest) }
@@ -253,26 +272,54 @@ fun CreateRideScreen(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(SlateDark800)
-                                    .clickable {
-                                        if (currentGpsLocation != null) {
-                                            startCoords = currentGpsLocation
-                                            startLocationText = "Current GPS Location"
-                                            rideName = "Current Location → $destinationText"
-                                            showStartDropdown = false
+                                    .clickable(enabled = !isGpsFixLoading) {
+                                        gpsFixJob?.cancel()
+                                        val curReqId = ++gpsRequestId
+                                        isGpsFixLoading = true
+                                        gpsFixError = null
+
+                                        gpsFixJob = coroutineScope.launch {
+                                            val result = locationTracker.requestSingleLocationFix(context, timeoutMs = 8000L)
+                                            if (curReqId == gpsRequestId) {
+                                                isGpsFixLoading = false
+                                                result.onSuccess { locUpdate ->
+                                                    startCoords = locUpdate.latLng
+                                                    startLocationAccuracyMeters = locUpdate.accuracyMeters
+                                                    startLocationText = "Current GPS Location"
+                                                    rideName = "Current Location → $destinationText"
+                                                    showStartDropdown = false
+                                                }.onFailure { err ->
+                                                    gpsFixError = err.localizedMessage ?: "GPS fix timed out"
+                                                    if (currentGpsLocation != null) {
+                                                        startCoords = currentGpsLocation
+                                                        startLocationAccuracyMeters = 10f
+                                                        startLocationText = "Current GPS Location (Cached)"
+                                                        rideName = "Current Location → $destinationText"
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                     .padding(horizontal = 8.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.MyLocation,
-                                    contentDescription = null,
-                                    tint = StatusRidingGreen,
-                                    modifier = Modifier.size(13.dp)
-                                )
+                                if (isGpsFixLoading) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(13.dp),
+                                        color = AmberPrimary,
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.MyLocation,
+                                        contentDescription = null,
+                                        tint = StatusRidingGreen,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                }
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = "Use GPS",
+                                    text = if (isGpsFixLoading) "Locating..." else "Use GPS",
                                     color = Color.White,
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold
@@ -285,6 +332,7 @@ fun CreateRideScreen(
                         OutlinedTextField(
                             value = startLocationText,
                             onValueChange = { query ->
+                                cancelGpsRequestAndMarkManual()
                                 startLocationText = query
                                 showStartDropdown = true
                                 startDebounceJob?.cancel()
@@ -307,7 +355,11 @@ fun CreateRideScreen(
                                 if (isSearchingStart) {
                                     CircularProgressIndicator(modifier = Modifier.size(18.dp), color = AmberPrimary, strokeWidth = 2.dp)
                                 } else if (startLocationText.isNotBlank()) {
-                                    IconButton(onClick = { startLocationText = ""; showStartDropdown = false }) {
+                                    IconButton(onClick = {
+                                        cancelGpsRequestAndMarkManual()
+                                        startLocationText = ""
+                                        showStartDropdown = false
+                                    }) {
                                         Icon(imageVector = Icons.Default.Clear, contentDescription = "Clear", tint = Color.Gray, modifier = Modifier.size(18.dp))
                                     }
                                 }
@@ -325,15 +377,55 @@ fun CreateRideScreen(
                             shape = RoundedCornerShape(12.dp)
                         )
 
-                        // Coordinates Confirmation Badge
+                        // GPS Error Message
+                        if (gpsFixError != null) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "GPS Note: $gpsFixError",
+                                color = Color(0xFFFF8A80),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+
+                        // Coordinates Confirmation & Accuracy Badge
                         if (startCoords != null) {
                             Spacer(modifier = Modifier.height(6.dp))
+                            val accuracy = startLocationAccuracyMeters
+                            val (badgeText, badgeColor, badgeIcon) = when {
+                                accuracy == null -> Triple(
+                                    "Mapped: ${String.format("%.4f, %.4f", startCoords!!.latitude, startCoords!!.longitude)} (Manual Selection)",
+                                    StatusRidingGreen,
+                                    Icons.Default.CheckCircle
+                                )
+                                accuracy <= 30f -> Triple(
+                                    "Mapped: ${String.format("%.4f, %.4f", startCoords!!.latitude, startCoords!!.longitude)} (±${accuracy.toInt()}m • High Precision)",
+                                    StatusRidingGreen,
+                                    Icons.Default.CheckCircle
+                                )
+                                accuracy <= 100f -> Triple(
+                                    "Mapped: ${String.format("%.4f, %.4f", startCoords!!.latitude, startCoords!!.longitude)} (±${accuracy.toInt()}m • Coarse Fix)",
+                                    AmberPrimary,
+                                    Icons.Default.CheckCircle
+                                )
+                                else -> Triple(
+                                    "Mapped: ${String.format("%.4f, %.4f", startCoords!!.latitude, startCoords!!.longitude)} (±${accuracy.toInt()}m • Low Precision)",
+                                    Color(0xFFFF9800),
+                                    Icons.Default.Warning
+                                )
+                            }
+
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = StatusRidingGreen, modifier = Modifier.size(14.dp))
+                                Icon(
+                                    imageVector = badgeIcon,
+                                    contentDescription = null,
+                                    tint = badgeColor,
+                                    modifier = Modifier.size(14.dp)
+                                )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = "Mapped: ${String.format("%.4f, %.4f", startCoords!!.latitude, startCoords!!.longitude)}",
-                                    color = StatusRidingGreen,
+                                    text = badgeText,
+                                    color = badgeColor,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Medium
                                 )
@@ -355,6 +447,7 @@ fun CreateRideScreen(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clickable {
+                                                cancelGpsRequestAndMarkManual()
                                                 startLocationText = place.name
                                                 startCoords = place.latLng
                                                 rideName = "${place.name} → $destinationText"
@@ -384,6 +477,7 @@ fun CreateRideScreen(
                 ) {
                     androidx.compose.material3.OutlinedButton(
                         onClick = {
+                            cancelGpsRequestAndMarkManual()
                             val tempText = startLocationText
                             val tempCoords = startCoords
                             startLocationText = destinationText

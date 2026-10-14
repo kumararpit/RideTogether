@@ -103,9 +103,6 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     private val _showSosConfirmDialog = MutableStateFlow(false)
     val showSosConfirmDialog: StateFlow<Boolean> = _showSosConfirmDialog.asStateFlow()
 
-    private val _showSettingsSheet = MutableStateFlow(false)
-    val showSettingsSheet: StateFlow<Boolean> = _showSettingsSheet.asStateFlow()
-
     private val _selectedRider = MutableStateFlow<RiderMember?>(null)
     val selectedRider: StateFlow<RiderMember?> = _selectedRider.asStateFlow()
 
@@ -119,21 +116,15 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     private val _isRerouting = MutableStateFlow(false)
     val isRerouting: StateFlow<Boolean> = _isRerouting.asStateFlow()
 
-    private val _isOffRoute = MutableStateFlow(false)
-    val isOffRoute: StateFlow<Boolean> = _isOffRoute.asStateFlow()
-
-    private val _remainingDistanceMeters = MutableStateFlow(0.0)
-    val remainingDistanceMeters: StateFlow<Double> = _remainingDistanceMeters.asStateFlow()
-
-    private val _remainingDurationSeconds = MutableStateFlow(0.0)
-    val remainingDurationSeconds: StateFlow<Double> = _remainingDurationSeconds.asStateFlow()
-
     private val _isFollowRiderMode = MutableStateFlow(true)
     val isFollowRiderMode: StateFlow<Boolean> = _isFollowRiderMode.asStateFlow()
 
     // Room database for completed rides.
     private val _completedRides = MutableStateFlow<List<com.example.data.db.CompletedRideEntity>>(emptyList())
     val completedRides: StateFlow<List<com.example.data.db.CompletedRideEntity>> = _completedRides.asStateFlow()
+
+    private var currentRouteRideId: String? = null
+    private var routeRequestId = 0
 
     init {
         // Sync user state on auth change
@@ -190,34 +181,50 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Observe ride status changes: when ride completes, automatically persist CompletedRideEntity for members
+        // Observe current ride changes to sync route result and nav engine state
         viewModelScope.launch {
             repository.currentRide.collectLatest { ride ->
-                if (ride != null && ride.status == com.example.data.model.RideStatus.COMPLETED) {
-                    val memberList = repository.members.value
-                    val existingRides = _completedRides.value
-                    if (existingRides.none { it.id == ride.id }) {
-                        try {
-                            val distMeters = if (ride.actualRecordedDistanceMeters > 0) ride.actualRecordedDistanceMeters else ride.totalDistanceMeters
-                            val durationSec = ride.totalDurationSeconds
-                            val avgSpeed = if (durationSec > 60 && distMeters > 500) ((distMeters / 1000.0) / (durationSec / 3600.0)) else 0.0
+                if (ride != null) {
+                    val isNewRide = (currentRouteRideId != ride.id)
+                    val hasNoRoute = (_routeResult.value == null || _routeResult.value?.coordinates.isNullOrEmpty())
+                    if ((isNewRide || hasNoRoute) && ride.routePoints.isNotEmpty()) {
+                        currentRouteRideId = ride.id
+                        val result = RouteResult(
+                            coordinates = ride.routePoints,
+                            totalDistanceMeters = ride.totalDistanceMeters,
+                            totalDurationSeconds = ride.totalDurationSeconds,
+                            steps = ride.navigationSteps
+                        )
+                        _routeResult.value = result
+                        navEngine.setRoute(result)
+                    }
 
-                            val entity = com.example.data.db.CompletedRideEntity(
-                                id = ride.id,
-                                rideName = ride.name,
-                                startLocationName = ride.startLocationName,
-                                destinationName = ride.destinationName,
-                                distanceMeters = distMeters,
-                                durationSeconds = durationSec,
-                                avgSpeedKmh = avgSpeed,
-                                riderCount = memberList.size.coerceAtLeast(1),
-                                completedAtMs = System.currentTimeMillis(),
-                                hadEmergency = memberList.any { it.status == MemberStatus.EMERGENCY }
-                            )
-                            com.example.data.db.RideDatabase.getInstance(getApplication()).completedRideDao().insertRide(entity)
-                            android.util.Log.d("RideViewModel", "Saved completed ride ${ride.id} to local Room history for member")
-                        } catch (e: Exception) {
-                            android.util.Log.w("RideViewModel", "Failed auto-saving completed ride for member: ${e.message}")
+                    if (ride.status == com.example.data.model.RideStatus.COMPLETED) {
+                        val memberList = repository.members.value
+                        val existingRides = _completedRides.value
+                        if (existingRides.none { it.id == ride.id }) {
+                            try {
+                                val distMeters = if (ride.actualRecordedDistanceMeters > 0) ride.actualRecordedDistanceMeters else ride.totalDistanceMeters
+                                val durationSec = ride.totalDurationSeconds
+                                val avgSpeed = if (durationSec > 60 && distMeters > 500) ((distMeters / 1000.0) / (durationSec / 3600.0)) else 0.0
+
+                                val entity = com.example.data.db.CompletedRideEntity(
+                                    id = ride.id,
+                                    rideName = ride.name,
+                                    startLocationName = ride.startLocationName,
+                                    destinationName = ride.destinationName,
+                                    distanceMeters = distMeters,
+                                    durationSeconds = durationSec,
+                                    avgSpeedKmh = avgSpeed,
+                                    riderCount = memberList.size.coerceAtLeast(1),
+                                    completedAtMs = System.currentTimeMillis(),
+                                    hadEmergency = memberList.any { it.status == MemberStatus.EMERGENCY }
+                                )
+                                com.example.data.db.RideDatabase.getInstance(getApplication()).completedRideDao().insertRide(entity)
+                                android.util.Log.d("RideViewModel", "Saved completed ride ${ride.id} to local Room history for member")
+                            } catch (e: Exception) {
+                                android.util.Log.w("RideViewModel", "Failed auto-saving completed ride for member: ${e.message}")
+                            }
                         }
                     }
                 }
@@ -267,11 +274,6 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     private fun updateNavigationProgress(locUpdate: com.example.data.location.LocationUpdate) {
         val navProg = navEngine.processLocation(locUpdate)
 
-        _remainingDistanceMeters.value = navProg.remainingRouteDistanceMeters
-        _remainingDurationSeconds.value = navProg.remainingDurationSeconds
-        _currentStepIndex.value = navProg.currentManeuverIndex
-        _isOffRoute.value = navProg.isOffRoute
-
         // Voice Guidance Instruction Announcement
         val currentStep = navEngine.getCurrentStep()
         if (currentStep != null && _currentScreen.value == AppScreen.LIVE_RIDE) {
@@ -314,6 +316,13 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setFollowRiderMode(follow: Boolean) {
         _isFollowRiderMode.value = follow
+    }
+
+    suspend fun requestSingleLocationFix(
+        context: android.content.Context,
+        timeoutMs: Long = 10000L
+    ): Result<com.example.data.location.LocationUpdate> {
+        return locationTracker.requestSingleLocationFix(context, timeoutMs)
     }
 
     fun createRide(
@@ -359,21 +368,22 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun fetchRouteForRide(start: LatLng, destination: LatLng) {
+        val reqId = ++routeRequestId
         viewModelScope.launch {
             _isRerouting.value = true
             try {
                 val result = osrmRoutingService.fetchRoute(start, destination)
-                _routeResult.value = result
-                navEngine.setRoute(result)
-                _currentStepIndex.value = 0
-                _remainingDistanceMeters.value = result.totalDistanceMeters
-                _remainingDurationSeconds.value = result.totalDurationSeconds
-                repository.updateRoute(
-                    result.coordinates,
-                    result.totalDistanceMeters,
-                    result.totalDurationSeconds,
-                    result.steps
-                )
+                if (reqId == routeRequestId) {
+                    currentRouteRideId = repository.currentRide.value?.id
+                    _routeResult.value = result
+                    navEngine.setRoute(result)
+                    repository.updateRoute(
+                        result.coordinates,
+                        result.totalDistanceMeters,
+                        result.totalDurationSeconds,
+                        result.steps
+                    )
+                }
             } catch (_: Exception) {}
             _isRerouting.value = false
         }
@@ -393,16 +403,12 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
                 val result = osrmRoutingService.fetchRoute(userLoc, dest)
                 _routeResult.value = result
                 navEngine.setRoute(result)
-                _currentStepIndex.value = 0
-                _remainingDistanceMeters.value = result.totalDistanceMeters
-                _remainingDurationSeconds.value = result.totalDurationSeconds
                 repository.updateRoute(
                     result.coordinates,
                     result.totalDistanceMeters,
                     result.totalDurationSeconds,
                     result.steps
                 )
-                _isOffRoute.value = false
             } catch (_: Exception) {}
             _isRerouting.value = false
         }
@@ -440,10 +446,6 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         _showSosConfirmDialog.value = open
     }
 
-    fun openSettingsSheet(open: Boolean) {
-        _showSettingsSheet.value = open
-    }
-
     fun startRide() {
         repository.startRide()
         com.example.data.location.RideLocationService.startService(getApplication())
@@ -479,14 +481,21 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         com.example.data.location.RideLocationService.stopService(getApplication())
-        repository.endRide()
+        viewModelScope.launch {
+            repository.endRide()
+        }
         _currentScreen.value = AppScreen.RIDE_SUMMARY
     }
 
     fun leaveRide() {
         com.example.data.location.RideLocationService.stopService(getApplication())
-        repository.leaveRide()
+        viewModelScope.launch {
+            repository.leaveRide()
+        }
+        currentRouteRideId = null
+        routeRequestId++
         _routeResult.value = null
+        navEngine.reset()
         _currentScreen.value = AppScreen.WELCOME
     }
 
@@ -495,7 +504,9 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun triggerSos() {
-        repository.triggerSos()
+        viewModelScope.launch {
+            repository.triggerSos()
+        }
     }
 
     fun acknowledgeSos(sosId: String) {
@@ -517,19 +528,14 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun getCurrentNavigationStep(): com.example.data.model.NavigationStep? {
-        val steps = _routeResult.value?.steps ?: currentRide.value?.navigationSteps
-        val idx = _currentStepIndex.value
-        return if (!steps.isNullOrEmpty() && idx in steps.indices) steps[idx] else null
+        return navEngine.getCurrentStep()
     }
 
     fun getNextNavigationStep(): com.example.data.model.NavigationStep? {
-        val steps = _routeResult.value?.steps ?: currentRide.value?.navigationSteps
-        val nextIdx = _currentStepIndex.value + 1
-        return if (!steps.isNullOrEmpty() && nextIdx in steps.indices) steps[nextIdx] else null
+        return navEngine.getNextStep()
     }
 
-    fun getFormattedRemainingDistance(): String {
-        val meters = _remainingDistanceMeters.value
+    fun getFormattedRemainingDistance(meters: Double): String {
         return if (meters >= 1000) {
             String.format(Locale.ROOT, "%.1f km", meters / 1000.0)
         } else {
@@ -537,8 +543,7 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun getFormattedRemainingDuration(): String {
-        val totalSecs = _remainingDurationSeconds.value
+    fun getFormattedRemainingDuration(totalSecs: Double): String {
         val mins = kotlin.math.round(totalSecs / 60.0).toInt()
         return if (mins >= 60) {
             val hours = mins / 60
@@ -549,8 +554,7 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun getFormattedEta(): String {
-        val totalSecs = _remainingDurationSeconds.value
+    fun getFormattedEta(totalSecs: Double): String {
         val etaTimeMs = System.currentTimeMillis() + (totalSecs * 1000).toLong()
         val sdf = java.text.SimpleDateFormat("h:mm a", Locale.getDefault())
         return sdf.format(java.util.Date(etaTimeMs))

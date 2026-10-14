@@ -40,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -251,24 +252,31 @@ fun RideMapCanvas(
             Box(modifier = Modifier.fillMaxSize()) {
                 for (tileX in tileRange.minX..tileRange.maxX) {
                     for (tileY in tileRange.minY..tileRange.maxY) {
-                        val tileUnrotatedX = anchorX + panOffsetX + ((tileX - centerTileXDouble) * tileSizePx).toFloat()
-                        val tileUnrotatedY = anchorY + panOffsetY + ((tileY - centerTileYDouble) * tileSizePx).toFloat()
+                        key("$zoomLevel/$tileX/$tileY") {
+                            val tileUnrotatedX = anchorX + panOffsetX + ((tileX - centerTileXDouble) * tileSizePx).toFloat()
+                            val tileUnrotatedY = anchorY + panOffsetY + ((tileY - centerTileYDouble) * tileSizePx).toFloat()
 
-                        val tileUrl = TileMath.getOsmTileUrl(zoomLevel, tileX, tileY)
+                            val tileUrl = TileMath.getOsmTileUrl(zoomLevel, tileX, tileY)
 
-                        AsyncImage(
-                            model = ImageRequest.Builder(context)
-                                .data(tileUrl)
-                                .addHeader("User-Agent", TileMath.OSM_USER_AGENT)
-                                .crossfade(true)
-                                .build(),
-                            contentDescription = "Map tile",
-                            contentScale = ContentScale.FillBounds,
-                            colorFilter = if (isDarkTacticalStyle) darkTacticalColorFilter else null,
-                            modifier = Modifier
-                                .offset { IntOffset(tileUnrotatedX.roundToInt(), tileUnrotatedY.roundToInt()) }
-                                .size(tileSizeDp)
-                        )
+                            Box(
+                                modifier = Modifier
+                                    .offset { IntOffset(tileUnrotatedX.roundToInt(), tileUnrotatedY.roundToInt()) }
+                                    .size(tileSizeDp)
+                                    .background(SlateDark800)
+                            ) {
+                                AsyncImage(
+                                    model = ImageRequest.Builder(context)
+                                        .data(tileUrl)
+                                        .addHeader("User-Agent", TileMath.OSM_USER_AGENT)
+                                        .crossfade(false)
+                                        .build(),
+                                    contentDescription = "Map tile",
+                                    contentScale = ContentScale.FillBounds,
+                                    colorFilter = if (isDarkTacticalStyle) darkTacticalColorFilter else null,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -591,10 +599,10 @@ fun RideMapCanvas(
         }
 
         // Live Speed HUD for Current User (top-left)
-        if (currentUser != null) {
+        if (currentUser != null && isFollowRiderMode) {
             Surface(
                 modifier = Modifier
-                    .padding(start = 16.dp, top = 76.dp)
+                    .padding(start = 16.dp, top = 140.dp) // Avoid overlapping the Turn-by-Turn Header
                     .clip(RoundedCornerShape(16.dp))
                     .testTag("speed_hud"),
                 color = SlateDark800.copy(alpha = 0.94f),
@@ -658,6 +666,7 @@ fun RideMapCanvas(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .padding(end = 16.dp)
+                .padding(bottom = 140.dp) // Avoid overlapping bottom sheet elements
         ) {
             // Compass Toggle Button (Heading-Up vs North-Up)
             SmallFloatingActionButton(

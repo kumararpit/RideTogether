@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -42,9 +43,7 @@ import com.example.ui.components.ActiveSosBar
 import com.example.ui.components.NavigationTripHud
 import com.example.ui.components.QuickMessageSheet
 import com.example.ui.components.RecentMessageToast
-import com.example.ui.components.RideHeader
 import com.example.ui.components.RideMapCanvas
-import com.example.ui.components.RideSettingsSheet
 import com.example.ui.components.RiderBottomSheet
 import com.example.ui.components.RiderStatusBadge
 import com.example.ui.components.SosAlertBanner
@@ -70,18 +69,16 @@ fun LiveRideScreen(
     // Navigation & Routing states
     val navProgress by viewModel.navEngine.progress.collectAsState()
     val isRerouting by viewModel.isRerouting.collectAsState()
-    val isOffRoute by viewModel.isOffRoute.collectAsState()
     val isFollowMode by viewModel.isFollowRiderMode.collectAsState()
-    val currentStep = viewModel.getCurrentNavigationStep()
-    val nextStep = viewModel.getNextNavigationStep()
-    val remainingDistText = viewModel.getFormattedRemainingDistance()
-    val remainingDurationText = viewModel.getFormattedRemainingDuration()
-    val etaText = viewModel.getFormattedEta()
+    val currentStep = viewModel.navEngine.getCurrentStep()
+    val nextStep = viewModel.navEngine.getNextStep()
+    val remainingDistText = viewModel.getFormattedRemainingDistance(navProgress.remainingRouteDistanceMeters)
+    val remainingDurationText = viewModel.getFormattedRemainingDuration(navProgress.remainingDurationSeconds)
+    val etaText = viewModel.getFormattedEta(navProgress.remainingDurationSeconds)
 
-    val showRidersSheet by viewModel.showRidersSheet.collectAsState()
+    val showRidersSheet by viewModel.showRiderListSheet.collectAsState()
     val showQuickMessageSheet by viewModel.showQuickMessageSheet.collectAsState()
     val showSosConfirmDialog by viewModel.showSosConfirmDialog.collectAsState()
-    val showSettingsSheet by viewModel.showSettingsSheet.collectAsState()
 
     val currentUserId by viewModel.userId.collectAsState()
     val currentUser = members.find { it.isCurrentUser || it.id == currentUserId }
@@ -111,21 +108,12 @@ fun LiveRideScreen(
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
         ) {
-            // Ride pack header
-            RideHeader(
-                rideName = ride?.name ?: "Group Ride",
-                riderCount = members.size,
-                inviteCode = ride?.inviteCode ?: "ABC123",
-                onOpenRiders = { viewModel.openRidersSheet(true) },
-                onOpenSettings = { viewModel.openSettingsSheet(true) }
-            )
-
             // Google Maps-style Turn-by-Turn Navigation HUD
             val isAudioMuted by viewModel.navAudioGuidance.isMuted.collectAsState()
             TurnByTurnNavHeader(
                 currentStep = currentStep,
                 nextStep = nextStep,
-                isOffRoute = isOffRoute,
+                isOffRoute = navProgress.isOffRoute,
                 isRerouting = isRerouting,
                 onReroute = { viewModel.rerouteFromCurrentLocation() },
                 distanceToNextManeuverMeters = navProgress.distanceToNextManeuverMeters,
@@ -222,7 +210,9 @@ fun LiveRideScreen(
                                     text = if (rider.isCurrentUser) "${rider.name} (You)" else rider.name,
                                     color = Color.White,
                                     fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                 )
                                 if (isLeaderRider) {
                                     Spacer(modifier = Modifier.width(4.dp))
@@ -239,6 +229,8 @@ fun LiveRideScreen(
                                 fontWeight = FontWeight.Bold
                             )
                         }
+
+                        Spacer(modifier = Modifier.width(8.dp))
 
                         RiderStatusBadge(
                             status = rider.status,
@@ -289,11 +281,11 @@ fun LiveRideScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 👥 Riders Button
+                    // 👥 Ride Controls Button
                     Button(
-                        onClick = { viewModel.openRidersSheet(true) },
+                        onClick = { viewModel.openRiderListSheet(true) },
                         modifier = Modifier
-                            .weight(1f)
+                            .weight(1.3f)
                             .height(54.dp)
                             .testTag("open_riders_button"),
                         colors = ButtonDefaults.buttonColors(
@@ -303,14 +295,14 @@ fun LiveRideScreen(
                         shape = RoundedCornerShape(14.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Group,
-                            contentDescription = "Riders",
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = "Ride Controls",
                             tint = AmberPrimary,
                             modifier = Modifier.size(19.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Riders",
+                            text = "Controls",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1
@@ -378,10 +370,20 @@ fun LiveRideScreen(
         // 4. Modals and Dialogs
         if (showRidersSheet) {
             RiderBottomSheet(
+                ride = ride,
                 members = members,
                 selectedRider = selectedRider,
                 onSelectRider = { viewModel.selectRider(it) },
-                onDismiss = { viewModel.openRidersSheet(false) }
+                onTransferLeadership = { newLeaderId -> viewModel.transferLeadership(newLeaderId) },
+                onEndRide = {
+                    viewModel.openRiderListSheet(false)
+                    viewModel.endRide()
+                },
+                onLeaveRide = {
+                    viewModel.openRiderListSheet(false)
+                    viewModel.leaveRide()
+                },
+                onDismiss = { viewModel.openRiderListSheet(false) }
             )
         }
 
@@ -402,24 +404,6 @@ fun LiveRideScreen(
                     viewModel.openSosConfirmDialog(false)
                 },
                 onDismiss = { viewModel.openSosConfirmDialog(false) }
-            )
-        }
-
-        if (showSettingsSheet) {
-            RideSettingsSheet(
-                ride = ride,
-                currentRider = currentUser,
-                members = members,
-                onTransferLeadership = { newLeaderId -> viewModel.transferLeadership(newLeaderId) },
-                onEndRide = {
-                    viewModel.openSettingsSheet(false)
-                    viewModel.endRide()
-                },
-                onLeaveRide = {
-                    viewModel.openSettingsSheet(false)
-                    viewModel.leaveRide()
-                },
-                onDismiss = { viewModel.openSettingsSheet(false) }
             )
         }
     }

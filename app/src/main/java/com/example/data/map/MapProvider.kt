@@ -156,7 +156,7 @@ object TileMath {
         zoomLevel: Int,
         tileSizePx: Float,
         effectiveHeadingDeg: Float,
-        tileMargin: Int = 1
+        tileMargin: Int = 2
     ): TileRange {
         val maxTileIndex = (1 shl zoomLevel) - 1
         val pivotX = anchorX + panOffsetX

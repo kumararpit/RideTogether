@@ -30,6 +30,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,6 +42,11 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import com.example.data.model.MemberStatus
 import com.example.data.model.RideRole
 import com.example.data.model.RiderMember
@@ -52,14 +61,22 @@ import com.example.ui.theme.SurfaceCard
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RiderBottomSheet(
+    ride: com.example.data.model.Ride?,
     members: List<RiderMember>,
     selectedRider: RiderMember?,
     onSelectRider: (RiderMember) -> Unit,
+    onTransferLeadership: ((newLeaderId: String) -> Unit)? = null,
+    onEndRide: () -> Unit,
+    onLeaveRide: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
     val currentUser = members.find { it.isCurrentUser }
     val userLoc = currentUser?.location
+    
+    var showEndRideConfirm by remember { mutableStateOf(false) }
+    var selectedTargetRiderForLeader by remember { mutableStateOf<RiderMember?>(null) }
+    val isLeader = (currentUser?.role == RideRole.LEADER) || (ride?.leaderId == currentUser?.id)
 
     // Sort order per spec: 1. Emergency, 2. Stopped, 3. Riding, 4. Offline
     val sortedMembers = members.sortedWith(
@@ -102,16 +119,31 @@ fun RiderBottomSheet(
             ) {
                 Column {
                     Text(
-                        text = "Group Members",
+                        text = "Ride Controls",
                         color = Color.White,
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold
                     )
-                    Text(
-                        text = "${members.size} riders in this pack",
-                        color = Color(0xFF90A4AE),
-                        fontSize = 13.sp
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = ride?.name ?: "Group Ride",
+                            color = Color(0xFFCFD8DC),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Code: ",
+                            color = Color(0xFF90A4AE),
+                            fontSize = 12.sp
+                        )
+                        Text(
+                            text = ride?.inviteCode ?: "ABC123",
+                            color = AmberPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
 
                 IconButton(
@@ -127,6 +159,60 @@ fun RiderBottomSheet(
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            // Actions: Member gets ONLY "Leave Ride". Leader gets "Leave Ride" and "End Ride".
+            if (isLeader) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(
+                        onClick = onLeaveRide,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("leave_ride_button"),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("Leave", color = Color(0xFFCFD8DC))
+                    }
+
+                    Button(
+                        onClick = { showEndRideConfirm = true },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("end_ride_button"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = StatusEmergencyRed,
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("End Ride", fontWeight = FontWeight.Bold)
+                    }
+                }
+            } else {
+                OutlinedButton(
+                    onClick = onLeaveRide,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("leave_ride_button"),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("Leave Convoy Session", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+            HorizontalDivider(color = DividerColor)
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = "${members.size} RIDERS IN PACK",
+                color = Color(0xFF90A4AE),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
 
             // Rider List
             LazyColumn(
@@ -147,7 +233,9 @@ fun RiderBottomSheet(
                         onClick = {
                             onSelectRider(rider)
                             onDismiss()
-                        }
+                        },
+                        showLeaderAction = isLeader && !rider.isCurrentUser,
+                        onMakeLeader = { selectedTargetRiderForLeader = rider }
                     )
                 }
 
@@ -155,6 +243,76 @@ fun RiderBottomSheet(
                     Spacer(modifier = Modifier.height(28.dp))
                 }
             }
+        }
+        
+        // Dialog to confirm Transfer Leadership
+        if (selectedTargetRiderForLeader != null && onTransferLeadership != null) {
+            val target = selectedTargetRiderForLeader!!
+            AlertDialog(
+                onDismissRequest = { selectedTargetRiderForLeader = null },
+                containerColor = SlateDark900,
+                title = {
+                    Text("Transfer Convoy Leadership?", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                },
+                text = {
+                    Text(
+                        text = "Appoint ${target.name} as the new Convoy Leader? They will receive full control over ride settings and termination.",
+                        color = Color(0xFFCFD8DC),
+                        fontSize = 13.sp
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            val targetId = target.id
+                            selectedTargetRiderForLeader = null
+                            onTransferLeadership(targetId)
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = AmberPrimary, contentColor = Color.Black)
+                    ) {
+                        Text("Make Leader", fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    OutlinedButton(onClick = { selectedTargetRiderForLeader = null }) {
+                        Text("Cancel", color = Color.White)
+                    }
+                }
+            )
+        }
+
+        // Dialog to confirm End Group Ride
+        if (showEndRideConfirm) {
+            AlertDialog(
+                onDismissRequest = { showEndRideConfirm = false },
+                containerColor = SlateDark900,
+                title = {
+                    Text("End Group Ride?", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                },
+                text = {
+                    Text(
+                        text = "As Convoy Leader, ending this ride will close the live radar and end navigation for all convoy members.",
+                        color = Color(0xFFCFD8DC),
+                        fontSize = 13.sp
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showEndRideConfirm = false
+                            onEndRide()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = StatusEmergencyRed, contentColor = Color.White)
+                    ) {
+                        Text("End Ride Session", fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    OutlinedButton(onClick = { showEndRideConfirm = false }) {
+                        Text("Cancel", color = Color.White)
+                    }
+                }
+            )
         }
     }
 }
@@ -164,7 +322,9 @@ fun RiderCardItem(
     rider: RiderMember,
     isSelected: Boolean,
     relativePositionText: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    showLeaderAction: Boolean = false,
+    onMakeLeader: (() -> Unit)? = null
 ) {
     val isEmergency = rider.status == MemberStatus.EMERGENCY
 
@@ -177,116 +337,127 @@ fun RiderCardItem(
         color = if (isEmergency) StatusEmergencyRed.copy(alpha = 0.15f) else SurfaceCard,
         tonalElevation = if (isSelected) 8.dp else 2.dp
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Avatar with initials
-            Box(
+        Column {
+            Row(
                 modifier = Modifier
-                    .size(46.dp)
-                    .clip(CircleShape)
-                    .background(Color(rider.avatarColorHex)),
-                contentAlignment = Alignment.Center
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = rider.name.take(1).uppercase(),
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Black
-                )
-            }
-
-            Spacer(modifier = Modifier.width(14.dp))
-
-            // Name and relative distance
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // Avatar with initials
+                Box(
+                    modifier = Modifier
+                        .size(46.dp)
+                        .clip(CircleShape)
+                        .background(Color(rider.avatarColorHex)),
+                    contentAlignment = Alignment.Center
+                ) {
                     Text(
-                        text = if (rider.isCurrentUser) "${rider.name} (You)" else rider.name,
+                        text = rider.name.take(1).uppercase(),
                         color = Color.White,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Black
                     )
-                    if (rider.role == RideRole.LEADER) {
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(AmberPrimary.copy(alpha = 0.2f))
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Default.Star,
-                                    contentDescription = "Leader",
-                                    tint = AmberPrimary,
-                                    modifier = Modifier.size(10.dp)
-                                )
-                                Spacer(modifier = Modifier.width(2.dp))
-                                Text(
-                                    text = "LEADER",
-                                    color = AmberPrimary,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
+                }
+
+                Spacer(modifier = Modifier.width(14.dp))
+
+                // Name and relative distance
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = if (rider.isCurrentUser) "${rider.name} (You)" else rider.name,
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (rider.role == RideRole.LEADER) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(AmberPrimary.copy(alpha = 0.2f))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.Star,
+                                        contentDescription = "Leader",
+                                        tint = AmberPrimary,
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(2.dp))
+                                    Text(
+                                        text = "LEADER",
+                                        color = AmberPrimary,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    // Motorcycle model if present
+                    if (rider.motorcycleModel.isNotBlank()) {
+                        Text(
+                            text = "🏍️ ${rider.motorcycleModel}",
+                            color = AmberPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                    }
+
+                    // Relative position
+                    val positionDesc = if (rider.isCurrentUser) "Current device" else if (relativePositionText.isNotBlank()) relativePositionText else ""
+                    
+                    if (positionDesc.isNotBlank()) {
+                        Text(
+                            text = positionDesc,
+                            color = Color(0xFFCFD8DC),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
 
-                Spacer(modifier = Modifier.height(4.dp))
-
-                // Motorcycle model if present
-                if (rider.motorcycleModel.isNotBlank()) {
-                    Text(
-                        text = "🏍️ ${rider.motorcycleModel}",
-                        color = AmberPrimary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
+                // Status Badge
+                Column(horizontalAlignment = Alignment.End) {
+                    RiderStatusBadge(
+                        status = rider.status,
+                        speedKmh = rider.speedKmh,
+                        stoppedDurationSec = rider.stoppedDurationSec,
+                        connectionStatus = rider.connectionStatus
                     )
-                    Spacer(modifier = Modifier.height(2.dp))
                 }
-
-                // Relative position, last updated time
-                val updateAgoSec = ((System.currentTimeMillis() - rider.lastUpdatedMs) / 1000).coerceAtLeast(0)
-                val updateText = when {
-                    updateAgoSec < 5 -> "Live now"
-                    updateAgoSec < 60 -> "${updateAgoSec}s ago"
-                    else -> "${updateAgoSec / 60}m ago"
-                }
-
-                val positionDesc = if (rider.isCurrentUser) "Current device • $updateText" else if (relativePositionText.isNotBlank()) "$relativePositionText • $updateText" else updateText
-
-                Text(
-                    text = positionDesc,
-                    color = if (rider.status == MemberStatus.OFFLINE || rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED) Color(0xFF78909C) else Color(0xFFCFD8DC),
-                    fontSize = 12.sp
-                )
             }
-
-            // Status Badge
-            Column(horizontalAlignment = Alignment.End) {
-                RiderStatusBadge(
-                    status = rider.status,
-                    speedKmh = rider.speedKmh,
-                    stoppedDurationSec = rider.stoppedDurationSec,
-                    connectionStatus = rider.connectionStatus
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
+            
+            // Inline Leader Transfer Action
+            if (showLeaderAction && onMakeLeader != null) {
+                HorizontalDivider(color = DividerColor.copy(alpha = 0.5f))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onMakeLeader() }
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Icon(
-                        imageVector = Icons.Default.BatteryStd,
-                        contentDescription = "Battery",
-                        tint = Color(0xFF90A4AE),
-                        modifier = Modifier.size(12.dp)
+                        imageVector = Icons.Default.SwapHoriz,
+                        contentDescription = "Transfer",
+                        tint = AmberPrimary,
+                        modifier = Modifier.size(16.dp)
                     )
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "${rider.batteryPct}%",
-                        color = Color(0xFF90A4AE),
-                        fontSize = 11.sp
+                        text = "Make Leader",
+                        color = AmberPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
                     )
                 }
             }

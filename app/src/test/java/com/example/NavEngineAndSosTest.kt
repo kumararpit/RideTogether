@@ -157,15 +157,6 @@ class NavEngineAndSosTest {
     @Test
     fun `test SOS fresh location validation and idempotency`() = kotlinx.coroutines.runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        if (com.google.firebase.FirebaseApp.getApps(context).isEmpty()) {
-            val options = com.google.firebase.FirebaseOptions.Builder()
-                .setApplicationId("1:13707892827:android:e982c3179342c585f0877e")
-                .setApiKey("AIzaSyBwTrOliLZV_Z2UkyCVjOKq2JbxoxOj0Yg")
-                .setProjectId("gen-lang-client-0349632077")
-                .build()
-            com.google.firebase.FirebaseApp.initializeApp(context, options)
-        }
-
         val tracker = LocationTracker(context)
         val repo = RideRepository(context, tracker)
         repo.initCurrentUser("rider_sos_user", "Arpit Test")
@@ -186,7 +177,7 @@ class NavEngineAndSosTest {
         assertEquals("SOS ID must remain identical on duplicate trigger", sos1?.id, sos2?.id)
 
         // Resolve SOS
-        repo.resolveSos()
+        repo.resolveSosInternal()
         assertEquals(null, repo.activeSos.value)
         repo.cleanup()
     }

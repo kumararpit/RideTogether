@@ -212,7 +212,7 @@ fun RideTogetherApp(viewModel: RideViewModel) {
 
         AppScreen.LIVE_RIDE -> {
             BackHandler {
-                viewModel.openSettingsSheet(true)
+                viewModel.openRiderListSheet(true)
             }
             LiveRideScreen(viewModel = viewModel)
         }

@@ -251,22 +251,17 @@ class RideRepository(
 
         var changed = false
         val updated = currentList.map { rider ->
-            if (rider.isCurrentUser) {
-                rider
+            val newConn = RiderSyncPolicy.calculateConnectionStatus(
+                isCurrentUser = rider.isCurrentUser,
+                isGpsAvailable = locationTracker.isGpsAvailable.value,
+                timestamp = RiderTimestamp(rider.lastUpdatedMs, rider.serverTimestampMs),
+                currentTimeMs = now
+            )
+            if (newConn != rider.connectionStatus) {
+                changed = true
+                rider.copy(connectionStatus = newConn)
             } else {
-                val lastUp = if (rider.lastUpdatedMs > 0L) rider.lastUpdatedMs else now
-                val diffMs = (now - lastUp).coerceAtLeast(0L)
-                val newConn = when {
-                    diffMs > 120000L -> com.example.data.model.ConnectionStatus.DISCONNECTED
-                    diffMs > 45000L -> com.example.data.model.ConnectionStatus.LOCATION_STALE
-                    else -> com.example.data.model.ConnectionStatus.CONNECTED
-                }
-                if (newConn != rider.connectionStatus) {
-                    changed = true
-                    rider.copy(connectionStatus = newConn)
-                } else {
-                    rider
-                }
+                rider
             }
         }
         if (changed) {
@@ -706,9 +701,12 @@ class RideRepository(
                 return@addSnapshotListener
             }
             if (snapshot != null) {
-                val activeSosDoc = snapshot.documents.firstOrNull {
+                val activeSosDoc = snapshot.documents.filter {
                     it.getBoolean("isResolved") != true
-                }
+                }.maxWithOrNull(
+                    compareBy<DocumentSnapshot> { it.getLong("timestampMs") ?: 0L }
+                        .thenBy { it.id }
+                )
                 if (activeSosDoc != null) {
                     val riderId = activeSosDoc.getString("riderId") ?: ""
                     val riderName = activeSosDoc.getString("riderName") ?: "Rider"
@@ -720,7 +718,7 @@ class RideRepository(
                     val acc = (activeSosDoc.getDouble("accuracyMeters") ?: 10.0).toFloat()
                     val source = activeSosDoc.getString("locationSource") ?: "FRESH_LOCATION_FIX"
 
-                    _activeSos.value = SosEvent(
+                    val event = SosEvent(
                         id = activeSosDoc.id,
                         riderId = riderId,
                         riderName = riderName,
@@ -731,8 +729,15 @@ class RideRepository(
                         accuracyMeters = acc,
                         locationSource = source
                     )
+                    _activeSos.value = event
+                    if (riderId == currentUid) {
+                        _currentRiderStatus.value = MemberStatus.EMERGENCY
+                    }
                 } else {
                     _activeSos.value = null
+                    if (_currentRiderStatus.value == MemberStatus.EMERGENCY) {
+                        _currentRiderStatus.value = MemberStatus.RIDING
+                    }
                 }
             }
         }
@@ -754,40 +759,21 @@ class RideRepository(
         val defaultLat = locationTracker.currentLocation.value?.latLng?.latitude ?: _currentRide.value?.startLocation?.latitude ?: 18.5204
         val defaultLng = locationTracker.currentLocation.value?.latLng?.longitude ?: _currentRide.value?.startLocation?.longitude ?: 73.8567
 
-        val lat = doc.getDouble("latitude") ?: doc.getDouble("startLat") ?: defaultLat
-        val lng = doc.getDouble("longitude") ?: doc.getDouble("startLng") ?: defaultLng
+        val rawLat = doc.getDouble("latitude") ?: doc.getDouble("startLat")
+        val rawLng = doc.getDouble("longitude") ?: doc.getDouble("startLng")
+
         val speedKmh = doc.getDouble("speedKmh") ?: 0.0
         val headingDeg = (doc.getDouble("headingDeg") ?: 0.0).toFloat()
         val stoppedSec = doc.getLong("stoppedDurationSec") ?: 0L
         val rawLastUpdated = doc.getLong("lastUpdatedMs") ?: doc.getDouble("lastUpdatedMs")?.toLong()
-        val lastUpdated = if (rawLastUpdated != null && rawLastUpdated > 0L) rawLastUpdated else System.currentTimeMillis()
+        val serverTimestampMs = doc.getTimestamp("updatedAt")?.toDate()?.time
         val battery = (doc.getLong("batteryPct") ?: 90L).toInt()
         val seq = doc.getLong("sequenceNumber") ?: 0L
         val accuracy = (doc.getDouble("accuracyMeters") ?: 10.0).toFloat()
 
-        // Handle out-of-order delayed packets
+        val existing = _members.value.find { it.id == id }
         val prevSeq = riderLatestSequence[id] ?: -1L
-        if (seq > 0 && seq < prevSeq) {
-            val existing = _members.value.find { it.id == id }
-            if (existing != null) return existing
-        } else {
-            riderLatestSequence[id] = seq
-        }
-
         val isCurrentUser = (id == currentUid)
-
-        // Calculate connection & staleness
-        val timeDiffMs = System.currentTimeMillis() - lastUpdated
-        val connectionStatus = if (isCurrentUser) {
-            if (locationTracker.isGpsAvailable.value) com.example.data.model.ConnectionStatus.CONNECTED
-            else com.example.data.model.ConnectionStatus.LOCATION_UNAVAILABLE
-        } else {
-            when {
-                timeDiffMs > 60000L -> com.example.data.model.ConnectionStatus.DISCONNECTED
-                timeDiffMs > 25000L -> com.example.data.model.ConnectionStatus.LOCATION_STALE
-                else -> com.example.data.model.ConnectionStatus.CONNECTED
-            }
-        }
 
         val avatarColorHex = when (Math.abs(id.hashCode()) % 5) {
             0 -> 0xFFFF9800
@@ -797,38 +783,44 @@ class RideRepository(
             else -> 0xFFAB47BC
         }
 
-        val movementState = when {
-            status == MemberStatus.STOPPED || stoppedSec > 0L -> com.example.data.model.MovementState.STOPPED
-            status == MemberStatus.RIDING -> com.example.data.model.MovementState.RIDING
-            else -> com.example.data.model.MovementState.UNKNOWN
-        }
-
         val emergencyState = if (status == MemberStatus.EMERGENCY || _activeSos.value?.riderId == id) {
             com.example.data.model.EmergencyState.ACTIVE
         } else {
             com.example.data.model.EmergencyState.NONE
         }
 
-        return RiderMember(
+        val resultMember = RiderSyncPolicy.processRiderSnapshot(
             id = id,
             name = name,
             motorcycleModel = motorcycle,
             avatarColorHex = avatarColorHex,
             role = role,
             status = status,
-            movementState = movementState,
             emergencyState = emergencyState,
-            connectionStatus = connectionStatus,
-            location = LatLng(lat, lng),
+            rawLat = rawLat,
+            rawLng = rawLng,
+            defaultLat = defaultLat,
+            defaultLng = defaultLng,
             speedKmh = speedKmh,
             headingDeg = headingDeg,
             accuracyMeters = accuracy,
             sequenceNumber = seq,
-            lastUpdatedMs = lastUpdated,
+            rawLastUpdatedMs = rawLastUpdated,
+            serverTimestampMs = serverTimestampMs,
             stoppedDurationSec = stoppedSec,
+            batteryPct = battery,
+            existing = existing,
+            prevSeq = prevSeq,
             isCurrentUser = isCurrentUser,
-            batteryPct = battery
+            isGpsAvailable = locationTracker.isGpsAvailable.value,
+            currentTimeMs = System.currentTimeMillis()
         )
+
+        if (resultMember != null && seq > 0 && seq >= prevSeq) {
+            riderLatestSequence[id] = seq
+        }
+
+        return resultMember
     }
 
     fun addPackMember(name: String, offsetLat: Double, offsetLon: Double, role: RideRole = RideRole.MEMBER, motorcycleModel: String = "Duke 390") {
@@ -912,48 +904,54 @@ class RideRepository(
         }
     }
 
-    fun endRide() {
+    suspend fun endRide() {
         val ride = _currentRide.value ?: return
+        val currentUid = auth?.currentUser?.uid ?: currentUserId
+        val activeSos = _activeSos.value
+        if (activeSos != null && activeSos.riderId == currentUid && !activeSos.isResolved) {
+            resolveSos()
+        }
         _currentRide.value = ride.copy(status = RideStatus.COMPLETED)
+        _activeSos.value = null
         locationTracker.stopTracking()
 
-        repositoryScope.launch {
-            try {
-                firestore?.collection("rides")?.document(ride.id)
-                    ?.update(
-                        mapOf(
-                            "status" to RideStatus.COMPLETED.name,
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        )
-                    )?.await()
-            } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.UPDATE, "rides/${ride.id}")
-            }
+        try {
+            firestore?.collection("rides")?.document(ride.id)
+                ?.update(
+                    mapOf(
+                        "status" to RideStatus.COMPLETED.name,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )?.await()
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, "rides/${ride.id}")
         }
     }
 
-    fun leaveRide() {
+    suspend fun leaveRide() {
         val activeRideId = _currentRide.value?.id
         val currentUid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() }
 
         if (activeRideId != null && currentUid != null) {
-            repositoryScope.launch {
-                try {
-                    firestore?.collection("rides")?.document(activeRideId)
-                        ?.collection("riders")?.document(currentUid)
-                        ?.delete()
-                        ?.await()
-                } catch (e: Exception) {
-                    handleFirestoreError(e, OperationType.DELETE, "rides/$activeRideId/riders/$currentUid")
-                }
+            val activeSos = _activeSos.value
+            if (activeSos != null && activeSos.riderId == currentUid && !activeSos.isResolved) {
+                resolveSos()
+            }
+            try {
+                firestore?.collection("rides")?.document(activeRideId)
+                    ?.collection("riders")?.document(currentUid)
+                    ?.delete()
+                    ?.await()
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.DELETE, "rides/$activeRideId/riders/$currentUid")
             }
         }
 
         detachListeners()
         locationTracker.stopTracking()
         _currentRide.value = null
-        _members.value = emptyList()
         _activeSos.value = null
+        _members.value = emptyList()
         _recentMessage.value = null
         stopDetector.reset()
     }
@@ -1035,28 +1033,44 @@ class RideRepository(
         }
     }
 
-    fun triggerSos() {
-        val activeRideId = _currentRide.value?.id ?: return
-        val currentUid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return
+    suspend fun triggerSos(): Result<SosEvent> {
+        val activeRideId = _currentRide.value?.id
+        val currentUid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() }
+
+        val existingSos = _activeSos.value
+        val previousRiderStatus = _currentRiderStatus.value
+
+        if (activeRideId == null || currentUid == null) {
+            return Result.failure(IllegalStateException("Active ride or current user is unavailable"))
+        }
 
         // Idempotency safeguard: reject duplicate active SOS triggers
-        val existingSos = _activeSos.value
         if (existingSos != null && existingSos.riderId == currentUid && !existingSos.isResolved) {
             Log.d("RideRepository", "Active SOS already exists for rider $currentUid, ignoring duplicate trigger")
-            return
+            return Result.success(existingSos)
         }
 
         val latestUpdate = locationTracker.currentLocation.value
         val nowMs = System.currentTimeMillis()
 
-        // 5-second freshness policy & 30m accuracy policy
-        val (loc, source, accuracy) = if (latestUpdate != null && (nowMs - latestUpdate.timestampMs <= 5000L) && latestUpdate.accuracyMeters <= 30f) {
-            Triple(latestUpdate.latLng, "FRESH_LOCATION_FIX", latestUpdate.accuracyMeters)
-        } else if (latestUpdate != null) {
-            Triple(latestUpdate.latLng, "LAST_KNOWN_LOCATION", latestUpdate.accuracyMeters)
+        val (loc, source, accuracy) = if (latestUpdate != null &&
+            RiderSyncPolicy.validateCoordinates(latestUpdate.latLng.latitude, latestUpdate.latLng.longitude)
+        ) {
+            val ageMs = nowMs - latestUpdate.timestampMs
+            if (ageMs in 0L..5000L && latestUpdate.accuracyMeters in 0f..30f) {
+                Triple(latestUpdate.latLng, "FRESH_LOCATION_FIX", latestUpdate.accuracyMeters)
+            } else if (ageMs >= 0L) {
+                Triple(latestUpdate.latLng, "LAST_KNOWN_LOCATION", latestUpdate.accuracyMeters)
+            } else {
+                Triple(LatLng(0.0, 0.0), "LOCATION_UNAVAILABLE", -1f)
+            }
         } else {
-            val fallbackLoc = _members.value.find { it.isCurrentUser }?.location ?: LatLng(18.5204, 73.8567)
-            Triple(fallbackLoc, "LOCATION_UNAVAILABLE", 50f)
+            val currentUserLoc = _members.value.find { it.isCurrentUser }?.location
+            if (currentUserLoc != null && RiderSyncPolicy.validateCoordinates(currentUserLoc.latitude, currentUserLoc.longitude)) {
+                Triple(currentUserLoc, "LAST_KNOWN_LOCATION", 10f)
+            } else {
+                Triple(LatLng(0.0, 0.0), "LOCATION_UNAVAILABLE", -1f)
+            }
         }
 
         val sosId = UUID.randomUUID().toString()
@@ -1070,31 +1084,42 @@ class RideRepository(
             accuracyMeters = accuracy,
             locationSource = source
         )
+
+        val fs = firestore
+        if (fs == null) {
+            Log.w("RideRepository", "Firestore is null, failing triggerSos explicitly")
+            return Result.failure(IllegalStateException("Firestore unavailable for SOS trigger"))
+        }
+
         _activeSos.value = event
         _currentRiderStatus.value = MemberStatus.EMERGENCY
 
-        repositoryScope.launch {
-            try {
-                val doc = mapOf(
-                    "id" to sosId,
-                    "rideId" to activeRideId,
-                    "riderId" to currentUid,
-                    "riderName" to currentUserName,
-                    "latitude" to loc.latitude,
-                    "longitude" to loc.longitude,
-                    "accuracyMeters" to accuracy,
-                    "locationSource" to source,
-                    "isResolved" to false,
-                    "timestampMs" to nowMs,
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-                firestore?.collection("rides")?.document(activeRideId)
-                    ?.collection("sos")?.document(sosId)
-                    ?.set(doc)
-                    ?.await()
-            } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.CREATE, "rides/$activeRideId/sos/$sosId")
+        return try {
+            val doc = mapOf(
+                "id" to sosId,
+                "rideId" to activeRideId,
+                "riderId" to currentUid,
+                "riderName" to currentUserName,
+                "latitude" to loc.latitude,
+                "longitude" to loc.longitude,
+                "accuracyMeters" to accuracy,
+                "locationSource" to source,
+                "isResolved" to false,
+                "timestampMs" to nowMs,
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+            fs.collection("rides").document(activeRideId)
+                .collection("sos").document(sosId)
+                .set(doc)
+                .await()
+            Result.success(event)
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, "rides/$activeRideId/sos/$sosId")
+            if (_activeSos.value?.id == sosId) {
+                _activeSos.value = existingSos
+                _currentRiderStatus.value = previousRiderStatus
             }
+            Result.failure(e)
         }
     }
 
@@ -1126,36 +1151,61 @@ class RideRepository(
         }
     }
 
-    fun resolveSos() {
-        val activeRideId = _currentRide.value?.id
-        val activeEvent = _activeSos.value
+    suspend fun resolveSosInternal(sosId: String? = null): Result<Unit> {
+        val activeRideId = _currentRide.value?.id ?: return Result.failure(IllegalStateException("No active ride"))
+        val targetEvent = if (sosId != null) {
+            _activeSos.value?.takeIf { it.id == sosId }
+        } else {
+            _activeSos.value
+        } ?: return Result.success(Unit)
 
-        _activeSos.value = null
-        _currentRiderStatus.value = MemberStatus.RIDING
+        val currentUid = auth?.currentUser?.uid ?: currentUserId
+        if (targetEvent.riderId != currentUid && _currentRide.value?.leaderId != currentUid) {
+            return Result.failure(SecurityException("Only SOS sender or ride leader can resolve SOS alert"))
+        }
 
-        if (activeRideId != null && activeEvent != null) {
-            repositoryScope.launch {
-                try {
-                    val sosRef = firestore?.collection("rides")?.document(activeRideId)?.collection("sos")?.document(activeEvent.id)
-                    if (sosRef != null) {
-                        firestore.runTransaction { transaction ->
-                            val snapshot = transaction.get(sosRef)
-                            if (snapshot.exists()) {
-                                transaction.update(
-                                    sosRef,
-                                    mapOf(
-                                        "isResolved" to true,
-                                        "resolvedAtMs" to System.currentTimeMillis(),
-                                        "updatedAt" to FieldValue.serverTimestamp()
-                                    )
-                                )
-                            }
-                        }.await()
-                    }
-                } catch (e: Exception) {
-                    handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/sos/${activeEvent.id}")
+        val previousSos = _activeSos.value
+        val previousStatus = _currentRiderStatus.value
+
+        val fs = firestore
+        if (fs == null) {
+            return Result.failure(IllegalStateException("Firestore unavailable"))
+        }
+
+        if (_activeSos.value?.id == targetEvent.id) {
+            _activeSos.value = null
+            _currentRiderStatus.value = MemberStatus.RIDING
+        }
+
+        return try {
+            val sosRef = fs.collection("rides").document(activeRideId).collection("sos").document(targetEvent.id)
+            fs.runTransaction { transaction ->
+                val snapshot = transaction.get(sosRef)
+                if (snapshot.exists() && snapshot.getBoolean("isResolved") != true) {
+                    transaction.update(
+                        sosRef,
+                        mapOf(
+                            "isResolved" to true,
+                            "resolvedAtMs" to System.currentTimeMillis(),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
                 }
+            }.await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/sos/${targetEvent.id}")
+            if (_activeSos.value == null) {
+                _activeSos.value = previousSos
+                _currentRiderStatus.value = previousStatus
             }
+            Result.failure(e)
+        }
+    }
+
+    fun resolveSos() {
+        repositoryScope.launch {
+            resolveSosInternal()
         }
     }
 
