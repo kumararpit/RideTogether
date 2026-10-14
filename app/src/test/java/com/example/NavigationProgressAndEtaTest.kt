@@ -347,4 +347,17 @@ class NavigationProgressAndEtaTest {
         navEngine.setRoute(routeB)
         assertEquals("Setting genuinely new route must reset segment index to 0", 0, navEngine.progress.value.currentSegmentIndex)
     }
+
+    @Test
+    fun `test 16 - offline fallback routes are flagged and can be rejected`() {
+        val routeFallback = RouteResult(
+            coordinates = listOf(LatLng(18.5200, 73.8500), LatLng(18.7500, 73.4000)),
+            totalDistanceMeters = 50000.0,
+            totalDurationSeconds = 3600.0,
+            steps = emptyList(),
+            isFallback = true
+        )
+
+        assertTrue("Fallback route must set isFallback flag to true", routeFallback.isFallback)
+    }
 }

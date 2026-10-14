@@ -600,65 +600,7 @@ fun RideMapCanvas(
 
         // Live Speed HUD for Current User (top-left)
         if (currentUser != null && isFollowRiderMode) {
-            Surface(
-                modifier = Modifier
-                    .padding(start = 16.dp, top = 140.dp) // Avoid overlapping the Turn-by-Turn Header
-                    .clip(RoundedCornerShape(16.dp))
-                    .testTag("speed_hud"),
-                color = SlateDark800.copy(alpha = 0.94f),
-                tonalElevation = 6.dp
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(
-                            text = "SPEED",
-                            color = Color(0xFF90A4AE),
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Row(verticalAlignment = Alignment.Bottom) {
-                            Text(
-                                text = "${currentUser.speedKmh.toInt()}",
-                                color = if (currentUser.speedKmh > 0) StatusRidingGreen else StatusStoppedAmber,
-                                fontSize = 26.sp,
-                                fontWeight = FontWeight.Black
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "km/h",
-                                color = Color.White.copy(alpha = 0.7f),
-                                fontSize = 12.sp,
-                                modifier = Modifier.padding(bottom = 4.dp)
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.width(16.dp))
-
-                    // Compass Heading
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            imageVector = Icons.Default.Explore,
-                            contentDescription = "Compass",
-                            tint = AmberPrimary,
-                            modifier = Modifier
-                                .size(20.dp)
-                                .graphicsLayer {
-                                    rotationZ = -effectiveHeading
-                                }
-                        )
-                        Text(
-                            text = "${currentUser.headingDeg.toInt()}°",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
+            // Speed HUD is now drawn separately in LiveRideScreen to avoid overlaps
         }
 
         // Floating Map Controls (Compass Toggle, Recenter, Overview, Zoom In, Zoom Out, Style)

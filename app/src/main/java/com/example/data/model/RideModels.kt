@@ -135,7 +135,8 @@ data class RouteResult(
     val coordinates: List<LatLng>,
     val totalDistanceMeters: Double,
     val totalDurationSeconds: Double,
-    val steps: List<NavigationStep>
+    val steps: List<NavigationStep>,
+    val isFallback: Boolean = false
 ) {
     val formattedDistance: String
         get() = if (totalDistanceMeters >= 1000) {

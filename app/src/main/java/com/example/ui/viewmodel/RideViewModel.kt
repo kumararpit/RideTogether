@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -82,7 +83,7 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     private val _userName = MutableStateFlow(authRepository.currentUser?.displayName ?: "Rider")
     val userName: StateFlow<String> = _userName.asStateFlow()
 
-    private val _motorcycleModel = MutableStateFlow("Triumph Tiger 900")
+    private val _motorcycleModel = MutableStateFlow("Hunter 350")
     val motorcycleModel: StateFlow<String> = _motorcycleModel.asStateFlow()
 
     // Exposed repository flows
@@ -284,23 +285,26 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
 
-        // Adaptive Off-Route Detection with Accuracy Filtering and 15s Cooldown
+        // Adaptive Off-Route Detection
         val accuracy = locUpdate.accuracyMeters
         val points = _routeResult.value?.coordinates ?: currentRide.value?.routePoints
         if (accuracy <= 30f && !points.isNullOrEmpty()) {
             val distMeters = RouteGeometry.distanceToPolylineMeters(locUpdate.latLng, points)
-            val adaptiveThreshold = (accuracy * 2.5).toDouble().coerceAtLeast(75.0)
+            val adaptiveThreshold = (accuracy * 2.5).toDouble().coerceIn(75.0, 150.0)
 
             if (distMeters > adaptiveThreshold) {
                 consecutiveOffRouteFixes++
             } else {
-                consecutiveOffRouteFixes = 0
+                if (consecutiveOffRouteFixes > 0) consecutiveOffRouteFixes--
             }
 
             val now = System.currentTimeMillis()
-            if (consecutiveOffRouteFixes >= 3 && (now - lastRerouteTimestampMs) >= REROUTE_COOLDOWN_MS && !_isRerouting.value) {
+            // Allow immediate reroute on first confirmation; only throttle successive network requests
+            val isCooldownActive = lastRerouteTimestampMs > 0 && (now - lastRerouteTimestampMs) < REROUTE_COOLDOWN_MS
+            if (consecutiveOffRouteFixes >= 2 && !isCooldownActive && !_isRerouting.value) {
                 consecutiveOffRouteFixes = 0
                 lastRerouteTimestampMs = now
+                android.util.Log.d("RideViewModel", "Rerouting triggered. Dist: $distMeters, Threshold: $adaptiveThreshold")
                 rerouteFromCurrentLocation()
             }
         }
@@ -367,13 +371,18 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private var rerouteJob: kotlinx.coroutines.Job? = null
+
     private fun fetchRouteForRide(start: LatLng, destination: LatLng) {
         val reqId = ++routeRequestId
-        viewModelScope.launch {
+        rerouteJob?.cancel()
+        consecutiveOffRouteFixes = 0
+        lastRerouteTimestampMs = 0L
+        rerouteJob = viewModelScope.launch {
             _isRerouting.value = true
             try {
                 val result = osrmRoutingService.fetchRoute(start, destination)
-                if (reqId == routeRequestId) {
+                if (reqId == routeRequestId && result.coordinates.isNotEmpty() && isActive) {
                     currentRouteRideId = repository.currentRide.value?.id
                     _routeResult.value = result
                     navEngine.setRoute(result)
@@ -385,32 +394,43 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             } catch (_: Exception) {}
-            _isRerouting.value = false
+            if (reqId == routeRequestId) {
+                _isRerouting.value = false
+            }
         }
     }
 
     fun rerouteFromCurrentLocation() {
-        viewModelScope.launch {
+        val reqId = ++routeRequestId
+        rerouteJob?.cancel()
+        rerouteJob = viewModelScope.launch {
             _isRerouting.value = true
+            val startTimeMs = System.currentTimeMillis()
             val userLoc = locationTracker.currentLocation.value?.latLng
                 ?: repository.members.value.find { it.isCurrentUser }?.location
                 ?: repository.currentRide.value?.startLocation
-                ?: LatLng(18.5204, 73.8567)
+                ?: return@launch
             val dest = repository.currentRide.value?.destinationLocation
-                ?: LatLng(18.7546, 73.4062)
+                ?: return@launch
 
             try {
                 val result = osrmRoutingService.fetchRoute(userLoc, dest)
-                _routeResult.value = result
-                navEngine.setRoute(result)
-                repository.updateRoute(
-                    result.coordinates,
-                    result.totalDistanceMeters,
-                    result.totalDurationSeconds,
-                    result.steps
-                )
+                // Do not overwrite an existing valid route with a fallback route during rerouting
+                if (reqId == routeRequestId && result.coordinates.isNotEmpty() && !result.isFallback && isActive) {
+                    _routeResult.value = result
+                    navEngine.setRoute(result)
+                    repository.updateRoute(
+                        result.coordinates,
+                        result.totalDistanceMeters,
+                        result.totalDurationSeconds,
+                        result.steps
+                    )
+                    android.util.Log.d("RideViewModel", "Rerouting completed in ${System.currentTimeMillis() - startTimeMs} ms")
+                }
             } catch (_: Exception) {}
-            _isRerouting.value = false
+            if (reqId == routeRequestId) {
+                _isRerouting.value = false
+            }
         }
     }
 
@@ -447,6 +467,8 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startRide() {
+        consecutiveOffRouteFixes = 0
+        lastRerouteTimestampMs = 0L
         repository.startRide()
         com.example.data.location.RideLocationService.startService(getApplication())
         _currentScreen.value = AppScreen.LIVE_RIDE

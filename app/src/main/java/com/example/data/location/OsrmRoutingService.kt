@@ -163,7 +163,8 @@ class OsrmRoutingService {
             coordinates = points,
             totalDistanceMeters = roadDistMeters,
             totalDurationSeconds = durationSec,
-            steps = fallbackSteps
+            steps = fallbackSteps,
+            isFallback = true
         )
     }
 }

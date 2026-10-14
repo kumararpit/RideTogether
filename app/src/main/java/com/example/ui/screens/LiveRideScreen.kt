@@ -21,6 +21,8 @@ import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -120,6 +122,69 @@ fun LiveRideScreen(
                 isAudioMuted = isAudioMuted,
                 onToggleAudioMute = { viewModel.toggleAudioMute() }
             )
+
+            // Live Speed HUD for Current User (Moved here to stack naturally under Nav Header)
+            if (currentUser != null && isFollowMode) {
+                Surface(
+                    modifier = Modifier
+                        .padding(start = 16.dp, top = 8.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .testTag("speed_hud"),
+                    color = SlateDark800.copy(alpha = 0.94f),
+                    tonalElevation = 6.dp
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "SPEED",
+                                color = Color(0xFF90A4AE),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Row(verticalAlignment = Alignment.Bottom) {
+                                Text(
+                                    text = "${currentUser.speedKmh.toInt()}",
+                                    color = if (currentUser.speedKmh > 0) com.example.ui.theme.StatusRidingGreen else com.example.ui.theme.StatusStoppedAmber,
+                                    fontSize = 26.sp,
+                                    fontWeight = FontWeight.Black
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "km/h",
+                                    color = Color.White.copy(alpha = 0.7f),
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(bottom = 4.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        // Compass Heading
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.NearMe,
+                                contentDescription = "Compass",
+                                tint = AmberPrimary,
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .graphicsLayer {
+                                        rotationZ = -currentUser.headingDeg
+                                    }
+                            )
+                            Text(
+                                text = "${currentUser.headingDeg.toInt()}°",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
 
             // Alert banner if another rider triggered SOS
             if (isOtherRiderSos && activeSos != null) {
