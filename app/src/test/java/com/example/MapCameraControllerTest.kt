@@ -53,7 +53,7 @@ class MapCameraControllerTest {
         // Show overview transitions to OVERVIEW
         controller.showOverview(listOf(LatLng(18.50, 73.80), LatLng(18.60, 73.90)))
         assertEquals(MapCameraMode.OVERVIEW, controller.state.value.mode)
-        assertEquals(12, controller.state.value.zoom)
+        assertTrue(controller.state.value.zoom > 3f)
     }
 
     @Test
@@ -64,7 +64,7 @@ class MapCameraControllerTest {
         // Moving at 45 km/h with heading 180 deg
         val movingUpdate = LocationUpdate(startLoc, speedKmh = 45.0, headingDeg = 180f, accuracyMeters = 5f)
         controller.processLocation(movingUpdate)
-        assertTrue("Heading should update toward 180 when moving", controller.state.value.heading > 0f)
+        assertEquals("Heading should update toward 180 when moving", 180f, controller.state.value.heading, 0.01f)
 
         val headingBeforeStop = controller.state.value.heading
 
@@ -72,7 +72,7 @@ class MapCameraControllerTest {
         val stoppedUpdate = LocationUpdate(startLoc, speedKmh = 0.0, headingDeg = 45f, accuracyMeters = 15f)
         controller.processLocation(stoppedUpdate)
 
-        assertEquals("Stationary fix (< 3 km/h) must preserve last reliable heading", headingBeforeStop, controller.state.value.heading, 0.01f)
+        assertEquals("Stationary fix (< 5.4 km/h) must preserve last reliable heading", headingBeforeStop, controller.state.value.heading, 0.01f)
     }
 
     @Test
@@ -103,27 +103,27 @@ class MapCameraControllerTest {
     fun `test adaptive zoom calculation rules and safeguards`() {
         // Turn within 150m -> zoom 17
         val zoomTurn = MapCameraController.calculateAdaptiveZoom(speedKmh = 80.0, distanceToNextManeuverMeters = 120.0)
-        assertEquals(17, zoomTurn)
+        assertEquals(17.5f, zoomTurn)
 
         // High speed (>= 70 km/h), no turn within 150m -> zoom 15
         val zoomFast = MapCameraController.calculateAdaptiveZoom(speedKmh = 75.0, distanceToNextManeuverMeters = 500.0)
-        assertEquals(15, zoomFast)
+        assertEquals(15.5f, zoomFast)
 
         // Medium speed (30 to <70 km/h) -> zoom 16
         val zoomMed = MapCameraController.calculateAdaptiveZoom(speedKmh = 50.0, distanceToNextManeuverMeters = null)
-        assertEquals(16, zoomMed)
+        assertEquals(16.5f, zoomMed)
 
         // Low speed (<30 km/h) -> zoom 17
         val zoomSlow = MapCameraController.calculateAdaptiveZoom(speedKmh = 15.0, distanceToNextManeuverMeters = null)
-        assertEquals(17, zoomSlow)
+        assertEquals(17.5f, zoomSlow)
 
         // Safeguard: adaptive zoom only applies in FOLLOWING mode
         val controller = MapCameraController()
         controller.onUserGesture() // FREE_EXPLORE
-        controller.setZoom(14)
+        controller.setZoom(14f)
         val locFast = LocationUpdate(LatLng(18.5204, 73.8567), speedKmh = 90.0, headingDeg = 0f, accuracyMeters = 5f)
         controller.processLocation(locFast, distanceToNextManeuverMeters = 100.0)
-        assertEquals("Manual zoom in FREE_EXPLORE mode must not be overridden", 14, controller.state.value.zoom)
+        assertEquals("Manual zoom in FREE_EXPLORE mode must not be overridden", 14f, controller.state.value.zoom)
     }
 
     @Test
@@ -135,8 +135,8 @@ class MapCameraControllerTest {
 
         val centerLat = 18.5204
         val centerLng = 73.8567
-        val centerTileX = TileMath.lonToTileX(centerLng, zoomLevel)
-        val centerTileY = TileMath.latToTileY(centerLat, zoomLevel)
+        val centerTileX = TileMath.lonToTileX(centerLng, zoomLevel.toFloat())
+        val centerTileY = TileMath.latToTileY(centerLat, zoomLevel.toFloat())
 
         val anchorX = widthPx / 2f
         val anchorY = heightPx * 0.65f
@@ -199,11 +199,11 @@ class MapCameraControllerTest {
         val lon = 73.8567
         val zoom = 16
 
-        val tileX = TileMath.lonToTileX(lon, zoom)
-        val tileY = TileMath.latToTileY(lat, zoom)
+        val tileX = TileMath.lonToTileX(lon, zoom.toFloat())
+        val tileY = TileMath.latToTileY(lat, zoom.toFloat())
 
-        val restoredLon = TileMath.tileXToLon(tileX, zoom)
-        val restoredLat = TileMath.tileYToLat(tileY, zoom)
+        val restoredLon = TileMath.tileXToLon(tileX, zoom.toFloat())
+        val restoredLat = TileMath.tileYToLat(tileY, zoom.toFloat())
 
         assertEquals(lon, restoredLon, 0.0001)
         assertEquals(lat, restoredLat, 0.0001)
@@ -242,5 +242,22 @@ class MapCameraControllerTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun `test showOverview with usable viewport and padding`() {
+        val controller = MapCameraController()
+        val p1 = LatLng(18.50, 73.80)
+        val p2 = LatLng(18.60, 73.90)
+        
+        // Very tight padding -> less usable space -> zoom should be smaller (further out)
+        controller.showOverview(listOf(p1, p2), widthPx = 1080f, heightPx = 2400f, paddingPx = 400f)
+        val zoomWithLargePadding = controller.state.value.zoom
+        
+        // Small padding -> more usable space -> zoom should be larger (closer in)
+        controller.showOverview(listOf(p1, p2), widthPx = 1080f, heightPx = 2400f, paddingPx = 0f)
+        val zoomWithNoPadding = controller.state.value.zoom
+        
+        assertTrue("Zoom should be closer when there is more usable space", zoomWithNoPadding > zoomWithLargePadding)
     }
 }

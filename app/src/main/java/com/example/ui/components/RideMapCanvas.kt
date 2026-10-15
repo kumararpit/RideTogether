@@ -87,7 +87,9 @@ import com.example.ui.theme.StatusEmergencyRed
 import com.example.ui.theme.StatusRidingGreen
 import com.example.ui.theme.StatusStoppedAmber
 import kotlin.math.PI
+import androidx.compose.runtime.withFrameNanos
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
@@ -101,7 +103,9 @@ fun RideMapCanvas(
     isFollowRiderMode: Boolean = true,
     onFollowRiderChange: (Boolean) -> Unit = {},
     distanceToNextManeuverMeters: Double? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    topInsetDp: androidx.compose.ui.unit.Dp = 120.dp,
+    bottomInsetDp: androidx.compose.ui.unit.Dp = 140.dp
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -113,14 +117,15 @@ fun RideMapCanvas(
     val cameraController = remember { com.example.data.map.MapCameraController() }
     val cameraState by cameraController.state.collectAsState()
 
-    var centerLat by remember { mutableStateOf(initialCenter.latitude) }
-    var centerLng by remember { mutableStateOf(initialCenter.longitude) }
-    var zoomLevel by remember { mutableIntStateOf(if (route.isNotEmpty()) 16 else 14) }
+    var displayCenterLat by remember { mutableFloatStateOf(initialCenter.latitude.toFloat()) }
+    var displayCenterLng by remember { mutableFloatStateOf(initialCenter.longitude.toFloat()) }
+    var displayZoom by remember { mutableFloatStateOf(if (route.isNotEmpty()) 16f else 14f) }
+    var displayHeading by remember { mutableFloatStateOf(0f) }
     var panOffsetX by remember { mutableFloatStateOf(0f) }
     var panOffsetY by remember { mutableFloatStateOf(0f) }
     var isDarkTacticalStyle by remember { mutableStateOf(true) }
 
-    // Synchronize camera state machine when follow mode or rider location updates
+    // Send location to controller
     LaunchedEffect(currentUser?.location, currentUser?.speedKmh, currentUser?.headingDeg, isFollowRiderMode, distanceToNextManeuverMeters) {
         if (currentUser != null && isFollowRiderMode) {
             val locUpdate = com.example.data.location.LocationUpdate(
@@ -130,13 +135,35 @@ fun RideMapCanvas(
                 accuracyMeters = 10f
             )
             cameraController.processLocation(locUpdate, distanceToNextManeuverMeters)
-            val st = cameraController.state.value
-            centerLat = st.center.latitude
-            centerLng = st.center.longitude
-            zoomLevel = st.zoom
-            if (st.mode == MapCameraMode.FOLLOWING) {
-                panOffsetX = 0f
-                panOffsetY = 0f
+        }
+    }
+
+    // Frame-paced display interpolation
+    LaunchedEffect(Unit) {
+        var lastTime = 0L
+        while (true) {
+            withFrameNanos { frameTimeNanos ->
+                if (lastTime != 0L) {
+                    val dt = (frameTimeNanos - lastTime) / 1_000_000_000f
+                    val tau = 0.25f
+                    val alpha = 1f - kotlin.math.exp(-dt / tau)
+
+                    val targetState = cameraController.state.value
+
+                    displayCenterLat += (targetState.center.latitude.toFloat() - displayCenterLat) * alpha
+                    displayCenterLng += (targetState.center.longitude.toFloat() - displayCenterLng) * alpha
+                    displayZoom += (targetState.zoom - displayZoom) * alpha
+
+                    val targetHeading = targetState.effectiveHeading
+                    val deltaH = ((targetHeading - displayHeading + 540f) % 360f) - 180f
+                    displayHeading = (displayHeading + deltaH * alpha + 360f) % 360f
+
+                    if (targetState.mode == MapCameraMode.FOLLOWING || targetState.mode == MapCameraMode.OVERVIEW) {
+                        panOffsetX += (0f - panOffsetX) * alpha
+                        panOffsetY += (0f - panOffsetY) * alpha
+                    }
+                }
+                lastTime = frameTimeNanos
             }
         }
     }
@@ -171,16 +198,26 @@ fun RideMapCanvas(
     ) {
         val widthPx = with(density) { maxWidth.toPx() }
         val heightPx = with(density) { maxHeight.toPx() }
+        val topInsetPx = with(density) { topInsetDp.toPx() }
+        val bottomInsetPx = with(density) { bottomInsetDp.toPx() }
+        
+        val usableHeightPx = (heightPx - topInsetPx - bottomInsetPx).coerceAtLeast(100f)
+        
         val tileSizeDp = 256.dp
-        val tileSizePx = with(density) { tileSizeDp.toPx() }
+        val baseTileSizePx = with(density) { tileSizeDp.toPx() }
 
-        // Camera Anchor: (0.5w, 0.65h) in FOLLOWING mode, (0.5w, 0.5h) in FREE_EXPLORE or OVERVIEW
+        // Camera Anchor using usable viewport
         val anchorX = widthPx / 2f
-        val anchorY = if (cameraState.mode == MapCameraMode.FOLLOWING) heightPx * 0.65f else heightPx / 2f
+        val anchorY = if (cameraState.mode == MapCameraMode.FOLLOWING) {
+            topInsetPx + usableHeightPx * 0.65f
+        } else {
+            topInsetPx + usableHeightPx / 2f
+        }
+        
         val pivotX = anchorX + panOffsetX
         val pivotY = anchorY + panOffsetY
 
-        val effectiveHeading = cameraState.effectiveHeading
+        val effectiveHeading = displayHeading
 
         // Dark tactical color filter for high-contrast night/adventure rides
         val darkTacticalColorFilter = remember {
@@ -192,16 +229,16 @@ fun RideMapCanvas(
             )))
         }
 
-        // Center tile coordinates
-        val centerTileXDouble = TileMath.lonToTileX(centerLng, zoomLevel)
-        val centerTileYDouble = TileMath.latToTileY(centerLat, zoomLevel)
+        // Center tile coordinates using continuous displayZoom for exact vector math
+        val centerTileXDouble = TileMath.lonToTileX(displayCenterLng.toDouble(), displayZoom)
+        val centerTileYDouble = TileMath.latToTileY(displayCenterLat.toDouble(), displayZoom)
 
         // Web Mercator coordinate conversion to Unrotated Screen Pixels
         fun latLngToUnrotatedScreen(latLng: LatLng): Offset {
-            val tileX = TileMath.lonToTileX(latLng.longitude, zoomLevel)
-            val tileY = TileMath.latToTileY(latLng.latitude, zoomLevel)
-            val x = anchorX + panOffsetX + ((tileX - centerTileXDouble) * tileSizePx).toFloat()
-            val y = anchorY + panOffsetY + ((tileY - centerTileYDouble) * tileSizePx).toFloat()
+            val tileX = TileMath.lonToTileX(latLng.longitude, displayZoom)
+            val tileY = TileMath.latToTileY(latLng.latitude, displayZoom)
+            val x = anchorX + panOffsetX + ((tileX - centerTileXDouble) * baseTileSizePx).toFloat()
+            val y = anchorY + panOffsetY + ((tileY - centerTileYDouble) * baseTileSizePx).toFloat()
             return Offset(x, y)
         }
 
@@ -235,6 +272,14 @@ fun RideMapCanvas(
                 }
         ) {
             // A. Real Slippy Map Tiles Layer with 100% Rotated Viewport Coverage
+            val tileZoom = floor(displayZoom).toInt()
+            val tileScale = Math.pow(2.0, (displayZoom - tileZoom).toDouble()).toFloat()
+            val scaledTileSizePx = baseTileSizePx * tileScale
+            val scaledTileSizeDp = tileSizeDp * tileScale
+
+            val centerTileXAtTileZoom = TileMath.lonToTileX(displayCenterLng.toDouble(), tileZoom.toFloat())
+            val centerTileYAtTileZoom = TileMath.latToTileY(displayCenterLat.toDouble(), tileZoom.toFloat())
+
             val tileRange = TileMath.calculateVisibleTileRange(
                 widthPx = widthPx,
                 heightPx = heightPx,
@@ -242,26 +287,26 @@ fun RideMapCanvas(
                 anchorY = anchorY,
                 panOffsetX = panOffsetX,
                 panOffsetY = panOffsetY,
-                centerTileXDouble = centerTileXDouble,
-                centerTileYDouble = centerTileYDouble,
-                zoomLevel = zoomLevel,
-                tileSizePx = tileSizePx,
+                centerTileXDouble = centerTileXAtTileZoom,
+                centerTileYDouble = centerTileYAtTileZoom,
+                zoomLevel = tileZoom,
+                tileSizePx = scaledTileSizePx,
                 effectiveHeadingDeg = effectiveHeading
             )
 
             Box(modifier = Modifier.fillMaxSize()) {
                 for (tileX in tileRange.minX..tileRange.maxX) {
                     for (tileY in tileRange.minY..tileRange.maxY) {
-                        key("$zoomLevel/$tileX/$tileY") {
-                            val tileUnrotatedX = anchorX + panOffsetX + ((tileX - centerTileXDouble) * tileSizePx).toFloat()
-                            val tileUnrotatedY = anchorY + panOffsetY + ((tileY - centerTileYDouble) * tileSizePx).toFloat()
+                        key("$tileZoom/$tileX/$tileY") {
+                            val tileUnrotatedX = anchorX + panOffsetX + ((tileX - centerTileXAtTileZoom) * scaledTileSizePx).toFloat()
+                            val tileUnrotatedY = anchorY + panOffsetY + ((tileY - centerTileYAtTileZoom) * scaledTileSizePx).toFloat()
 
-                            val tileUrl = TileMath.getOsmTileUrl(zoomLevel, tileX, tileY)
+                            val tileUrl = TileMath.getOsmTileUrl(tileZoom, tileX, tileY)
 
                             Box(
                                 modifier = Modifier
                                     .offset { IntOffset(tileUnrotatedX.roundToInt(), tileUnrotatedY.roundToInt()) }
-                                    .size(tileSizeDp)
+                                    .size(scaledTileSizeDp)
                                     .background(SlateDark800)
                             ) {
                                 AsyncImage(
@@ -296,28 +341,28 @@ fun RideMapCanvas(
                     drawPath(
                         path = routePath,
                         color = Color(0xAA0B0F19),
-                        style = Stroke(width = 18f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                        style = Stroke(width = 18.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
                     )
 
                     // 2. High-contrast Orange/Amber Casing
                     drawPath(
                         path = routePath,
                         color = Color(0xFFE65100),
-                        style = Stroke(width = 12f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                        style = Stroke(width = 12.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
                     )
 
                     // 3. Vibrant Road Line
                     drawPath(
                         path = routePath,
                         color = AmberPrimary,
-                        style = Stroke(width = 7.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                        style = Stroke(width = 7.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
                     )
 
                     // 4. Center lane guide
                     drawPath(
                         path = routePath,
                         color = Color(0xFFFFF9C4),
-                        style = Stroke(width = 2.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                        style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
                     )
 
                     // Direction chevrons/dots along road every 15 points
@@ -325,22 +370,22 @@ fun RideMapCanvas(
                         val step = (routePoints.size / 10).coerceAtLeast(4)
                         for (k in step until routePoints.size - 2 step step) {
                             val pt = routePoints[k]
-                            drawCircle(color = Color.White, radius = 3.5f, center = pt)
-                            drawCircle(color = Color(0xFFE65100), radius = 2f, center = pt)
+                            drawCircle(color = Color.White, radius = 3.5.dp.toPx(), center = pt)
+                            drawCircle(color = Color(0xFFE65100), radius = 2.dp.toPx(), center = pt)
                         }
                     }
 
                     // Start Marker
                     val startScreen = routePoints.first()
-                    drawCircle(color = Color(0x664CAF50), radius = 16f, center = startScreen)
-                    drawCircle(color = StatusRidingGreen, radius = 10f, center = startScreen)
-                    drawCircle(color = Color.White, radius = 5f, center = startScreen)
+                    drawCircle(color = Color(0x664CAF50), radius = 16.dp.toPx(), center = startScreen)
+                    drawCircle(color = StatusRidingGreen, radius = 10.dp.toPx(), center = startScreen)
+                    drawCircle(color = Color.White, radius = 5.dp.toPx(), center = startScreen)
 
                     // Destination Marker
                     val destScreen = routePoints.last()
-                    drawCircle(color = Color(0x66F44336), radius = 18f, center = destScreen)
-                    drawCircle(color = StatusEmergencyRed, radius = 11f, center = destScreen)
-                    drawCircle(color = Color.White, radius = 5f, center = destScreen)
+                    drawCircle(color = Color(0x66F44336), radius = 18.dp.toPx(), center = destScreen)
+                    drawCircle(color = StatusEmergencyRed, radius = 11.dp.toPx(), center = destScreen)
+                    drawCircle(color = Color.White, radius = 5.dp.toPx(), center = destScreen)
                 }
             }
         }
@@ -353,9 +398,10 @@ fun RideMapCanvas(
                 .pointerInput(effectiveHeading) {
                     detectTransformGestures { _, pan, zoom, _ ->
                         if (zoom != 1f) {
-                            val newZoom = (zoomLevel * zoom).roundToInt().coerceIn(3, 18)
-                            if (newZoom != zoomLevel) {
-                                zoomLevel = newZoom
+                            val zoomDelta = kotlin.math.log2(zoom)
+                            val newZoom = (displayZoom + zoomDelta).coerceIn(3f, 18f)
+                            if (newZoom != displayZoom) {
+                                displayZoom = newZoom
                                 cameraController.setZoom(newZoom)
                             }
                         }
@@ -447,11 +493,12 @@ fun RideMapCanvas(
                 val isEmergency = rider.status == MemberStatus.EMERGENCY
 
                 // Zoom-Adaptive Marker Disc Radius
-                val markerRadius = when {
-                    zoomLevel >= 16 -> 22f
-                    zoomLevel >= 14 -> 18f
-                    else -> 14f
+                val markerRadiusDp = when {
+                    displayZoom >= 16f -> 22.dp
+                    displayZoom >= 14f -> 18.dp
+                    else -> 14.dp
                 }
+                val markerRadius = markerRadiusDp.toPx()
 
                 val isDisconnectedOrOffline = rider.connectionStatus == com.example.data.model.ConnectionStatus.DISCONNECTED || rider.status == MemberStatus.OFFLINE
                 val isStopped = rider.status == MemberStatus.STOPPED
@@ -470,7 +517,7 @@ fun RideMapCanvas(
                 if (rider.isCurrentUser) {
                     drawCircle(
                         color = Color(0x331E88E5),
-                        radius = markerRadius + 10f,
+                        radius = markerRadius + 10.dp.toPx(),
                         center = screenPos
                     )
                 }
@@ -479,13 +526,13 @@ fun RideMapCanvas(
                 if (isEmergency) {
                     drawCircle(
                         color = StatusEmergencyRed.copy(alpha = radarAlpha),
-                        radius = (markerRadius + 12f) * radarRadiusFactor,
+                        radius = (markerRadius + 12.dp.toPx()) * radarRadiusFactor,
                         center = screenPos,
-                        style = Stroke(width = 4f)
+                        style = Stroke(width = 4.dp.toPx())
                     )
                     drawCircle(
                         color = StatusEmergencyRed.copy(alpha = 0.25f),
-                        radius = markerRadius + 8f,
+                        radius = markerRadius + 8.dp.toPx(),
                         center = screenPos
                     )
                 }
@@ -494,17 +541,17 @@ fun RideMapCanvas(
                 if (isSelected) {
                     drawCircle(
                         color = Color.White,
-                        radius = markerRadius + 8f,
+                        radius = markerRadius + 8.dp.toPx(),
                         center = screenPos,
-                        style = Stroke(width = 3.5f)
+                        style = Stroke(width = 3.5.dp.toPx())
                     )
                 }
 
                 // Layer B: Soft Drop Shadow
                 drawCircle(
                     color = Color.Black.copy(alpha = 0.45f),
-                    radius = markerRadius + 1f,
-                    center = Offset(screenPos.x + 2f, screenPos.y + 4f)
+                    radius = markerRadius + 1.dp.toPx(),
+                    center = Offset(screenPos.x + 2.dp.toPx(), screenPos.y + 4.dp.toPx())
                 )
 
                 // Layer C: Base Disc Fill
@@ -521,8 +568,8 @@ fun RideMapCanvas(
                         radius = markerRadius,
                         center = screenPos,
                         style = Stroke(
-                            width = 2.5f,
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f))
+                            width = 2.5.dp.toPx(),
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx()))
                         )
                     )
                 } else {
@@ -530,7 +577,7 @@ fun RideMapCanvas(
                         color = Color.White,
                         radius = markerRadius,
                         center = screenPos,
-                        style = Stroke(width = 2.5f)
+                        style = Stroke(width = 2.5.dp.toPx())
                     )
                 }
 
@@ -633,13 +680,7 @@ fun RideMapCanvas(
             // Re-center on current user button
             FloatingActionButton(
                 onClick = {
-                    panOffsetX = 0f
-                    panOffsetY = 0f
                     cameraController.recenter(currentUser?.location, currentUser?.headingDeg)
-                    if (currentUser != null) {
-                        centerLat = currentUser.location.latitude
-                        centerLng = currentUser.location.longitude
-                    }
                     onFollowRiderChange(true)
                 },
                 modifier = Modifier
@@ -662,13 +703,7 @@ fun RideMapCanvas(
                 onClick = {
                     val allPoints = members.map { it.location } + route
                     if (allPoints.isNotEmpty()) {
-                        cameraController.showOverview(allPoints)
-                        val st = cameraController.state.value
-                        centerLat = st.center.latitude
-                        centerLng = st.center.longitude
-                        zoomLevel = st.zoom
-                        panOffsetX = 0f
-                        panOffsetY = 0f
+                        cameraController.showOverview(allPoints, widthPx, heightPx, 100f)
                         onFollowRiderChange(false)
                     }
                 },
@@ -684,10 +719,9 @@ fun RideMapCanvas(
             // Zoom In (+)
             SmallFloatingActionButton(
                 onClick = {
-                    if (zoomLevel < 18) {
-                        zoomLevel += 1
-                        panOffsetX = 0f
-                        panOffsetY = 0f
+                    if (cameraState.zoom < 18f) {
+                        val newZoom = cameraState.zoom + 1f
+                        cameraController.setZoom(newZoom)
                     }
                 },
                 modifier = Modifier.testTag("zoom_in_button"),
@@ -702,10 +736,9 @@ fun RideMapCanvas(
             // Zoom Out (-)
             SmallFloatingActionButton(
                 onClick = {
-                    if (zoomLevel > 3) {
-                        zoomLevel -= 1
-                        panOffsetX = 0f
-                        panOffsetY = 0f
+                    if (cameraState.zoom > 3f) {
+                        val newZoom = cameraState.zoom - 1f
+                        cameraController.setZoom(newZoom)
                     }
                 },
                 modifier = Modifier.testTag("zoom_out_button"),

@@ -19,8 +19,8 @@ class MapTileRenderingAndRotationTest {
 
         val centerLat = 18.5204
         val centerLng = 73.8567
-        val centerTileX = TileMath.lonToTileX(centerLng, zoomLevel)
-        val centerTileY = TileMath.latToTileY(centerLat, zoomLevel)
+        val centerTileX = TileMath.lonToTileX(centerLng, zoomLevel.toFloat())
+        val centerTileY = TileMath.latToTileY(centerLat, zoomLevel.toFloat())
 
         val anchorX = widthPx / 2f
         val anchorY = heightPx * 0.65f // Following mode pivot
@@ -84,8 +84,8 @@ class MapTileRenderingAndRotationTest {
     fun `test tile coverage across different viewport aspect ratios (portrait, landscape, square)`() {
         val zoomLevel = 15
         val tileSizePx = 512f
-        val centerTileX = TileMath.lonToTileX(73.8567, zoomLevel)
-        val centerTileY = TileMath.latToTileY(18.5204, zoomLevel)
+        val centerTileX = TileMath.lonToTileX(73.8567, zoomLevel.toFloat())
+        val centerTileY = TileMath.latToTileY(18.5204, zoomLevel.toFloat())
 
         val viewports = listOf(
             Pair(1080f, 2400f), // Portrait
@@ -188,7 +188,7 @@ class MapTileRenderingAndRotationTest {
     fun `test route geometry alignment under rotated camera transform`() {
         val pune = LatLng(18.5204, 73.8567)
         val lonavala = LatLng(18.7546, 73.4062)
-        val zoom = 14
+        val zoom = 14f
 
         val tileXPune = TileMath.lonToTileX(pune.longitude, zoom)
         val tileYPune = TileMath.latToTileY(pune.latitude, zoom)
@@ -210,13 +210,13 @@ class MapTileRenderingAndRotationTest {
 
         val rangeZoom14 = TileMath.calculateVisibleTileRange(
             widthPx, heightPx, widthPx / 2f, heightPx / 2f, 0f, 0f,
-            TileMath.lonToTileX(centerLng, 14), TileMath.latToTileY(centerLat, 14),
+            TileMath.lonToTileX(centerLng, 14f), TileMath.latToTileY(centerLat, 14f),
             14, tileSizePx, 45f, tileMargin = 2
         )
 
         val rangeZoom17 = TileMath.calculateVisibleTileRange(
             widthPx, heightPx, widthPx / 2f, heightPx / 2f, 0f, 0f,
-            TileMath.lonToTileX(centerLng, 17), TileMath.latToTileY(centerLat, 17),
+            TileMath.lonToTileX(centerLng, 17f), TileMath.latToTileY(centerLat, 17f),
             17, tileSizePx, 45f, tileMargin = 2
         )
 

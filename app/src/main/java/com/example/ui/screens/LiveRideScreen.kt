@@ -101,7 +101,9 @@ fun LiveRideScreen(
             onSelectRider = { viewModel.selectRider(it) },
             isFollowRiderMode = isFollowMode,
             onFollowRiderChange = { viewModel.setFollowRiderMode(it) },
-            distanceToNextManeuverMeters = navProgress.distanceToNextManeuverMeters
+            distanceToNextManeuverMeters = navProgress.distanceToNextManeuverMeters,
+            topInsetDp = 130.dp,
+            bottomInsetDp = 160.dp
         )
 
         // 2. Top Header, Turn-by-Turn Nav HUD, and Alert Overlay Stack

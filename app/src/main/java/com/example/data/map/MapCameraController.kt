@@ -5,7 +5,6 @@ import com.example.data.model.LatLng
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlin.math.max
 
 enum class MapCameraMode {
     FOLLOWING,
@@ -20,7 +19,7 @@ enum class OrientationMode {
 
 data class MapCameraState(
     val center: LatLng = LatLng(18.5204, 73.8567),
-    val zoom: Int = 16,
+    val zoom: Float = 16f,
     val heading: Float = 0f,
     val mode: MapCameraMode = MapCameraMode.FOLLOWING,
     val orientationMode: OrientationMode = OrientationMode.HEADING_UP,
@@ -53,18 +52,20 @@ class MapCameraController {
         if (currentState.mode != MapCameraMode.FOLLOWING) return
 
         val speedKmh = location.speedKmh
-        val targetHeading = if (speedKmh >= 3.0 && location.headingDeg in 0f..360f) {
+        // Gate low-speed heading updates (< 5.4 km/h == 1.5 m/s)
+        val targetHeading = if (speedKmh >= 5.4 && location.headingDeg in 0f..360f) {
             location.headingDeg
         } else {
             currentState.heading
         }
 
-        val smoothedHeading = interpolateHeading(currentState.heading, targetHeading, 0.25f)
+        // We don't interpolate heading here anymore. We set the raw target heading.
+        // The display layer's frame loop will handle interpolation.
         val targetZoom = calculateAdaptiveZoom(speedKmh, distanceToNextManeuverMeters)
 
         _state.value = currentState.copy(
             center = location.latLng,
-            heading = smoothedHeading,
+            heading = targetHeading,
             zoom = targetZoom
         )
     }
@@ -80,37 +81,45 @@ class MapCameraController {
         val newHeading = headingDeg?.takeIf { it in 0f..360f } ?: _state.value.heading
         _state.value = _state.value.copy(
             center = newCenter,
-            zoom = 16,
+            zoom = 16f,
             heading = newHeading,
             mode = MapCameraMode.FOLLOWING,
             bounds = null
         )
     }
 
-    fun showOverview(points: List<LatLng>) {
+    fun showOverview(
+        points: List<LatLng>, 
+        widthPx: Float = 1080f, 
+        heightPx: Float = 1920f,
+        paddingPx: Float = 100f
+    ) {
         if (points.isEmpty()) return
+
+        val usableWidth = (widthPx - paddingPx * 2).coerceAtLeast(100f)
+        val usableHeight = (heightPx - paddingPx * 2).coerceAtLeast(100f)
+
         val minLat = points.minOf { it.latitude }
         val maxLat = points.maxOf { it.latitude }
         val minLng = points.minOf { it.longitude }
         val maxLng = points.maxOf { it.longitude }
 
-        val centerLat = (minLat + maxLat) / 2.0
-        val centerLng = (minLng + maxLng) / 2.0
+        // Use zoom 0 to get the tile coordinates (which range from 0 to 1)
+        val minX = points.minOf { TileMath.lonToTileX(it.longitude, 0f) }
+        val maxX = points.maxOf { TileMath.lonToTileX(it.longitude, 0f) }
+        val minY = points.minOf { TileMath.latToTileY(it.latitude, 0f) }
+        val maxY = points.maxOf { TileMath.latToTileY(it.latitude, 0f) }
 
-        val latDelta = maxLat - minLat
-        val lngDelta = maxLng - minLng
-        val maxDelta = max(latDelta, lngDelta)
+        val dx = (maxX - minX).coerceAtLeast(0.000001)
+        val dy = (maxY - minY).coerceAtLeast(0.000001)
 
-        val calculatedZoom = when {
-            maxDelta > 2.0 -> 8
-            maxDelta > 1.0 -> 9
-            maxDelta > 0.5 -> 10
-            maxDelta > 0.2 -> 11
-            maxDelta > 0.1 -> 12
-            maxDelta > 0.05 -> 13
-            maxDelta > 0.02 -> 14
-            else -> 15
-        }
+        val zoomX = kotlin.math.log2(usableWidth / (dx * 256.0))
+        val zoomY = kotlin.math.log2(usableHeight / (dy * 256.0))
+        
+        val calculatedZoom = minOf(zoomX, zoomY).toFloat().coerceIn(3f, 18f)
+
+        val centerLat = TileMath.tileYToLat((minY + maxY) / 2.0, 0f)
+        val centerLng = TileMath.tileXToLon((minX + maxX) / 2.0, 0f)
 
         _state.value = _state.value.copy(
             center = LatLng(centerLat, centerLng),
@@ -120,20 +129,20 @@ class MapCameraController {
         )
     }
 
-    fun setZoom(newZoom: Int) {
-        val clampedZoom = newZoom.coerceIn(3, 18)
+    fun setZoom(newZoom: Float) {
+        val clampedZoom = newZoom.coerceIn(3f, 18f)
         _state.value = _state.value.copy(zoom = clampedZoom, mode = MapCameraMode.FREE_EXPLORE)
     }
 
     companion object {
-        fun calculateAdaptiveZoom(speedKmh: Double, distanceToNextManeuverMeters: Double? = null): Int {
+        fun calculateAdaptiveZoom(speedKmh: Double, distanceToNextManeuverMeters: Double? = null): Float {
             if (distanceToNextManeuverMeters != null && distanceToNextManeuverMeters in 0.0..150.0) {
-                return 17
+                return 17.5f
             }
             return when {
-                speedKmh >= 70.0 -> 15
-                speedKmh >= 30.0 -> 16
-                else -> 17
+                speedKmh >= 70.0 -> 15.5f
+                speedKmh >= 30.0 -> 16.5f
+                else -> 17.5f
             }
         }
 

@@ -69,18 +69,18 @@ class ExampleRobolectricTest {
     fun `test tile math projection and osm user agent`() {
         val lon = 73.8567
         val lat = 18.5204
-        val zoom = 13
+        val zoom = 13f
         val tileX = TileMath.lonToTileX(lon, zoom)
         val tileY = TileMath.latToTileY(lat, zoom)
 
         assertTrue(tileX > 0)
         assertTrue(tileY > 0)
 
-        val topoUrl = TileMath.getTopoTileUrl(zoom, tileX.toInt(), tileY.toInt())
+        val topoUrl = TileMath.getTopoTileUrl(zoom.toInt(), tileX.toInt(), tileY.toInt())
         assertTrue(topoUrl.contains("opentopomap.org"))
         assertTrue(topoUrl.endsWith(".png"))
 
-        val osmUrl = TileMath.getOsmTileUrl(zoom, tileX.toInt(), tileY.toInt())
+        val osmUrl = TileMath.getOsmTileUrl(zoom.toInt(), tileX.toInt(), tileY.toInt())
         assertTrue(osmUrl.contains("tile.openstreetmap.org/"))
 
         assertTrue(TileMath.OSM_USER_AGENT.contains("RideTogether"))

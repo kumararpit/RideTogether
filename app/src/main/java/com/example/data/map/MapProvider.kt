@@ -107,24 +107,24 @@ object TileMath {
     // Compliant User-Agent header per OpenStreetMap Tile Usage Policy
     const val OSM_USER_AGENT = "RideTogether-Android-Personal-App/1.0 (arpitkumar1101@gmail.com)"
 
-    fun lonToTileX(lon: Double, zoom: Int): Double {
-        val n = 1 shl zoom
+    fun lonToTileX(lon: Double, zoom: Float): Double {
+        val n = Math.pow(2.0, zoom.toDouble())
         return (lon + 180.0) / 360.0 * n
     }
 
-    fun latToTileY(lat: Double, zoom: Int): Double {
-        val n = 1 shl zoom
+    fun latToTileY(lat: Double, zoom: Float): Double {
+        val n = Math.pow(2.0, zoom.toDouble())
         val latRad = Math.toRadians(lat.coerceIn(-85.05112878, 85.05112878))
         return (1.0 - asinh(tan(latRad)) / PI) / 2.0 * n
     }
 
-    fun tileXToLon(x: Double, zoom: Int): Double {
-        val n = 1 shl zoom
+    fun tileXToLon(x: Double, zoom: Float): Double {
+        val n = Math.pow(2.0, zoom.toDouble())
         return x / n * 360.0 - 180.0
     }
 
-    fun tileYToLat(y: Double, zoom: Int): Double {
-        val n = 1 shl zoom
+    fun tileYToLat(y: Double, zoom: Float): Double {
+        val n = Math.pow(2.0, zoom.toDouble())
         val n2 = PI - (2.0 * PI * y) / n
         return Math.toDegrees(atan(sinh(n2)))
     }
