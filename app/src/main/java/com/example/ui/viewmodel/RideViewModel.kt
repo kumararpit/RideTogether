@@ -94,6 +94,40 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     val currentRiderStatus = repository.currentRiderStatus
     val joinError = repository.joinError
 
+    val amenityRepository = com.example.data.amenities.AmenityRepository(com.example.data.db.RideDatabase.getInstance(application))
+
+    private val _amenities = MutableStateFlow<List<com.example.data.amenities.AmenityEntity>>(emptyList())
+    val amenities: StateFlow<List<com.example.data.amenities.AmenityEntity>> = _amenities.asStateFlow()
+
+    private val _visibleCategories = MutableStateFlow(
+        com.example.data.amenities.AmenityType.entries.filter { it != com.example.data.amenities.AmenityType.UNKNOWN }.toSet()
+    )
+    val visibleCategories: StateFlow<Set<com.example.data.amenities.AmenityType>> = _visibleCategories.asStateFlow()
+
+    private val _selectedAmenity = MutableStateFlow<com.example.data.amenities.AmenityEntity?>(null)
+    val selectedAmenity: StateFlow<com.example.data.amenities.AmenityEntity?> = _selectedAmenity.asStateFlow()
+
+    fun toggleAmenityCategory(type: com.example.data.amenities.AmenityType) {
+        val current = _visibleCategories.value.toMutableSet()
+        if (current.contains(type)) current.remove(type) else current.add(type)
+        _visibleCategories.value = current
+    }
+
+    fun selectAmenity(amenity: com.example.data.amenities.AmenityEntity?) {
+        _selectedAmenity.value = amenity
+    }
+
+    private var viewportUpdateJob: kotlinx.coroutines.Job? = null
+
+    fun onViewportChanged(minLat: Double, maxLat: Double, minLon: Double, maxLon: Double) {
+        viewportUpdateJob?.cancel()
+        viewportUpdateJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(400) // debounce
+            val results = amenityRepository.getAmenitiesInViewport(minLat, maxLat, minLon, maxLon)
+            _amenities.value = results
+        }
+    }
+
     // Dialogs / Sheets
     private val _showQuickMessageSheet = MutableStateFlow(false)
     val showQuickMessageSheet: StateFlow<Boolean> = _showQuickMessageSheet.asStateFlow()

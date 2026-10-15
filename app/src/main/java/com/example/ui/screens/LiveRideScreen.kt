@@ -92,6 +92,10 @@ fun LiveRideScreen(
     )
     val isOtherRiderSos = activeSos != null && !isMySosActive
 
+    val amenities by viewModel.amenities.collectAsState()
+    val selectedAmenity by viewModel.selectedAmenity.collectAsState()
+    val visibleCategories by viewModel.visibleCategories.collectAsState()
+
     Box(modifier = modifier.fillMaxSize()) {
         // 1. Live Map View with road-following route and bike markers
         RideMapCanvas(
@@ -103,7 +107,13 @@ fun LiveRideScreen(
             onFollowRiderChange = { viewModel.setFollowRiderMode(it) },
             distanceToNextManeuverMeters = navProgress.distanceToNextManeuverMeters,
             topInsetDp = 130.dp,
-            bottomInsetDp = 160.dp
+            bottomInsetDp = 160.dp,
+            amenities = amenities.filter { it.type in visibleCategories },
+            selectedAmenity = selectedAmenity,
+            onSelectAmenity = { viewModel.selectAmenity(it) },
+            onViewportChanged = { minLat, maxLat, minLon, maxLon ->
+                viewModel.onViewportChanged(minLat, maxLat, minLon, maxLon)
+            }
         )
 
         // 2. Top Header, Turn-by-Turn Nav HUD, and Alert Overlay Stack
@@ -451,6 +461,14 @@ fun LiveRideScreen(
                     viewModel.leaveRide()
                 },
                 onDismiss = { viewModel.openRiderListSheet(false) }
+            )
+        }
+
+        if (selectedAmenity != null) {
+            com.example.ui.components.AmenityDetailsSheet(
+                amenity = selectedAmenity!!,
+                riderLocation = currentUser?.location,
+                onDismiss = { viewModel.selectAmenity(null) }
             )
         }
 

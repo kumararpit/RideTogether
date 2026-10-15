@@ -278,4 +278,31 @@ class ExampleRobolectricTest {
         assertNotNull(scenario)
         scenario.close()
     }
+
+    @Test
+    fun `test room database migration and amenity storage`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = com.example.data.db.RideDatabase.getInstance(context)
+        val dao = db.amenityDao()
+
+        val amenity = com.example.data.amenities.AmenityEntity(
+            osmId = 999L,
+            type = com.example.data.amenities.AmenityType.FUEL,
+            lat = 18.52,
+            lon = 73.85,
+            name = "Test Fuel Station",
+            tagsJson = "{}"
+        )
+        dao.insertAmenities(listOf(amenity))
+
+        val queried = dao.getAmenitiesInBox(18.50, 18.55, 73.80, 73.90)
+        assertEquals(1, queried.size)
+        assertEquals("Test Fuel Station", queried[0].name)
+        assertEquals(com.example.data.amenities.AmenityType.FUEL, queried[0].type)
+
+        val cache = com.example.data.amenities.AmenityQueryCacheEntity("14_100_200", 123456789L)
+        dao.insertQueryCache(cache)
+        val ts = dao.getQueryTimestamp("14_100_200")
+        assertEquals(123456789L, ts)
+    }
 }

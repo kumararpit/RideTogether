@@ -149,51 +149,26 @@ object TileMath {
         heightPx: Float,
         anchorX: Float,
         anchorY: Float,
-        panOffsetX: Float,
-        panOffsetY: Float,
         centerTileXDouble: Double,
         centerTileYDouble: Double,
         zoomLevel: Int,
         tileSizePx: Float,
-        effectiveHeadingDeg: Float,
-        tileMargin: Int = 2
+        tileMargin: Int = 1
     ): TileRange {
         val maxTileIndex = (1 shl zoomLevel) - 1
-        val pivotX = anchorX + panOffsetX
-        val pivotY = anchorY + panOffsetY
-
-        val headingRad = Math.toRadians(effectiveHeadingDeg.toDouble())
-        val cosH = kotlin.math.cos(headingRad)
-        val sinH = kotlin.math.sin(headingRad)
-
-        val screenCorners = listOf(
-            Pair(0f, 0f),
-            Pair(widthPx, 0f),
-            Pair(widthPx, heightPx),
-            Pair(0f, heightPx)
+        
+        // Use hypot to get the maximum radius required to cover the corners regardless of rotation
+        val maxRadiusPx = kotlin.math.hypot(
+            kotlin.math.max(anchorX, widthPx - anchorX).toDouble(),
+            kotlin.math.max(anchorY, heightPx - anchorY).toDouble()
         )
-
-        var minTileX = Double.MAX_VALUE
-        var maxTileX = -Double.MAX_VALUE
-        var minTileY = Double.MAX_VALUE
-        var maxTileY = -Double.MAX_VALUE
-
-        for ((sx, sy) in screenCorners) {
-            val dx = sx - pivotX
-            val dy = sy - pivotY
-
-            // Inverse rotation by +effectiveHeading to find unrotated content space coordinate
-            val unrotatedX = pivotX + dx * cosH - dy * sinH
-            val unrotatedY = pivotY + dx * sinH + dy * cosH
-
-            val tileX = centerTileXDouble + (unrotatedX - anchorX - panOffsetX) / tileSizePx
-            val tileY = centerTileYDouble + (unrotatedY - anchorY - panOffsetY) / tileSizePx
-
-            if (tileX < minTileX) minTileX = tileX
-            if (tileX > maxTileX) maxTileX = tileX
-            if (tileY < minTileY) minTileY = tileY
-            if (tileY > maxTileY) maxTileY = tileY
-        }
+        
+        val radiusTiles = maxRadiusPx / tileSizePx
+        
+        val minTileX = centerTileXDouble - radiusTiles
+        val maxTileX = centerTileXDouble + radiusTiles
+        val minTileY = centerTileYDouble - radiusTiles
+        val maxTileY = centerTileYDouble + radiusTiles
 
         val rangeMinX = (kotlin.math.floor(minTileX).toInt() - tileMargin).coerceIn(0, maxTileIndex)
         val rangeMaxX = (kotlin.math.ceil(maxTileX).toInt() + tileMargin).coerceIn(0, maxTileIndex)

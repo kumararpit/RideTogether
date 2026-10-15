@@ -33,13 +33,10 @@ class MapTileRenderingAndRotationTest {
                 heightPx = heightPx,
                 anchorX = anchorX,
                 anchorY = anchorY,
-                panOffsetX = 0f,
-                panOffsetY = 0f,
                 centerTileXDouble = centerTileX,
                 centerTileYDouble = centerTileY,
                 zoomLevel = zoomLevel,
                 tileSizePx = tileSizePx,
-                effectiveHeadingDeg = headingDeg,
                 tileMargin = 2
             )
 
@@ -100,13 +97,10 @@ class MapTileRenderingAndRotationTest {
                     heightPx = h,
                     anchorX = w / 2f,
                     anchorY = h / 2f,
-                    panOffsetX = 0f,
-                    panOffsetY = 0f,
                     centerTileXDouble = centerTileX,
                     centerTileYDouble = centerTileY,
                     zoomLevel = zoomLevel,
                     tileSizePx = tileSizePx,
-                    effectiveHeadingDeg = heading,
                     tileMargin = 2
                 )
 
@@ -129,13 +123,10 @@ class MapTileRenderingAndRotationTest {
             heightPx = 1000f,
             anchorX = 500f,
             anchorY = 500f,
-            panOffsetX = 0f,
-            panOffsetY = 0f,
             centerTileXDouble = centerTileX,
             centerTileYDouble = centerTileY,
             zoomLevel = zoomLevel,
             tileSizePx = tileSizePx,
-            effectiveHeadingDeg = 45f,
             tileMargin = 2
         )
 
@@ -209,15 +200,15 @@ class MapTileRenderingAndRotationTest {
         val tileSizePx = 512f
 
         val rangeZoom14 = TileMath.calculateVisibleTileRange(
-            widthPx, heightPx, widthPx / 2f, heightPx / 2f, 0f, 0f,
+            widthPx, heightPx, widthPx / 2f, heightPx / 2f,
             TileMath.lonToTileX(centerLng, 14f), TileMath.latToTileY(centerLat, 14f),
-            14, tileSizePx, 45f, tileMargin = 2
+            14, tileSizePx, tileMargin = 2
         )
 
         val rangeZoom17 = TileMath.calculateVisibleTileRange(
-            widthPx, heightPx, widthPx / 2f, heightPx / 2f, 0f, 0f,
+            widthPx, heightPx, widthPx / 2f, heightPx / 2f,
             TileMath.lonToTileX(centerLng, 17f), TileMath.latToTileY(centerLat, 17f),
-            17, tileSizePx, 45f, tileMargin = 2
+            17, tileSizePx, tileMargin = 2
         )
 
         val count14 = (rangeZoom14.maxX - rangeZoom14.minX + 1) * (rangeZoom14.maxY - rangeZoom14.minY + 1)

@@ -147,13 +147,10 @@ class MapCameraControllerTest {
                 heightPx = heightPx,
                 anchorX = anchorX,
                 anchorY = anchorY,
-                panOffsetX = 0f,
-                panOffsetY = 0f,
                 centerTileXDouble = centerTileX,
                 centerTileYDouble = centerTileY,
                 zoomLevel = zoomLevel,
                 tileSizePx = tileSizePx,
-                effectiveHeadingDeg = headingDeg,
                 tileMargin = 1
             )
 

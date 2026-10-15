@@ -75,6 +75,31 @@ class MapCameraController {
             _state.value = _state.value.copy(mode = MapCameraMode.FREE_EXPLORE)
         }
     }
+    
+    fun pan(unrotatedDx: Float, unrotatedDy: Float, displayZoom: Float, displayHeading: Float, tileSizePx: Float) {
+        val currentState = _state.value
+        
+        val rad = Math.toRadians(-displayHeading.toDouble())
+        val cosH = kotlin.math.cos(rad).toFloat()
+        val sinH = kotlin.math.sin(rad).toFloat()
+
+        val dx = unrotatedDx * cosH - unrotatedDy * sinH
+        val dy = unrotatedDx * sinH + unrotatedDy * cosH
+
+        val tileXDelta = dx / tileSizePx
+        val tileYDelta = dy / tileSizePx
+        
+        val currentTileX = TileMath.lonToTileX(currentState.center.longitude, displayZoom)
+        val currentTileY = TileMath.latToTileY(currentState.center.latitude, displayZoom)
+        
+        val newLng = TileMath.tileXToLon(currentTileX - tileXDelta, displayZoom).toFloat()
+        val newLat = TileMath.tileYToLat(currentTileY - tileYDelta, displayZoom).toFloat()
+        
+        _state.value = currentState.copy(
+            center = LatLng(newLat.toDouble(), newLng.toDouble()),
+            mode = MapCameraMode.FREE_EXPLORE
+        )
+    }
 
     fun recenter(riderLocation: LatLng?, headingDeg: Float? = null) {
         val newCenter = riderLocation ?: _state.value.center
@@ -96,34 +121,29 @@ class MapCameraController {
     ) {
         if (points.isEmpty()) return
 
-        val usableWidth = (widthPx - paddingPx * 2).coerceAtLeast(100f)
-        val usableHeight = (heightPx - paddingPx * 2).coerceAtLeast(100f)
-
         val minLat = points.minOf { it.latitude }
         val maxLat = points.maxOf { it.latitude }
         val minLng = points.minOf { it.longitude }
         val maxLng = points.maxOf { it.longitude }
 
-        // Use zoom 0 to get the tile coordinates (which range from 0 to 1)
-        val minX = points.minOf { TileMath.lonToTileX(it.longitude, 0f) }
-        val maxX = points.maxOf { TileMath.lonToTileX(it.longitude, 0f) }
-        val minY = points.minOf { TileMath.latToTileY(it.latitude, 0f) }
-        val maxY = points.maxOf { TileMath.latToTileY(it.latitude, 0f) }
+        val usableWidthPx = (widthPx - paddingPx * 2).coerceAtLeast(100f) * 0.75f
+        val usableHeightPx = (heightPx - paddingPx * 2).coerceAtLeast(100f) * 0.75f
 
-        val dx = (maxX - minX).coerceAtLeast(0.000001)
-        val dy = (maxY - minY).coerceAtLeast(0.000001)
+        val lonSpanTile = kotlin.math.abs(TileMath.lonToTileX(maxLng, 0f) - TileMath.lonToTileX(minLng, 0f))
+        val latSpanTile = kotlin.math.abs(TileMath.latToTileY(minLat, 0f) - TileMath.latToTileY(maxLat, 0f))
 
-        val zoomX = kotlin.math.log2(usableWidth / (dx * 256.0))
-        val zoomY = kotlin.math.log2(usableHeight / (dy * 256.0))
+        val zoomX = kotlin.math.log2(usableWidthPx / (lonSpanTile * 256.0)).toFloat()
+        val zoomY = kotlin.math.log2(usableHeightPx / (latSpanTile * 256.0)).toFloat()
         
-        val calculatedZoom = minOf(zoomX, zoomY).toFloat().coerceIn(3f, 18f)
+        val calculatedZoom = minOf(zoomX, zoomY).coerceIn(3f, 16.5f)
 
-        val centerLat = TileMath.tileYToLat((minY + maxY) / 2.0, 0f)
-        val centerLng = TileMath.tileXToLon((minX + maxX) / 2.0, 0f)
+        val centerLat = (minLat + maxLat) / 2.0
+        val centerLng = (minLng + maxLng) / 2.0
 
         _state.value = _state.value.copy(
             center = LatLng(centerLat, centerLng),
             zoom = calculatedZoom,
+            heading = 0f,
             mode = MapCameraMode.OVERVIEW,
             bounds = Pair(LatLng(minLat, minLng), LatLng(maxLat, maxLng))
         )

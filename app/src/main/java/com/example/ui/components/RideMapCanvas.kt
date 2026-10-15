@@ -105,7 +105,11 @@ fun RideMapCanvas(
     distanceToNextManeuverMeters: Double? = null,
     modifier: Modifier = Modifier,
     topInsetDp: androidx.compose.ui.unit.Dp = 120.dp,
-    bottomInsetDp: androidx.compose.ui.unit.Dp = 140.dp
+    bottomInsetDp: androidx.compose.ui.unit.Dp = 140.dp,
+    amenities: List<com.example.data.amenities.AmenityEntity> = emptyList(),
+    selectedAmenity: com.example.data.amenities.AmenityEntity? = null,
+    onSelectAmenity: (com.example.data.amenities.AmenityEntity?) -> Unit = {},
+    onViewportChanged: (minLat: Double, maxLat: Double, minLon: Double, maxLon: Double) -> Unit = { _, _, _, _ -> }
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -123,7 +127,23 @@ fun RideMapCanvas(
     var displayHeading by remember { mutableFloatStateOf(0f) }
     var panOffsetX by remember { mutableFloatStateOf(0f) }
     var panOffsetY by remember { mutableFloatStateOf(0f) }
+    var displayAnchorY by remember { mutableFloatStateOf(0f) }
     var isDarkTacticalStyle by remember { mutableStateOf(true) }
+    var hasInitialized by remember { mutableStateOf(false) }
+    
+    // Initialize map position on first launch or when route becomes available
+    LaunchedEffect(route, isFollowRiderMode) {
+        if (!hasInitialized) {
+            if (isFollowRiderMode) {
+                cameraController.recenter(initialCenter, currentUser?.headingDeg)
+                cameraController.setZoom(17f)
+                hasInitialized = true
+            } else if (route.isNotEmpty()) {
+                cameraController.showOverview(route)
+                hasInitialized = true
+            }
+        }
+    }
 
     // Send location to controller
     LaunchedEffect(currentUser?.location, currentUser?.speedKmh, currentUser?.headingDeg, isFollowRiderMode, distanceToNextManeuverMeters) {
@@ -150,17 +170,38 @@ fun RideMapCanvas(
 
                     val targetState = cameraController.state.value
 
-                    displayCenterLat += (targetState.center.latitude.toFloat() - displayCenterLat) * alpha
-                    displayCenterLng += (targetState.center.longitude.toFloat() - displayCenterLng) * alpha
-                    displayZoom += (targetState.zoom - displayZoom) * alpha
+                    if (targetState.mode == MapCameraMode.FOLLOWING || targetState.mode == MapCameraMode.OVERVIEW) {
+                        displayCenterLat += (targetState.center.latitude.toFloat() - displayCenterLat) * alpha
+                        displayCenterLng += (targetState.center.longitude.toFloat() - displayCenterLng) * alpha
+                        displayZoom += (targetState.zoom - displayZoom) * alpha
+                    }
 
                     val targetHeading = targetState.effectiveHeading
                     val deltaH = ((targetHeading - displayHeading + 540f) % 360f) - 180f
                     displayHeading = (displayHeading + deltaH * alpha + 360f) % 360f
 
                     if (targetState.mode == MapCameraMode.FOLLOWING || targetState.mode == MapCameraMode.OVERVIEW) {
-                        panOffsetX += (0f - panOffsetX) * alpha
-                        panOffsetY += (0f - panOffsetY) * alpha
+                        // Smoothly fold residual panOffset into center lat/lng when recentering
+                        if (kotlin.math.abs(panOffsetX) > 0.5f || kotlin.math.abs(panOffsetY) > 0.5f) {
+                            val invScale = 1f / with(density) { 256.dp.toPx() } 
+                            val unrotatedDx = (panOffsetX * cos(Math.toRadians(displayHeading.toDouble())) - panOffsetY * sin(Math.toRadians(displayHeading.toDouble()))).toFloat()
+                            val unrotatedDy = (panOffsetX * sin(Math.toRadians(displayHeading.toDouble())) + panOffsetY * cos(Math.toRadians(displayHeading.toDouble()))).toFloat()
+                            
+                            val tileXDelta = unrotatedDx * invScale
+                            val tileYDelta = unrotatedDy * invScale
+                            
+                            val currentTileX = TileMath.lonToTileX(displayCenterLng.toDouble(), displayZoom)
+                            val currentTileY = TileMath.latToTileY(displayCenterLat.toDouble(), displayZoom)
+                            
+                            displayCenterLng = TileMath.tileXToLon(currentTileX - tileXDelta, displayZoom).toFloat()
+                            displayCenterLat = TileMath.tileYToLat(currentTileY - tileYDelta, displayZoom).toFloat()
+                            
+                            panOffsetX = 0f
+                            panOffsetY = 0f
+                        } else {
+                            panOffsetX = 0f
+                            panOffsetY = 0f
+                        }
                     }
                 }
                 lastTime = frameTimeNanos
@@ -190,6 +231,11 @@ fun RideMapCanvas(
     )
 
     val riderScreenPositions = remember { mutableMapOf<String, Offset>() }
+    val amenityScreenPositions = remember { mutableMapOf<Long, Offset>() }
+
+    val categoryPainters = com.example.data.amenities.AmenityType.entries.associateWith { type ->
+        androidx.compose.ui.graphics.vector.rememberVectorPainter(AmenityIconConfig.getCategoryIcon(type))
+    }
 
     BoxWithConstraints(
         modifier = modifier
@@ -203,19 +249,26 @@ fun RideMapCanvas(
         
         val usableHeightPx = (heightPx - topInsetPx - bottomInsetPx).coerceAtLeast(100f)
         
-        val tileSizeDp = 256.dp
-        val baseTileSizePx = with(density) { tileSizeDp.toPx() }
-
-        // Camera Anchor using usable viewport
-        val anchorX = widthPx / 2f
-        val anchorY = if (cameraState.mode == MapCameraMode.FOLLOWING) {
+        val targetAnchorY = if (cameraState.mode == MapCameraMode.FOLLOWING) {
             topInsetPx + usableHeightPx * 0.65f
         } else {
             topInsetPx + usableHeightPx / 2f
         }
         
+        // Initialize anchor on first pass
+        if (displayAnchorY == 0f) displayAnchorY = targetAnchorY
+        
+        // Smoothly interpolate anchorY in the composition phase
+        displayAnchorY += (targetAnchorY - displayAnchorY) * 0.15f
+        
+        val tileSizeDp = 256.dp
+        val baseTileSizePx = with(density) { tileSizeDp.toPx() }
+
+        // Camera Anchor using usable viewport
+        val anchorX = widthPx / 2f
+        val anchorY = displayAnchorY
+        
         val pivotX = anchorX + panOffsetX
-        val pivotY = anchorY + panOffsetY
 
         val effectiveHeading = displayHeading
 
@@ -237,8 +290,8 @@ fun RideMapCanvas(
         fun latLngToUnrotatedScreen(latLng: LatLng): Offset {
             val tileX = TileMath.lonToTileX(latLng.longitude, displayZoom)
             val tileY = TileMath.latToTileY(latLng.latitude, displayZoom)
-            val x = anchorX + panOffsetX + ((tileX - centerTileXDouble) * baseTileSizePx).toFloat()
-            val y = anchorY + panOffsetY + ((tileY - centerTileYDouble) * baseTileSizePx).toFloat()
+            val x = anchorX + ((tileX - centerTileXDouble) * baseTileSizePx).toFloat()
+            val y = anchorY + ((tileY - centerTileYDouble) * baseTileSizePx).toFloat()
             return Offset(x, y)
         }
 
@@ -248,10 +301,10 @@ fun RideMapCanvas(
             val rad = Math.toRadians(-effectiveHeading.toDouble())
             val cosA = cos(rad)
             val sinA = sin(rad)
-            val dx = unrotated.x - pivotX
-            val dy = unrotated.y - pivotY
-            val rx = (pivotX + dx * cosA - dy * sinA).toFloat()
-            val ry = (pivotY + dx * sinA + dy * cosA).toFloat()
+            val dx = unrotated.x - anchorX
+            val dy = unrotated.y - anchorY
+            val rx = (anchorX + dx * cosA - dy * sinA).toFloat()
+            val ry = (anchorY + dx * sinA + dy * cosA).toFloat()
             return Offset(rx, ry)
         }
 
@@ -266,8 +319,8 @@ fun RideMapCanvas(
                 .graphicsLayer {
                     rotationZ = -effectiveHeading
                     transformOrigin = TransformOrigin(
-                        pivotX / widthPx,
-                        pivotY / heightPx
+                        anchorX / widthPx,
+                        anchorY / heightPx
                     )
                 }
         ) {
@@ -285,30 +338,74 @@ fun RideMapCanvas(
                 heightPx = heightPx,
                 anchorX = anchorX,
                 anchorY = anchorY,
-                panOffsetX = panOffsetX,
-                panOffsetY = panOffsetY,
                 centerTileXDouble = centerTileXAtTileZoom,
                 centerTileYDouble = centerTileYAtTileZoom,
                 zoomLevel = tileZoom,
-                tileSizePx = scaledTileSizePx,
-                effectiveHeadingDeg = effectiveHeading
+                tileSizePx = scaledTileSizePx
             )
+
+            LaunchedEffect(tileRange, tileZoom) {
+                val minLon = TileMath.tileXToLon(tileRange.minX.toDouble(), tileZoom.toFloat())
+                val maxLon = TileMath.tileXToLon((tileRange.maxX + 1).toDouble(), tileZoom.toFloat())
+                val maxLat = TileMath.tileYToLat(tileRange.minY.toDouble(), tileZoom.toFloat())
+                val minLat = TileMath.tileYToLat((tileRange.maxY + 1).toDouble(), tileZoom.toFloat())
+                onViewportChanged(minLat, maxLat, minLon, maxLon)
+            }
 
             Box(modifier = Modifier.fillMaxSize()) {
                 for (tileX in tileRange.minX..tileRange.maxX) {
                     for (tileY in tileRange.minY..tileRange.maxY) {
                         key("$tileZoom/$tileX/$tileY") {
-                            val tileUnrotatedX = anchorX + panOffsetX + ((tileX - centerTileXAtTileZoom) * scaledTileSizePx).toFloat()
-                            val tileUnrotatedY = anchorY + panOffsetY + ((tileY - centerTileYAtTileZoom) * scaledTileSizePx).toFloat()
+                            val tileUnrotatedX = anchorX + ((tileX - centerTileXAtTileZoom) * scaledTileSizePx).toFloat()
+                            val tileUnrotatedY = anchorY + ((tileY - centerTileYAtTileZoom) * scaledTileSizePx).toFloat()
 
                             val tileUrl = TileMath.getOsmTileUrl(tileZoom, tileX, tileY)
+                            
+                            // Calculate exact layout bounds rounding mathematically to avoid sub-pixel gaps (seams)
+                            // We use Math.ceil for the size and strict float rounding for the offset to guarantee 
+                            // neighboring tiles snap perfectly edge-to-edge without 1px gaps when scaled.
+                            val left = tileUnrotatedX.roundToInt()
+                            val top = tileUnrotatedY.roundToInt()
+                            val right = (tileUnrotatedX + scaledTileSizePx).roundToInt()
+                            val bottom = (tileUnrotatedY + scaledTileSizePx).roundToInt()
 
                             Box(
                                 modifier = Modifier
-                                    .offset { IntOffset(tileUnrotatedX.roundToInt(), tileUnrotatedY.roundToInt()) }
-                                    .size(scaledTileSizeDp)
+                                    .offset { IntOffset(left, top) }
+                                    .size(
+                                        width = with(density) { (right - left).toDp() }, 
+                                        height = with(density) { (bottom - top).toDp() }
+                                    )
+                                    .clip(androidx.compose.ui.graphics.RectangleShape)
                                     .background(SlateDark800)
                             ) {
+                                // Fallback layer (parent tile) to prevent black stripes while loading
+                                if (tileZoom > 0) {
+                                    val parentTileX = tileX / 2
+                                    val parentTileY = tileY / 2
+                                    val parentTileUrl = TileMath.getOsmTileUrl(tileZoom - 1, parentTileX, parentTileY)
+                                    
+                                    val parentOffsetX = if (tileX % 2 == 0) 0 else -(right - left)
+                                    val parentOffsetY = if (tileY % 2 == 0) 0 else -(bottom - top)
+                                    
+                                    AsyncImage(
+                                        model = ImageRequest.Builder(context)
+                                            .data(parentTileUrl)
+                                            .addHeader("User-Agent", TileMath.OSM_USER_AGENT)
+                                            .crossfade(false)
+                                            .build(),
+                                        contentDescription = "Parent map tile fallback",
+                                        contentScale = ContentScale.FillBounds,
+                                        colorFilter = if (isDarkTacticalStyle) darkTacticalColorFilter else null,
+                                        modifier = Modifier
+                                            .offset { IntOffset(parentOffsetX, parentOffsetY) }
+                                            .size(
+                                                width = with(density) { ((right - left) * 2).toDp() },
+                                                height = with(density) { ((bottom - top) * 2).toDp() }
+                                            )
+                                    )
+                                }
+
                                 AsyncImage(
                                     model = ImageRequest.Builder(context)
                                         .data(tileUrl)
@@ -406,21 +503,16 @@ fun RideMapCanvas(
                             }
                         }
                         if (pan != Offset.Zero) {
-                            val rad = Math.toRadians(effectiveHeading.toDouble())
-                            val cosH = cos(rad).toFloat()
-                            val sinH = sin(rad).toFloat()
-
-                            val unrotatedDx = pan.x * cosH + pan.y * sinH
-                            val unrotatedDy = -pan.x * sinH + pan.y * cosH
-
-                            panOffsetX += unrotatedDx
-                            panOffsetY += unrotatedDy
+                            cameraController.pan(pan.x, pan.y, displayZoom, effectiveHeading, baseTileSizePx)
+                            val targetState = cameraController.state.value
+                            displayCenterLat = targetState.center.latitude.toFloat()
+                            displayCenterLng = targetState.center.longitude.toFloat()
                         }
                         cameraController.onUserGesture()
                         onFollowRiderChange(false)
                     }
                 }
-                .pointerInput(members) {
+                .pointerInput(members, amenities) {
                     detectTapGestures { tapOffset ->
                         var clickedRider: RiderMember? = null
                         for (member in members) {
@@ -431,7 +523,23 @@ fun RideMapCanvas(
                                 break
                             }
                         }
-                        onSelectRider(clickedRider)
+                        if (clickedRider != null) {
+                            onSelectRider(clickedRider)
+                            onSelectAmenity(null)
+                        } else {
+                            var clickedAmenity: com.example.data.amenities.AmenityEntity? = null
+                            val tapTargetRadius = with(density) { 24.dp.toPx() } // Minimum 48dp tap target
+                            for (amenity in amenities) {
+                                val pos = amenityScreenPositions[amenity.osmId] ?: continue
+                                val distance = (tapOffset - pos).getDistance()
+                                if (distance < tapTargetRadius) {
+                                    clickedAmenity = amenity
+                                    break
+                                }
+                            }
+                            onSelectAmenity(clickedAmenity)
+                            if (clickedAmenity != null) onSelectRider(null)
+                        }
                     }
                 }
         ) {
@@ -475,6 +583,88 @@ fun RideMapCanvas(
                     y = destRotated.y - 28f,
                     style = TextStyle(color = AmberPrimary, fontSize = 11.sp, fontWeight = FontWeight.Black)
                 )
+            }
+
+            // Draw Custom Google Maps Style Amenity Pins
+            amenityScreenPositions.clear()
+            for (amenity in amenities) {
+                val screenPos = latLngToRotatedScreen(LatLng(amenity.lat, amenity.lon))
+                amenityScreenPositions[amenity.osmId] = screenPos
+
+                if (screenPos.x < -100f || screenPos.x > canvasW + 100f ||
+                    screenPos.y < -100f || screenPos.y > canvasH + 100f) {
+                    continue
+                }
+
+                val isSelected = amenity.osmId == selectedAmenity?.osmId
+                val basePinSizeDp = when {
+                    displayZoom >= 17f -> 32.dp
+                    displayZoom >= 15f -> 28.dp
+                    displayZoom >= 13f -> 24.dp
+                    else -> 20.dp
+                }
+                val pinSizeDp = if (isSelected) 38.dp else basePinSizeDp
+                val pinSizePx = pinSizeDp.toPx()
+                val pinRadiusPx = pinSizePx / 2f
+                val tipHeightPx = 4.dp.toPx()
+                val categoryColor = AmenityIconConfig.getCategoryColor(amenity.type)
+
+                val cx = screenPos.x
+                val cy = screenPos.y - pinRadiusPx - tipHeightPx
+
+                // 1. Selected Focus Halo / Glow Ring
+                if (isSelected) {
+                    drawCircle(
+                        color = categoryColor.copy(alpha = 0.35f),
+                        radius = pinRadiusPx + 8.dp.toPx(),
+                        center = Offset(cx, cy)
+                    )
+                    drawCircle(
+                        color = Color.White,
+                        radius = pinRadiusPx + 4.dp.toPx(),
+                        center = Offset(cx, cy),
+                        style = Stroke(width = 2.5.dp.toPx())
+                    )
+                }
+
+                // 2. Base Drop Shadow
+                drawCircle(
+                    color = Color.Black.copy(alpha = 0.35f),
+                    radius = pinRadiusPx * 0.45f,
+                    center = Offset(screenPos.x, screenPos.y + 1.dp.toPx())
+                )
+
+                // 3. Teardrop Map Pin Body
+                val pinPath = Path().apply {
+                    moveTo(screenPos.x, screenPos.y)
+                    lineTo(cx + pinRadiusPx * 0.707f, cy + pinRadiusPx * 0.707f)
+                    arcTo(
+                        rect = androidx.compose.ui.geometry.Rect(cx - pinRadiusPx, cy - pinRadiusPx, cx + pinRadiusPx, cy + pinRadiusPx),
+                        startAngleDegrees = 45f,
+                        sweepAngleDegrees = 270f,
+                        forceMoveTo = false
+                    )
+                    lineTo(screenPos.x, screenPos.y)
+                    close()
+                }
+
+                drawPath(path = pinPath, color = categoryColor)
+                drawPath(path = pinPath, color = Color.White, style = Stroke(width = 1.8.dp.toPx()))
+
+                // 4. White Category Icon Glyph
+                val painter = categoryPainters[amenity.type] ?: categoryPainters[com.example.data.amenities.AmenityType.UNKNOWN]!!
+                val glyphSize = pinRadiusPx * 1.15f
+                drawContext.transform.translate(left = cx - glyphSize / 2f, top = cy - glyphSize / 2f)
+                try {
+                    with(painter) {
+                        draw(
+                            size = androidx.compose.ui.geometry.Size(glyphSize, glyphSize),
+                            colorFilter = ColorFilter.tint(Color.White)
+                        )
+                    }
+                } finally {
+                    drawContext.transform.translate(left = -(cx - glyphSize / 2f), top = -(cy - glyphSize / 2f))
+                }
             }
 
             // Draw Rider Markers at rotated screen positions
