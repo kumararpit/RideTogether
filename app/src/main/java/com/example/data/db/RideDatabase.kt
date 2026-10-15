@@ -7,11 +7,14 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
+import androidx.room.TypeConverters
+
 @Database(
     entities = [UserFeedback::class, CompletedRideEntity::class, com.example.data.amenities.AmenityEntity::class, com.example.data.amenities.AmenityQueryCacheEntity::class],
     version = 3,
     exportSchema = false
 )
+@TypeConverters(com.example.data.amenities.AmenityTypeConverter::class)
 abstract class RideDatabase : RoomDatabase() {
 
     abstract fun feedbackDao(): FeedbackDao

@@ -589,7 +589,6 @@ fun RideMapCanvas(
             amenityScreenPositions.clear()
             for (amenity in amenities) {
                 val screenPos = latLngToRotatedScreen(LatLng(amenity.lat, amenity.lon))
-                amenityScreenPositions[amenity.osmId] = screenPos
 
                 if (screenPos.x < -100f || screenPos.x > canvasW + 100f ||
                     screenPos.y < -100f || screenPos.y > canvasH + 100f) {
@@ -611,6 +610,9 @@ fun RideMapCanvas(
 
                 val cx = screenPos.x
                 val cy = screenPos.y - pinRadiusPx - tipHeightPx
+
+                // Save visible pin head center for hit-testing alignment
+                amenityScreenPositions[amenity.osmId] = Offset(cx, cy)
 
                 // 1. Selected Focus Halo / Glow Ring
                 if (isSelected) {

@@ -84,17 +84,27 @@ class AmenityRepository(private val database: RideDatabase) {
                 queryBuilder.append("node[\"amenity\"=\"cafe\"]($bbox);")
                 queryBuilder.append("way[\"amenity\"=\"cafe\"]($bbox);")
                 queryBuilder.append("node[\"shop\"=\"motorcycle_repair\"]($bbox);")
+                queryBuilder.append("way[\"shop\"=\"motorcycle_repair\"]($bbox);")
                 queryBuilder.append("node[\"amenity\"=\"motorcycle_repair\"]($bbox);")
+                queryBuilder.append("way[\"amenity\"=\"motorcycle_repair\"]($bbox);")
                 queryBuilder.append("node[\"highway\"=\"rest_area\"]($bbox);")
                 queryBuilder.append("way[\"highway\"=\"rest_area\"]($bbox);")
                 queryBuilder.append("node[\"shop\"=\"convenience\"]($bbox);")
+                queryBuilder.append("way[\"shop\"=\"convenience\"]($bbox);")
                 queryBuilder.append("node[\"shop\"=\"supermarket\"]($bbox);")
+                queryBuilder.append("way[\"shop\"=\"supermarket\"]($bbox);")
                 queryBuilder.append("node[\"tourism\"=\"hotel\"]($bbox);")
+                queryBuilder.append("way[\"tourism\"=\"hotel\"]($bbox);")
                 queryBuilder.append("node[\"tourism\"=\"motel\"]($bbox);")
+                queryBuilder.append("way[\"tourism\"=\"motel\"]($bbox);")
                 queryBuilder.append("node[\"amenity\"=\"restaurant\"]($bbox);")
+                queryBuilder.append("way[\"amenity\"=\"restaurant\"]($bbox);")
                 queryBuilder.append("node[\"amenity\"=\"fast_food\"]($bbox);")
+                queryBuilder.append("way[\"amenity\"=\"fast_food\"]($bbox);")
                 queryBuilder.append("node[\"amenity\"=\"toilets\"]($bbox);")
+                queryBuilder.append("way[\"amenity\"=\"toilets\"]($bbox);")
                 queryBuilder.append("node[\"tourism\"=\"viewpoint\"]($bbox);")
+                queryBuilder.append("way[\"tourism\"=\"viewpoint\"]($bbox);")
             }
             queryBuilder.append(");out center;")
             
@@ -157,6 +167,6 @@ class AmenityRepository(private val database: RideDatabase) {
                 }
             }
         }
-        return list
+        return list.distinctBy { it.osmId }
     }
 }
