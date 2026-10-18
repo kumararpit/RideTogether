@@ -100,6 +100,12 @@ Baseline snapshot: worktree branch starts from main `b7406b5` + a snapshot commi
 
 **Process note.** The two 540-px "wide" band crops (`d5_now_wide.png`, `rt9_wide.png`) contain zero exact-SlateDark900 pixels and are stricken from the defect-matrix evidence set; full-screen captures are primary. Measurement method: per-row fraction of pixels exactly RGB(12,16,23).
 
+**Probe record — 2026-10-19 session (instrumented build, pid 16392).**
+
+- Pass 1 (`/tmp/opencode/gma_d7c_00..19.png`, log `/tmp/opencode/d7_log_c.txt`): short-swipe follow-exit → ~15 s FREE → capture loop with recenter tap inside (between frames 06/07). Result: **no band**; max exact-SlateDark900 row fraction 0.02. Log confirms clean anchor flip 1104.0 → 1330.8 with contiguous rowsY at every logged composition; cXY fractional-drift values confirm per-frame recomposition was active through the transition.
+- Pass 2 (`/tmp/opencode/d7stress_1..6_{a..d}.png`, log `/tmp/opencode/d7_log_stress.txt`): 6× pan→recenter stress (24 captures). Result: **no band**; max fraction 0.022; 121 transition-log entries, all contiguous.
+- Interpretation: the reproduction trigger remains session-state-conditioned (historical captures occurred in an aged session with tile-load stalls). Two consecutive clean stress passes on the exact trigger class (pan→recenter) now stand. Per the no-fix-without-failing-coordinate rule: **no code change; D7 stays OPEN**. The instrumented RT-D7 logging remains in place intentionally while D7 is open (removal is backlog item P2).
+
 ## 6. Device-protocol continuity (for the executors of future tasks)
 
 - Device `adb -s fbe12520`; app `com.aistudio.ridetogether.vibe/com.example.MainActivity`; ride P3W5YP (Pune→Lonavala), rider ≈ 18.5968N 73.73E (`c17 = (92381.44, 58640.15)`); parked 0 km/h, hAcc 3 m.
