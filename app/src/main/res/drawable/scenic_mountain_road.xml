@@ -1,0 +1,85 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="200dp"
+    android:height="100dp"
+    android:viewportWidth="800"
+    android:viewportHeight="400">
+
+    <!-- Sunset Sky Gradient -->
+    <path
+        android:pathData="M0,0 H800 V250 H0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="400"
+                android:startY="0"
+                android:endX="400"
+                android:endY="250"
+                android:type="linear">
+                <item android:color="#211132" android:offset="0.0" />
+                <item android:color="#5C1D41" android:offset="0.35" />
+                <item android:color="#C14B32" android:offset="0.7" />
+                <item android:color="#E07A38" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Sun Glow -->
+    <path
+        android:pathData="M400,160 m-45,0 a45,45 0 1,0 90,0 a45,45 0 1,0 -90,0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="400"
+                android:startY="115"
+                android:endX="400"
+                android:endY="205"
+                android:type="linear">
+                <item android:color="#FFF1A8" android:offset="0.0" />
+                <item android:color="#FFB74D" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Distant Mountain Ridge -->
+    <path
+        android:fillColor="#3A1C3C"
+        android:pathData="M0,220 L60,180 L140,210 L220,160 L320,195 L400,150 L480,185 L580,140 L680,190 L760,165 L800,180 V280 H0 Z" />
+
+    <!-- Midground Mountain Ridge -->
+    <path
+        android:fillColor="#25162D"
+        android:pathData="M0,240 L100,195 L180,225 L280,175 L380,215 L490,170 L600,210 L700,180 L800,210 V320 H0 Z" />
+
+    <!-- Foreground Hills Left & Right -->
+    <path
+        android:fillColor="#15121E"
+        android:pathData="M0,260 L180,220 L350,260 L500,220 L650,250 L800,220 V400 H0 Z" />
+
+    <!-- Winding Mountain Highway -->
+    <path
+        android:fillColor="#2A2E39"
+        android:pathData="M380,245 C420,270 480,290 420,320 C360,350 200,340 100,400 H700 C580,360 480,340 500,310 C520,280 440,260 400,245 Z" />
+
+    <!-- Road Centerline / Highway Glow -->
+    <path
+        android:pathData="M390,245 C425,270 475,290 420,320 C360,350 210,340 110,400"
+        android:strokeColor="#FFB300"
+        android:strokeWidth="3"
+        android:strokeLineCap="round" />
+
+    <!-- Dark Vignette Foreground Bottom -->
+    <path
+        android:pathData="M0,320 H800 V400 H0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="400"
+                android:startY="320"
+                android:endX="400"
+                android:endY="400"
+                android:type="linear">
+                <item android:color="#00101318" android:offset="0.0" />
+                <item android:color="#E6101318" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+</vector>

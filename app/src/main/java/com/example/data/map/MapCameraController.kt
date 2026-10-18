@@ -34,6 +34,15 @@ class MapCameraController {
     private val _state = MutableStateFlow(MapCameraState())
     val state: StateFlow<MapCameraState> = _state.asStateFlow()
 
+    private var isUserZoomOverride: Boolean = false
+
+    // Latest motion context for the adaptive recenter framing (D5 fix, INV-A).
+    // Stored on EVERY location update — including non-FOLLOWING ticks that are
+    // otherwise skipped — so recenter() can compute the current follow framing
+    // even after the user has panned away and stopped feeding the camera.
+    private var lastSpeedKmh: Double = 0.0
+    private var lastDistanceToNextManeuverMeters: Double? = null
+
     fun setOrientationMode(mode: OrientationMode) {
         _state.value = _state.value.copy(orientationMode = mode)
     }
@@ -49,19 +58,28 @@ class MapCameraController {
 
     fun processLocation(location: LocationUpdate, distanceToNextManeuverMeters: Double? = null) {
         val currentState = _state.value
+        lastSpeedKmh = location.speedKmh
+        lastDistanceToNextManeuverMeters = distanceToNextManeuverMeters
         if (currentState.mode != MapCameraMode.FOLLOWING) return
 
         val speedKmh = location.speedKmh
         // Gate low-speed heading updates (< 5.4 km/h == 1.5 m/s)
-        val targetHeading = if (speedKmh >= 5.4 && location.headingDeg in 0f..360f) {
-            location.headingDeg
+        // Qualified Bearing: null heading means "no reliable bearing". It is
+        // TREATED AS MISSING — the previous heading is preserved. Never fabricate
+        // 0° (north) and never let non-finite/negative garbage rotate the map.
+        val targetHeading = if (speedKmh >= 5.4) {
+            location.headingDeg?.takeIf { it.isFinite() && it >= 0f }
+                ?: currentState.heading
         } else {
             currentState.heading
         }
 
-        // We don't interpolate heading here anymore. We set the raw target heading.
-        // The display layer's frame loop will handle interpolation.
-        val targetZoom = calculateAdaptiveZoom(speedKmh, distanceToNextManeuverMeters)
+        // Target zoom preserves user zoom override or calculates adaptive zoom
+        val targetZoom = if (isUserZoomOverride) {
+            currentState.zoom
+        } else {
+            calculateAdaptiveZoom(speedKmh, distanceToNextManeuverMeters)
+        }
 
         _state.value = currentState.copy(
             center = location.latLng,
@@ -101,12 +119,28 @@ class MapCameraController {
         )
     }
 
-    fun recenter(riderLocation: LatLng?, headingDeg: Float? = null) {
-        val newCenter = riderLocation ?: _state.value.center
-        val newHeading = headingDeg?.takeIf { it in 0f..360f } ?: _state.value.heading
-        _state.value = _state.value.copy(
+    /**
+     * Recenters the camera into FOLLOWING at the rider location.
+     *
+     * D5 fix (INV-A, Maps-consistent rule — see Phase 4 report, evidence E5):
+     * entering FOLLOWING replaces the user zoom override with the follow
+     * system's requested framing — [calculateAdaptiveZoom] over the LATEST
+     * motion context — never a hardcoded zoom constant. The old
+     * `zoom = 16f` write was the root cause of the recenter zoom-pop (the
+     * target jumped instantly while zoom/center/anchor glided on mismatched
+     * clocks). Boot/init may pin the framing exactly with [requestedZoom];
+     * that stays a single controller write (INV-E).
+     */
+    fun recenter(riderLocation: LatLng?, headingDeg: Float? = null, requestedZoom: Float? = null) {
+        val currentState = _state.value
+        val newCenter = riderLocation ?: currentState.center
+        val newHeading = headingDeg?.takeIf { it in 0f..360f } ?: currentState.heading
+        val targetZoom = requestedZoom
+            ?: calculateAdaptiveZoom(lastSpeedKmh, lastDistanceToNextManeuverMeters)
+        isUserZoomOverride = false
+        _state.value = currentState.copy(
             center = newCenter,
-            zoom = 16f,
+            zoom = targetZoom,
             heading = newHeading,
             mode = MapCameraMode.FOLLOWING,
             bounds = null
@@ -140,6 +174,7 @@ class MapCameraController {
         val centerLat = (minLat + maxLat) / 2.0
         val centerLng = (minLng + maxLng) / 2.0
 
+        isUserZoomOverride = false
         _state.value = _state.value.copy(
             center = LatLng(centerLat, centerLng),
             zoom = calculatedZoom,
@@ -151,7 +186,25 @@ class MapCameraController {
 
     fun setZoom(newZoom: Float) {
         val clampedZoom = newZoom.coerceIn(3f, 18f)
-        _state.value = _state.value.copy(zoom = clampedZoom, mode = MapCameraMode.FREE_EXPLORE)
+        isUserZoomOverride = true
+        _state.value = _state.value.copy(zoom = clampedZoom)
+    }
+
+    /**
+     * Pinch zoom outside FOLLOWING (FREE_EXPLORE / OVERVIEW): applies the new zoom
+     * AND moves the center so the map point under the gesture centroid stays there
+     * (center pre-computed from [ZoomAnchorMath.anchoredCenter] by the gesture layer).
+     * Explicitly switches to FREE_EXPLORE. FOLLOWING-mode pinch must use [setZoom],
+     * which never leaves follow mode.
+     */
+    fun setZoomFree(newZoom: Float, center: LatLng) {
+        isUserZoomOverride = true
+        _state.value = _state.value.copy(
+            zoom = newZoom.coerceIn(3f, 18f),
+            center = center,
+            mode = MapCameraMode.FREE_EXPLORE,
+            bounds = null
+        )
     }
 
     companion object {

@@ -15,7 +15,8 @@ data class CompletedRideEntity(
     val avgSpeedKmh: Double,
     val riderCount: Int,
     val completedAtMs: Long = System.currentTimeMillis(),
-    val hadEmergency: Boolean = false
+    val hadEmergency: Boolean = false,
+    val isImplausibleData: Boolean = false
 ) {
     val formattedDistance: String
         get() = String.format(java.util.Locale.getDefault(), "%.1f km", distanceMeters / 1000.0)

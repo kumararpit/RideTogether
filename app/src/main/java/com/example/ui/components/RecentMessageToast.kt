@@ -37,23 +37,32 @@ import kotlinx.coroutines.delay
 
 @Composable
 fun RecentMessageToast(
-    message: QuickMessage?,
+    messages: List<QuickMessage>,
     modifier: Modifier = Modifier
 ) {
-    var isVisible by remember { mutableStateOf(false) }
+    // Each message id is displayed exactly once on this device, sequentially — a rapid
+    // burst can no longer overwrite/drop an earlier message (Task 21 chat-delivery fix).
+    val shownIdsState = remember { androidx.compose.runtime.mutableStateOf(setOf<String>()) }
     var displayedMessage by remember { mutableStateOf<QuickMessage?>(null) }
 
-    LaunchedEffect(message?.id) {
-        if (message != null) {
-            displayedMessage = message
-            isVisible = true
+    // Chronological order (registry guarantee), unshown only. Recomputed each composition
+    // so arriving messages attach to the still-running sequential presentation loop.
+    val pendingMessages = messages.filter { it.id !in shownIdsState.value }
+
+    LaunchedEffect(messages) {
+        for (msg in pendingMessages) {
+            displayedMessage = msg
+            shownIdsState.value = shownIdsState.value + msg.id
             delay(5000L) // Show for 5 seconds
-            isVisible = false
+        }
+        // All pending messages presented — hide the toast until the next message arrives.
+        if (pendingMessages.isNotEmpty()) {
+            displayedMessage = null
         }
     }
 
     AnimatedVisibility(
-        visible = isVisible && displayedMessage != null,
+        visible = displayedMessage != null,
         enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
         exit = slideOutVertically(targetOffsetY = { -it }) + fadeOut(),
         modifier = modifier

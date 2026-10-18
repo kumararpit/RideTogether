@@ -27,6 +27,13 @@ class NavEngine {
     private var activeRoute: RouteResult? = null
     private var routeVersion = 1
 
+    /**
+     * Session latched arrival flag. Once the rider reaches the destination this stays true
+     * for the whole ride, so GPS overshoot around the finish pin can never re-trigger
+     * off-route recalculation loops. Cleared only on [reset] (new ride session).
+     */
+    private var hasArrivedAtDestination = false
+
     private var stepVertexIndices: List<Int> = emptyList()
     private var emaSpeedMps: Double = 0.0
 
@@ -37,13 +44,15 @@ class NavEngine {
     val lastAnnouncedManeuverIndex: StateFlow<Int> = _lastAnnouncedManeuverIndex.asStateFlow()
 
     fun setRoute(route: RouteResult) {
-        activeRoute = route
+        val realisticDurationSec = calculateRealisticPlannedDuration(route.totalDistanceMeters, route.totalDurationSeconds)
+        val adjustedRoute = route.copy(totalDurationSeconds = realisticDurationSec)
+        activeRoute = adjustedRoute
         routeVersion++
         _lastAnnouncedManeuverIndex.value = -1
         emaSpeedMps = 0.0
 
-        val points = route.coordinates
-        val steps = route.steps
+        val points = adjustedRoute.coordinates
+        val steps = adjustedRoute.steps
 
         // Map each navigation step to its corresponding vertex index in coordinates
         stepVertexIndices = computeStepVertexIndices(points, steps)
@@ -52,15 +61,15 @@ class NavEngine {
             val nextVertex = stepVertexIndices.getOrElse(1) { points.size - 1 }
             RouteGeometry.remainingDistanceMeters(0, points.take(nextVertex + 1))
         } else {
-            route.totalDistanceMeters
+            adjustedRoute.totalDistanceMeters
         }
 
         _progress.value = NavigationProgress(
             currentSegmentIndex = 0,
             currentManeuverIndex = 0,
             distanceToNextManeuverMeters = initialNextStepDist,
-            remainingRouteDistanceMeters = route.totalDistanceMeters,
-            remainingDurationSeconds = route.totalDurationSeconds,
+            remainingRouteDistanceMeters = adjustedRoute.totalDistanceMeters,
+            remainingDurationSeconds = adjustedRoute.totalDurationSeconds,
             isOffRoute = false,
             routeVersion = routeVersion,
             isArrived = false,
@@ -77,6 +86,32 @@ class NavEngine {
         val userLoc = location.latLng
         val prevProgress = _progress.value
         val isAccuracyReliable = location.accuracyMeters <= 30f
+
+        // 0. Arrival latch check — within 35 m of the final destination coordinate or
+        //    with <= 25 m of route remaining, permanently latch arrival.
+        val destination = points.last()
+        val distToDestinationMeters = userLoc.distanceTo(destination) * 1000.0
+        if (!hasArrivedAtDestination &&
+            (distToDestinationMeters <= 35.0 || prevProgress.remainingRouteDistanceMeters in 0.0..25.0)
+        ) {
+            hasArrivedAtDestination = true
+        }
+
+        if (hasArrivedAtDestination) {
+            // Hard latch: force terminal arrival state, suppress any off-route detection,
+            // and zero out all remaining distance/duration readouts.
+            val arrivedProgress = prevProgress.copy(
+                isArrived = true,
+                isOffRoute = false,
+                remainingRouteDistanceMeters = 0.0,
+                remainingDurationSeconds = 0.0,
+                distanceToNextManeuverMeters = 0.0,
+                isStaleGps = !isAccuracyReliable,
+                routeVersion = routeVersion
+            )
+            _progress.value = arrivedProgress
+            return arrivedProgress
+        }
 
         // 1. Off-route detection
         val distToPolylineM = RouteGeometry.distanceToPolylineMeters(userLoc, points)
@@ -164,13 +199,31 @@ class NavEngine {
         }
 
         val effectiveSpeedMps = if (emaSpeedMps >= 3.0) {
-            emaSpeedMps
+            emaSpeedMps.coerceIn(3.0, 25.0)
         } else {
             routeAvgSpeedMps
         }
 
-        val remDurationSec = if (effectiveSpeedMps > 0) remDistMeters / effectiveSpeedMps else route.totalDurationSeconds
+        var remDurationSec = if (remDistMeters <= 10.0) {
+            0.0
+        } else if (effectiveSpeedMps > 0) {
+            remDistMeters / effectiveSpeedMps
+        } else {
+            route.totalDurationSeconds
+        }
+
         val isArrived = remDistMeters <= 30.0 || (closestIdx >= points.size - 2 && remDistMeters <= 40.0)
+        if (isArrived) {
+            hasArrivedAtDestination = true
+            remDurationSec = 0.0
+        }
+
+        // Precise ETA Monotonicity Constraint:
+        // Apply monotonicity only while rider is confirmed stationary (speedKmh < 3.0),
+        // not arrived, and active route version is unchanged.
+        if (!isArrived && location.speedKmh < 3.0 && routeVersion == prevProgress.routeVersion && prevProgress.remainingDurationSeconds > 0.0) {
+            remDurationSec = maxOf(remDurationSec, prevProgress.remainingDurationSeconds)
+        }
 
         val newProgress = NavigationProgress(
             currentSegmentIndex = closestIdx,
@@ -242,8 +295,25 @@ class NavEngine {
         activeRoute = null
         routeVersion++
         emaSpeedMps = 0.0
+        hasArrivedAtDestination = false
         stepVertexIndices = emptyList()
         _lastAnnouncedManeuverIndex.value = -1
         _progress.value = NavigationProgress()
+    }
+
+    companion object {
+        /**
+         * Calculates a realistic motorcycle touring planned duration for a route.
+         * Raw OSRM car routing assumes ideal highway conditions (80-100 km/h) without traffic/intersections.
+         * For motorcycle touring on mixed urban/rural roads, realistic average speeds range 42--48 km/h (~11.6--13.3 m/s).
+         */
+        fun calculateRealisticPlannedDuration(distanceMeters: Double, rawDurationSeconds: Double): Double {
+            if (distanceMeters <= 0.0) return 0.0
+            val rawAvgSpeedMps = if (rawDurationSeconds > 0) distanceMeters / rawDurationSeconds else 12.5
+            // Clamp baseline motorcycle speed profile between 30 km/h (8.33 m/s) and 48 km/h (13.33 m/s)
+            val realisticSpeedMps = rawAvgSpeedMps.coerceIn(8.33, 13.33)
+            val calculatedSec = distanceMeters / realisticSpeedMps
+            return maxOf(rawDurationSeconds, calculatedSec)
+        }
     }
 }

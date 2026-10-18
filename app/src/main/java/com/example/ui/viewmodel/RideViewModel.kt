@@ -9,8 +9,8 @@ import com.example.data.firebase.AuthRepository
 import com.example.data.firebase.RideRepository
 import com.example.data.location.LocationTracker
 import com.example.data.location.OsrmRoutingService
-import com.example.data.location.PlaceSearchService
 import com.example.data.location.RouteGeometry
+import com.example.data.place.PhotonPlaceSearchRepository
 import com.example.data.model.LatLng
 import com.example.data.model.MemberStatus
 import com.example.data.model.QuickMessageType
@@ -23,6 +23,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import com.example.data.map.MapLighting
+import com.example.data.map.MapThemeController
+import com.example.data.map.MapThemeMode
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
@@ -43,9 +46,33 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
 
     val locationTracker = LocationTracker(application)
     val osrmRoutingService = OsrmRoutingService()
-    val placeSearchService = PlaceSearchService()
+
+    /**
+     * Photon-backed place search with Room persistence for recent selections.
+     * Shares the app's single Room instance; a DAO-backed repository keeps recent
+     * places reusable offline.
+     */
+    val placeSearchRepository = PhotonPlaceSearchRepository(
+        recentPlaceDao = com.example.data.db.RideDatabase
+            .getInstance(application)
+            .recentPlaceDao()
+    )
+
     val navEngine = com.example.data.location.NavEngine()
     val navAudioGuidance = com.example.data.location.NavAudioGuidance(application)
+
+    /**
+     * Task 18 — single owner of the resolved map lighting (AUTO/DAY/NIGHT override).
+     * The canvas renders from [mapLighting] and reports camera-context changes here;
+     * transitions are scheduled, never polled, and never reset map/nav state.
+     */
+    private val mapThemeController = MapThemeController(viewModelScope)
+    val mapThemeMode: StateFlow<MapThemeMode> = mapThemeController.mode
+    val mapLighting: StateFlow<MapLighting> = mapThemeController.lighting
+
+    fun setMapThemeMode(mode: MapThemeMode) = mapThemeController.setMode(mode)
+    fun onMapThemeResumed() = mapThemeController.onResumed()
+    fun onMapLightingContext(lat: Double, lng: Double) = mapThemeController.onCameraCenter(lat, lng)
 
     private var consecutiveOffRouteFixes = 0
     private var lastRerouteTimestampMs = 0L
@@ -91,6 +118,15 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     val members: StateFlow<List<RiderMember>> = repository.members
     val activeSos = repository.activeSos
     val recentMessage = repository.recentMessage
+
+    /**
+     * Bounded chronological group-message history (deduplicated by stable id) — each new
+     * id is presented exactly once by the toast, so rapid bursts are never overwritten.
+     */
+    val recentMessages = repository.recentMessages
+
+    /** `true` when the last group-message send exhausted all write attempts. */
+    val messageSendError = repository.messageSendError
     val currentRiderStatus = repository.currentRiderStatus
     val joinError = repository.joinError
 
@@ -159,6 +195,11 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     val completedRides: StateFlow<List<com.example.data.db.CompletedRideEntity>> = _completedRides.asStateFlow()
 
     private var currentRouteRideId: String? = null
+
+    /** Shared-completion handling must happen exactly once per ride (idempotency guard). */
+    private var sharedCompletionHandledRideId: String? = null
+    internal var sharedCompletionHandledCount: Int = 0
+        internal set
     private var routeRequestId = 0
 
     init {
@@ -180,6 +221,31 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
                 if (selId != null) {
                     _selectedRider.value = list.find { it.id == selId }
                 }
+            }
+        }
+
+        // Task 18 — feed the theme controller with validated location contexts
+        // (rider fix; route endpoints). Material-change dedupe happens in the controller,
+        // so frequent GPS updates do not recompute the lighting.
+        viewModelScope.launch {
+            repository.members.collect { members ->
+                val me = members.find { it.isCurrentUser } ?: return@collect
+                mapThemeController.onRiderLocation(
+                    lat = me.location.latitude,
+                    lng = me.location.longitude,
+                    accuracyMeters = me.accuracyMeters,
+                    fixAgeMillis = System.currentTimeMillis() - me.lastUpdatedMs
+                )
+            }
+        }
+        viewModelScope.launch {
+            repository.currentRide.collect { ride ->
+                mapThemeController.onRouteEndpoints(
+                    startLat = ride?.startLocation?.latitude,
+                    startLng = ride?.startLocation?.longitude,
+                    destLat = ride?.destinationLocation?.latitude,
+                    destLng = ride?.destinationLocation?.longitude
+                )
             }
         }
 
@@ -222,7 +288,14 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
                 if (ride != null) {
                     val isNewRide = (currentRouteRideId != ride.id)
                     val hasNoRoute = (_routeResult.value == null || _routeResult.value?.coordinates.isNullOrEmpty())
-                    if ((isNewRide || hasNoRoute) && ride.routePoints.isNotEmpty()) {
+
+                    // A completed/cancelled ride must not (re)enter navigation: setting a
+                    // route here would revive the nav engine purely from stale ride data.
+                    val routeEligible = ride.routePoints.isNotEmpty() &&
+                        ride.status != com.example.data.model.RideStatus.COMPLETED &&
+                        ride.status != com.example.data.model.RideStatus.CANCELLED
+
+                    if ((isNewRide || hasNoRoute) && routeEligible) {
                         currentRouteRideId = ride.id
                         val result = RouteResult(
                             coordinates = ride.routePoints,
@@ -234,37 +307,79 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
                         navEngine.setRoute(result)
                     }
 
+                    // Shared completion observed from the authoritative ride document —
+                    // every joined client runs the same once-per-ride terminal handling.
                     if (ride.status == com.example.data.model.RideStatus.COMPLETED) {
-                        val memberList = repository.members.value
-                        val existingRides = _completedRides.value
-                        if (existingRides.none { it.id == ride.id }) {
-                            try {
-                                val distMeters = if (ride.actualRecordedDistanceMeters > 0) ride.actualRecordedDistanceMeters else ride.totalDistanceMeters
-                                val durationSec = ride.totalDurationSeconds
-                                val avgSpeed = if (durationSec > 60 && distMeters > 500) ((distMeters / 1000.0) / (durationSec / 3600.0)) else 0.0
-
-                                val entity = com.example.data.db.CompletedRideEntity(
-                                    id = ride.id,
-                                    rideName = ride.name,
-                                    startLocationName = ride.startLocationName,
-                                    destinationName = ride.destinationName,
-                                    distanceMeters = distMeters,
-                                    durationSeconds = durationSec,
-                                    avgSpeedKmh = avgSpeed,
-                                    riderCount = memberList.size.coerceAtLeast(1),
-                                    completedAtMs = System.currentTimeMillis(),
-                                    hadEmergency = memberList.any { it.status == MemberStatus.EMERGENCY }
-                                )
-                                com.example.data.db.RideDatabase.getInstance(getApplication()).completedRideDao().insertRide(entity)
-                                android.util.Log.d("RideViewModel", "Saved completed ride ${ride.id} to local Room history for member")
-                            } catch (e: Exception) {
-                                android.util.Log.w("RideViewModel", "Failed auto-saving completed ride for member: ${e.message}")
-                            }
-                        }
+                        enterSharedCompletedState(ride.id)
                     }
                 }
             }
         }
+    }
+
+    /**
+     * Shared-completion reconciliation on any joined client (leader included, via the
+     * listener echo). Exactly once per ride id: preserves ride history, stops ride-scoped
+     * GPS/navigation/foreground-service work and moves to the established post-ride
+     * screen. Idempotent against repeated COMPLETED snapshots.
+     */
+    private fun enterSharedCompletedState(rideId: String) {
+        if (sharedCompletionHandledRideId == rideId) return
+        sharedCompletionHandledRideId = rideId
+        sharedCompletionHandledCount++
+
+        val ride = repository.currentRide.value
+        val memberList = repository.members.value
+        if (ride != null && _completedRides.value.none { it.id == ride.id }) {
+            viewModelScope.launch {
+                try {
+                    com.example.data.db.RideDatabase.getInstance(getApplication())
+                        .completedRideDao()
+                        .insertRide(buildCompletedRideEntity(ride, memberList))
+                    android.util.Log.d("RideViewModel", "Saved completed ride ${ride.id} to local Room history (shared completion)")
+                } catch (e: Exception) {
+                    android.util.Log.w("RideViewModel", "Failed auto-saving shared completed ride ${ride.id}: ${e.message}")
+                }
+            }
+        }
+
+        // Stop active navigation progression and ride-specific foreground work.
+        navEngine.reset()
+        com.example.data.location.RideLocationService.stopService(getApplication())
+        repository.onSharedRideCompleted(rideId)
+
+        // Established post-ride state (existing screen).
+        if (_currentScreen.value != AppScreen.RIDE_SUMMARY) {
+            _currentScreen.value = AppScreen.RIDE_SUMMARY
+        }
+        android.util.Log.d("RideViewModel", "Shared ride completion processed ride=$rideId (count=$sharedCompletionHandledCount)")
+    }
+
+    private fun buildCompletedRideEntity(
+        ride: com.example.data.model.Ride,
+        memberList: List<com.example.data.model.RiderMember>
+    ): com.example.data.db.CompletedRideEntity {
+        val distMeters = ride.finalSummaryDistanceMeters
+        // Use actual elapsed duration if available; fall back to planned OSRM duration.
+        val durationSec = if (ride.elapsedDurationSeconds > 0.0) ride.elapsedDurationSeconds else ride.totalDurationSeconds
+        val rawAvgSpeed = if (durationSec > 60 && distMeters > 500) ((distMeters / 1000.0) / (durationSec / 3600.0)) else 0.0
+        // Implausible speed guard: motorcycles do not exceed 250 km/h; treat higher as data error.
+        val avgSpeed = if (rawAvgSpeed in 0.0..250.0) rawAvgSpeed else 0.0
+        if (rawAvgSpeed > 250.0) {
+            android.util.Log.w("RideViewModel", "Implausible avg speed $rawAvgSpeed km/h for ride ${ride.id}: distMeters=$distMeters durationSec=$durationSec — saving 0.0")
+        }
+        return com.example.data.db.CompletedRideEntity(
+            id = ride.id,
+            rideName = ride.name,
+            startLocationName = ride.startLocationName,
+            destinationName = ride.destinationName,
+            distanceMeters = distMeters,
+            durationSeconds = durationSec,
+            avgSpeedKmh = avgSpeed,
+            riderCount = memberList.size.coerceAtLeast(1),
+            completedAtMs = System.currentTimeMillis(),
+            hadEmergency = memberList.any { it.status == MemberStatus.EMERGENCY }
+        )
     }
 
     fun signInWithGoogle(context: android.content.Context) {
@@ -298,11 +413,15 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
 
     fun rejoinActiveRide() {
         val ride = currentRide.value ?: return
-        com.example.data.location.RideLocationService.startService(getApplication())
-        if (ride.status == com.example.data.model.RideStatus.ACTIVE) {
-            _currentScreen.value = AppScreen.LIVE_RIDE
-        } else {
-            _currentScreen.value = AppScreen.RIDE_LOBBY
+        // A completed ride must never be resumed "accidentally" after app restart/rejoin:
+        // the terminal shared state routes back to the post-ride screen instead.
+        when (ride.status) {
+            com.example.data.model.RideStatus.ACTIVE -> {
+                com.example.data.location.RideLocationService.startService(getApplication())
+                _currentScreen.value = AppScreen.LIVE_RIDE
+            }
+            com.example.data.model.RideStatus.COMPLETED -> _currentScreen.value = AppScreen.RIDE_SUMMARY
+            else -> _currentScreen.value = AppScreen.RIDE_LOBBY
         }
     }
 
@@ -320,6 +439,13 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         // Adaptive Off-Route Detection
+        // Once the nav engine latches arrival, never count off-route fixes or trigger
+        // rerouting — GPS overshoot past the finish pin must not restart a new route loop.
+        if (navProg.isArrived) {
+            if (consecutiveOffRouteFixes > 0) consecutiveOffRouteFixes = 0
+            return
+        }
+
         val accuracy = locUpdate.accuracyMeters
         val points = _routeResult.value?.coordinates ?: currentRide.value?.routePoints
         if (accuracy <= 30f && !points.isNullOrEmpty()) {
@@ -370,9 +496,23 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         startCoords: LatLng? = null,
         destCoords: LatLng? = null
     ) {
-        val userLoc = locationTracker.currentLocation.value?.latLng ?: LatLng(18.5204, 73.8567)
-        val resolvedStart = startCoords ?: userLoc
-        val resolvedDest = destCoords ?: LatLng(resolvedStart.latitude + 0.23, resolvedStart.longitude - 0.45)
+        // Validate incoming coordinates: non-finite or out-of-range values are
+        // rejected rather than forwarded to Firestore/OSRM.
+        fun usableCoords(coords: LatLng?): LatLng? =
+            coords?.takeIf {
+                it.latitude.isFinite() && it.longitude.isFinite() &&
+                    it.latitude in -90.0..90.0 && it.longitude in -180.0..180.0
+            }
+
+        val resolvedStart = usableCoords(startCoords)
+            ?: locationTracker.currentLocation.value?.latLng?.takeIf {
+                it.latitude.isFinite() && it.longitude.isFinite() &&
+                    it.latitude in -90.0..90.0 && it.longitude in -180.0..180.0
+            }
+            ?: LatLng(18.5204, 73.8567)
+        // Existing destination fallback preserved for legacy call paths; the
+        // Create-Ride UI now requires an explicit destination selection.
+        val resolvedDest = usableCoords(destCoords) ?: LatLng(resolvedStart.latitude + 0.23, resolvedStart.longitude - 0.45)
 
         viewModelScope.launch {
             try {
@@ -503,6 +643,10 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
     fun startRide() {
         consecutiveOffRouteFixes = 0
         lastRerouteTimestampMs = 0L
+        // Lock the camera straight into FOLLOWING mode at navigation zoom so the
+        // map never flashes into Free-Pan route overview at ride start.
+        _isFollowRiderMode.value = true
+        navEngine.reset() // clear any stale arrival latch from a previous session
         repository.startRide()
         com.example.data.location.RideLocationService.startService(getApplication())
         _currentScreen.value = AppScreen.LIVE_RIDE
@@ -512,35 +656,36 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
         val ride = currentRide.value
         val memberList = members.value
         if (ride != null) {
-            val distMeters = if (ride.actualRecordedDistanceMeters > 0) ride.actualRecordedDistanceMeters else ride.totalDistanceMeters
-            val durationSec = ride.totalDurationSeconds
-            val avgSpeed = if (durationSec > 60 && distMeters > 500) ((distMeters / 1000.0) / (durationSec / 3600.0)) else 0.0
+            saveLeaderCompletedRideSummary(ride, memberList)
+        }
+        com.example.data.location.RideLocationService.stopService(getApplication())
+        _currentScreen.value = AppScreen.RIDE_SUMMARY
+        viewModelScope.launch {
+            val result = repository.endRide()
+            if (result.isFailure) {
+                android.util.Log.w(
+                    "RideViewModel",
+                    "Shared completion write failed for leader (ride=${ride?.id}): ${result.exceptionOrNull()?.message}"
+                )
+            }
+        }
+    }
 
+    private fun saveLeaderCompletedRideSummary(
+        ride: com.example.data.model.Ride,
+        memberList: List<com.example.data.model.RiderMember>
+    ) {
+        if (_completedRides.value.none { it.id == ride.id }) {
             viewModelScope.launch {
                 try {
-                    val entity = com.example.data.db.CompletedRideEntity(
-                        id = ride.id,
-                        rideName = ride.name,
-                        startLocationName = ride.startLocationName,
-                        destinationName = ride.destinationName,
-                        distanceMeters = distMeters,
-                        durationSeconds = durationSec,
-                        avgSpeedKmh = avgSpeed,
-                        riderCount = memberList.size,
-                        completedAtMs = System.currentTimeMillis(),
-                        hadEmergency = memberList.any { it.status == MemberStatus.EMERGENCY }
-                    )
-                    com.example.data.db.RideDatabase.getInstance(getApplication()).completedRideDao().insertRide(entity)
+                    com.example.data.db.RideDatabase.getInstance(getApplication())
+                        .completedRideDao()
+                        .insertRide(buildCompletedRideEntity(ride, memberList))
                 } catch (e: Exception) {
                     android.util.Log.w("RideViewModel", "Error saving completed ride to Room: ${e.message}")
                 }
             }
         }
-        com.example.data.location.RideLocationService.stopService(getApplication())
-        viewModelScope.launch {
-            repository.endRide()
-        }
-        _currentScreen.value = AppScreen.RIDE_SUMMARY
     }
 
     fun leaveRide() {
@@ -567,6 +712,11 @@ class RideViewModel(application: Application) : AndroidViewModel(application) {
 
     fun acknowledgeSos(sosId: String) {
         repository.acknowledgeSos(sosId)
+    }
+
+    /** Member-side per-device removal of the SOS popup (does not resolve the emergency). */
+    fun dismissSosBanner() {
+        repository.dismissSosBanner()
     }
 
     fun resolveSos() {

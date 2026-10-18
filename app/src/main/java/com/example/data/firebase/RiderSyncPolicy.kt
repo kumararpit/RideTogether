@@ -153,7 +153,7 @@ object RiderSyncPolicy {
         defaultLat: Double,
         defaultLng: Double,
         speedKmh: Double,
-        headingDeg: Float,
+        headingDeg: Float?,
         accuracyMeters: Float,
         sequenceNumber: Long,
         rawLastUpdatedMs: Long?,

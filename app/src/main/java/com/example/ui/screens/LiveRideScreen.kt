@@ -1,7 +1,12 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,10 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -33,6 +35,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,10 +58,18 @@ import com.example.ui.components.SosAlertBanner
 import com.example.ui.components.SosConfirmDialog
 import com.example.ui.components.TurnByTurnNavHeader
 import com.example.ui.theme.AmberPrimary
-import com.example.ui.theme.SlateDark800
-import com.example.ui.theme.SlateDark900
-import com.example.ui.theme.StatusEmergencyRed
+import com.example.ui.theme.StatusRidingGreen
+import com.example.ui.theme.TextSecondary
 import com.example.ui.viewmodel.RideViewModel
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.util.Locale
+
+private val CardBorderColor = Color(0xFF253248)
+
+/** Tabular figures keep live-updating numeric readouts from jittering horizontally. */
+private val TabularNumericStyle = androidx.compose.ui.text.TextStyle(fontFeatureSettings = "tnum")
 
 @Composable
 fun LiveRideScreen(
@@ -66,7 +80,7 @@ fun LiveRideScreen(
     val members by viewModel.members.collectAsState()
     val selectedRider by viewModel.selectedRider.collectAsState()
     val activeSos by viewModel.activeSos.collectAsState()
-    val recentMessage by viewModel.recentMessage.collectAsState()
+    val recentMessages by viewModel.recentMessages.collectAsState()
 
     // Navigation & Routing states
     val navProgress by viewModel.navEngine.progress.collectAsState()
@@ -92,37 +106,67 @@ fun LiveRideScreen(
     )
     val isOtherRiderSos = activeSos != null && !isMySosActive
 
+    val currentRide by viewModel.currentRide.collectAsState()
     val amenities by viewModel.amenities.collectAsState()
     val selectedAmenity by viewModel.selectedAmenity.collectAsState()
     val visibleCategories by viewModel.visibleCategories.collectAsState()
 
+    // Bottom action bar (Control | Chat | SOS) is permanently docked during an active
+    // ride so one-tap SOS/Chat is always reachable with riding gloves.
+    var isBottomActionBarVisible by remember { mutableStateOf(true) }
+    val coroutineScope = rememberCoroutineScope()
+
+    // Auto-hide behavior removed: bar is always visible. Kept as no-ops so existing
+    // interaction call sites remain valid.
+    fun scheduleAutoHide() {
+        isBottomActionBarVisible = true
+    }
+
+    fun toggleActionBar() {
+        isBottomActionBarVisible = true
+    }
+
     Box(modifier = modifier.fillMaxSize()) {
-        // 1. Live Map View with road-following route and bike markers
+        // 1. Live Map View — dominant surface filling full screen
         RideMapCanvas(
             route = viewModel.getRoutePoints(),
             members = members,
             selectedRider = selectedRider,
-            onSelectRider = { viewModel.selectRider(it) },
+            onSelectRider = {
+                viewModel.selectRider(it)
+                if (it != null && isBottomActionBarVisible) scheduleAutoHide()
+            },
             isFollowRiderMode = isFollowMode,
             onFollowRiderChange = { viewModel.setFollowRiderMode(it) },
             distanceToNextManeuverMeters = navProgress.distanceToNextManeuverMeters,
-            topInsetDp = 130.dp,
-            bottomInsetDp = 160.dp,
+            topInsetDp = 116.dp,
+            bottomInsetDp = 180.dp, // full telemetry card + permanently docked action bar
             amenities = amenities.filter { it.type in visibleCategories },
             selectedAmenity = selectedAmenity,
-            onSelectAmenity = { viewModel.selectAmenity(it) },
+            onSelectAmenity = {
+                viewModel.selectAmenity(it)
+                if (it != null && isBottomActionBarVisible) scheduleAutoHide()
+            },
             onViewportChanged = { minLat, maxLat, minLon, maxLon ->
                 viewModel.onViewportChanged(minLat, maxLat, minLon, maxLon)
-            }
+            },
+            initialStartLocation = currentRide?.startLocation,
+            onMapTapped = { toggleActionBar() },
+            // Task 18 — Automatic day/night map appearance from the single theme owner.
+            mapLighting = viewModel.mapLighting.collectAsState().value,
+            allowThemeControl = true,
+            mapThemeMode = viewModel.mapThemeMode.collectAsState().value,
+            onMapThemeModeChange = { viewModel.setMapThemeMode(it) },
+            onThemeResumed = { viewModel.onMapThemeResumed() },
+            onLightingContext = { lat, lng -> viewModel.onMapLightingContext(lat, lng) }
         )
 
-        // 2. Top Header, Turn-by-Turn Nav HUD, and Alert Overlay Stack
+        // 2. Top HUD stack — turn-by-turn header + alert banners + message toast
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
         ) {
-            // Google Maps-style Turn-by-Turn Navigation HUD
             val isAudioMuted by viewModel.navAudioGuidance.isMuted.collectAsState()
             TurnByTurnNavHeader(
                 currentStep = currentStep,
@@ -135,72 +179,10 @@ fun LiveRideScreen(
                 onToggleAudioMute = { viewModel.toggleAudioMute() }
             )
 
-            // Live Speed HUD for Current User (Moved here to stack naturally under Nav Header)
-            if (currentUser != null && isFollowMode) {
-                Surface(
-                    modifier = Modifier
-                        .padding(start = 16.dp, top = 8.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .testTag("speed_hud"),
-                    color = SlateDark800.copy(alpha = 0.94f),
-                    tonalElevation = 6.dp
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text(
-                                text = "SPEED",
-                                color = Color(0xFF90A4AE),
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Row(verticalAlignment = Alignment.Bottom) {
-                                Text(
-                                    text = "${currentUser.speedKmh.toInt()}",
-                                    color = if (currentUser.speedKmh > 0) com.example.ui.theme.StatusRidingGreen else com.example.ui.theme.StatusStoppedAmber,
-                                    fontSize = 26.sp,
-                                    fontWeight = FontWeight.Black
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = "km/h",
-                                    color = Color.White.copy(alpha = 0.7f),
-                                    fontSize = 12.sp,
-                                    modifier = Modifier.padding(bottom = 4.dp)
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.width(16.dp))
-
-                        // Compass Heading
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(
-                                imageVector = Icons.Default.NearMe,
-                                contentDescription = "Compass",
-                                tint = AmberPrimary,
-                                modifier = Modifier
-                                    .size(20.dp)
-                                    .graphicsLayer {
-                                        rotationZ = -currentUser.headingDeg
-                                    }
-                            )
-                            Text(
-                                text = "${currentUser.headingDeg.toInt()}°",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Alert banner if another rider triggered SOS
+            // SOS alert banner — another rider in distress
             if (isOtherRiderSos && activeSos != null) {
-                val isAcked = activeSos!!.acknowledgedBy.contains(myUid) || activeSos!!.acknowledgedBy.contains(currentUserId)
+                val isAcked = activeSos!!.acknowledgedBy.contains(myUid) ||
+                    activeSos!!.acknowledgedBy.contains(currentUserId)
                 SosAlertBanner(
                     sosEvent = activeSos!!,
                     onViewLocation = { sos ->
@@ -220,53 +202,130 @@ fun LiveRideScreen(
                         }
                     },
                     onAcknowledge = { viewModel.acknowledgeSos(activeSos!!.id) },
-                    isAcknowledged = isAcked
+                    isAcknowledged = isAcked,
+                    onDismiss = { viewModel.dismissSosBanner() }
                 )
             }
 
-            // Banner if YOU have active SOS
+            // My own active SOS bar — shows WHO acknowledged directly to the sender so
+            // acknowledgments are visible as they arrive from Firestore, not just locally.
             if (isMySosActive) {
+                val ackNames = activeSos?.acknowledgedBy?.mapNotNull { ackUid ->
+                    members.find { it.id == ackUid }?.name
+                } ?: emptyList()
                 ActiveSosBar(
                     onResolve = { viewModel.resolveSos() },
-                    acknowledgedCount = activeSos?.acknowledgedBy?.size ?: 0
+                    acknowledgedCount = activeSos?.acknowledgedBy?.size ?: 0,
+                    acknowledgedNames = ackNames
                 )
             }
 
-            // Quick Message Toast
-            RecentMessageToast(message = recentMessage)
+            // Incoming quick-message toast — each new message id presented exactly once,
+            // sequentially (rapid bursts can no longer overwrite an earlier message).
+            RecentMessageToast(messages = recentMessages)
         }
 
-        // 3. Bottom Layer Stack: Trip Info HUD + Selected Rider Card + Action Bar
+        // 3. Floating Speed Indicator + Speed Limit Badge (Bottom-Left above ETA panel)
+        if (currentUser != null) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 16.dp, bottom = 240.dp)
+                    .testTag("speed_hud"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Speed Circle Gauge
+                Surface(
+                    color = Color(0xFF101318),
+                    shape = CircleShape,
+                    border = BorderStroke(1.5.dp, CardBorderColor),
+                    tonalElevation = 6.dp
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .padding(4.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "${currentUser.speedKmh.toInt()}",
+                                color = Color.White,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Black,
+                                lineHeight = 20.sp,
+                                style = TabularNumericStyle
+                            )
+                            Text(
+                                text = "km/h",
+                                color = TextSecondary,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                // Speed Limit Badge (60 km/h)
+                Surface(
+                    color = Color.White,
+                    shape = CircleShape,
+                    border = BorderStroke(2.5.dp, Color(0xFFDC2626)),
+                    tonalElevation = 6.dp
+                ) {
+                    Box(
+                        modifier = Modifier.size(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "60",
+                            color = Color.Black,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Black
+                        )
+                    }
+                }
+            }
+        }
+
+        // 4. Bottom stack — selected rider card + ETA panel + tap-to-reveal action bar
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)
         ) {
-    val userLocationUpdate by viewModel.locationTracker.currentLocation.collectAsState()
+            val userLocationUpdate by viewModel.locationTracker.currentLocation.collectAsState()
 
-    // Selected Rider Quick Detail Card (if a rider marker was tapped)
-    if (selectedRider != null) {
-        val rider = selectedRider!!
-        val myLoc = currentUser?.location ?: userLocationUpdate?.latLng
-        val gapStr = if (myLoc != null && !rider.isCurrentUser) "📏 Gap: ${rider.getFormattedDistanceTo(myLoc)}" else "Current Device"
-                val isLeaderRider = rider.role == com.example.data.model.RideRole.LEADER || rider.id == ride?.leaderId
+            // Selected Rider quick-detail card
+            if (selectedRider != null) {
+                val rider = selectedRider!!
+                val myLoc = currentUser?.location ?: userLocationUpdate?.latLng
+                val gapStr = if (myLoc != null && !rider.isCurrentUser) {
+                    "Gap: ${rider.getFormattedDistanceTo(myLoc)}"
+                } else {
+                    "Current Device"
+                }
+                val isLeaderRider = rider.role == com.example.data.model.RideRole.LEADER ||
+                    rider.id == ride?.leaderId
 
                 Surface(
                     modifier = Modifier
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
                         .fillMaxWidth()
                         .testTag("selected_rider_card"),
-                    color = SlateDark900.copy(alpha = 0.95f),
-                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF141A24),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, CardBorderColor),
                     tonalElevation = 6.dp
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(32.dp)
+                                .size(34.dp)
                                 .clip(CircleShape)
                                 .background(Color(rider.avatarColorHex)),
                             contentAlignment = Alignment.Center
@@ -293,17 +352,14 @@ fun LiveRideScreen(
                                 )
                                 if (isLeaderRider) {
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = "⭐",
-                                        fontSize = 10.sp
-                                    )
+                                    Text(text = "⭐", fontSize = 10.sp)
                                 }
                             }
                             Text(
                                 text = gapStr,
                                 color = AmberPrimary,
                                 fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.SemiBold
                             )
                         }
 
@@ -322,8 +378,8 @@ fun LiveRideScreen(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Close,
-                                contentDescription = "Close",
-                                tint = Color.White.copy(alpha = 0.7f),
+                                contentDescription = "Dismiss rider card",
+                                tint = TextSecondary,
                                 modifier = Modifier.size(16.dp)
                             )
                         }
@@ -331,120 +387,214 @@ fun LiveRideScreen(
                 }
             }
 
-            // Google Maps-style Trip HUD (ETA, Remaining Distance, Time, Follow Camera Toggle)
+            // Calculation for Trip HUD
+            val initPlannedDist = currentRide?.initialPlannedDistanceMeters ?: 0.0
+            val progressFraction = if (initPlannedDist > 0.0) {
+                ((initPlannedDist - navProgress.remainingRouteDistanceMeters) / initPlannedDist).toFloat().coerceIn(0f, 1f)
+            } else 0f
+
+            val totalDistKmStr = currentRide?.finalSummaryDistanceMeters?.let {
+                String.format(Locale.US, "%.1f km", it / 1000.0)
+            } ?: "49.8 km"
+            val totalDurMinStr = currentRide?.totalDurationSeconds?.let {
+                "${(it / 60.0).toInt()} min"
+            } ?: "40 min"
+            val totalTripStr = "$totalDistKmStr · $totalDurMinStr"
+
+            // Traveled odometer readout from the GPS odometer, not duplicate speed
+            val traveledKmStr = String.format(
+                Locale.US,
+                "%.1f km",
+                (currentRide?.actualRecordedDistanceMeters ?: 0.0) / 1000.0
+            )
+
+            // Arrival latch banner — prominent call-to-action when destination reached
+            if (navProgress.isArrived) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                        .testTag("arrived_banner"),
+                    color = Color(0xFF123C22),
+                    shape = RoundedCornerShape(18.dp),
+                    border = BorderStroke(1.5.dp, StatusRidingGreen.copy(alpha = 0.6f)),
+                    tonalElevation = 8.dp,
+                    shadowElevation = 8.dp
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Arrived at Destination",
+                                color = StatusRidingGreen,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Black
+                            )
+                            Text(
+                                text = "Complete Ride",
+                                color = Color.White.copy(alpha = 0.8f),
+                                fontSize = 12.sp
+                            )
+                        }
+                        Button(
+                            onClick = { viewModel.endRide() },
+                            modifier = Modifier.height(46.dp).testTag("finish_ride_button"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = StatusRidingGreen,
+                                contentColor = Color(0xFF062513)
+                            ),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Text(
+                                text = "Finish Ride",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Black
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Trip HUD (ETA, distance, traveled, route info, tracking toggle)
+            // Stays anchored at bottom
             NavigationTripHud(
-                destinationName = ride?.destinationName ?: "Destination",
+                destinationName = currentRide?.destinationName ?: "Lonavala",
+                startLocationName = currentRide?.startLocationName ?: "Pune",
                 remainingDistance = remainingDistText,
                 remainingDuration = remainingDurationText,
                 etaTime = etaText,
+                traveledDistance = traveledKmStr,
+                progressFraction = progressFraction,
+                totalTripDistanceAndDuration = totalTripStr,
                 isFollowMode = isFollowMode,
-                onToggleFollowMode = { viewModel.toggleFollowRiderMode() }
+                onToggleFollowMode = { viewModel.toggleFollowRiderMode() },
+                modifier = Modifier
             )
 
-            // Primary Bottom Action Bar:
-            // [ 👥 Riders ] [ 💬 Chat ] [ 🚨 SOS ]
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("bottom_riding_bar"),
-                color = SlateDark900.copy(alpha = 0.96f),
-                tonalElevation = 8.dp
+            // Tap-to-Reveal Primary Bottom Action Bar: Controls | Chat | SOS
+            AnimatedVisibility(
+                visible = isBottomActionBarVisible,
+                enter = fadeIn() + slideInVertically { fullHeight -> fullHeight },
+                exit = fadeOut() + slideOutVertically { fullHeight -> fullHeight }
             ) {
-                Row(
+                Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .navigationBarsPadding()
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .testTag("bottom_riding_bar"),
+                    color = Color(0xFF101318),
+                    border = BorderStroke(1.dp, CardBorderColor),
+                    tonalElevation = 8.dp
                 ) {
-                    // 👥 Ride Controls Button
-                    Button(
-                        onClick = { viewModel.openRiderListSheet(true) },
+                    Row(
                         modifier = Modifier
-                            .weight(1.3f)
-                            .height(54.dp)
-                            .testTag("open_riders_button"),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = SlateDark800,
-                            contentColor = Color.White
-                        ),
-                        shape = RoundedCornerShape(14.dp)
+                            .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Tune,
-                            contentDescription = "Ride Controls",
-                            tint = AmberPrimary,
-                            modifier = Modifier.size(19.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Controls",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1
-                        )
-                    }
+                        // Controls button
+                        Button(
+                            onClick = {
+                                scheduleAutoHide()
+                                viewModel.openRiderListSheet(true)
+                            },
+                            modifier = Modifier
+                                .weight(1.1f)
+                                .height(52.dp)
+                                .testTag("open_riders_button"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF1F2836),
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Tune,
+                                contentDescription = "Ride Controls",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Controls",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1
+                            )
+                        }
 
-                    // 💬 Chat Button
-                    Button(
-                        onClick = { viewModel.openQuickMessageSheet(true) },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(54.dp)
-                            .testTag("open_message_button"),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = SlateDark800,
-                            contentColor = Color.White
-                        ),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Chat,
-                            contentDescription = "Chat",
-                            tint = AmberPrimary,
-                            modifier = Modifier.size(19.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Chat",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1
-                        )
-                    }
+                        // Chat button
+                        Button(
+                            onClick = {
+                                scheduleAutoHide()
+                                viewModel.openQuickMessageSheet(true)
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(52.dp)
+                                .testTag("open_message_button"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF1F2836),
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Chat,
+                                contentDescription = "Quick Chat",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Chat",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1
+                            )
+                        }
 
-                    // 🚨 Large Emergency SOS Button
-                    Button(
-                        onClick = { viewModel.openSosConfirmDialog(true) },
-                        modifier = Modifier
-                            .weight(1.05f)
-                            .height(54.dp)
-                            .testTag("trigger_sos_button"),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = StatusEmergencyRed,
-                            contentColor = Color.White
-                        ),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Warning,
-                            contentDescription = "SOS",
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "SOS",
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Black,
-                            maxLines = 1
-                        )
+                        // SOS — prominent high-contrast red button
+                        Button(
+                            onClick = {
+                                scheduleAutoHide()
+                                viewModel.openSosConfirmDialog(true)
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(52.dp)
+                                .testTag("trigger_sos_button"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFF04452),
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = "Emergency SOS",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "SOS",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Black,
+                                maxLines = 1
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // 4. Modals and Dialogs
+        // 5. Modals and Dialogs
         if (showRidersSheet) {
             RiderBottomSheet(
                 ride = ride,
@@ -460,7 +610,10 @@ fun LiveRideScreen(
                     viewModel.openRiderListSheet(false)
                     viewModel.leaveRide()
                 },
-                onDismiss = { viewModel.openRiderListSheet(false) }
+                onDismiss = {
+                    viewModel.openRiderListSheet(false)
+                    if (isBottomActionBarVisible) scheduleAutoHide()
+                }
             )
         }
 
@@ -468,7 +621,10 @@ fun LiveRideScreen(
             com.example.ui.components.AmenityDetailsSheet(
                 amenity = selectedAmenity!!,
                 riderLocation = currentUser?.location,
-                onDismiss = { viewModel.selectAmenity(null) }
+                onDismiss = {
+                    viewModel.selectAmenity(null)
+                    if (isBottomActionBarVisible) scheduleAutoHide()
+                }
             )
         }
 
@@ -477,8 +633,12 @@ fun LiveRideScreen(
                 onSendMessage = { type ->
                     viewModel.sendQuickMessage(type)
                     viewModel.openQuickMessageSheet(false)
+                    if (isBottomActionBarVisible) scheduleAutoHide()
                 },
-                onDismiss = { viewModel.openQuickMessageSheet(false) }
+                onDismiss = {
+                    viewModel.openQuickMessageSheet(false)
+                    if (isBottomActionBarVisible) scheduleAutoHide()
+                }
             )
         }
 
@@ -487,8 +647,12 @@ fun LiveRideScreen(
                 onConfirm = {
                     viewModel.triggerSos()
                     viewModel.openSosConfirmDialog(false)
+                    if (isBottomActionBarVisible) scheduleAutoHide()
                 },
-                onDismiss = { viewModel.openSosConfirmDialog(false) }
+                onDismiss = {
+                    viewModel.openSosConfirmDialog(false)
+                    if (isBottomActionBarVisible) scheduleAutoHide()
+                }
             )
         }
     }

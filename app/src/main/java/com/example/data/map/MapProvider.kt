@@ -103,6 +103,27 @@ data class TileRange(
     val maxY: Int
 )
 
+/**
+ * Describes an ancestor tile at a lower zoom that geometrically encloses the
+ * requested tile, along with the sub-quadrant of the ancestor bitmap that
+ * corresponds to the child tile. Used for multi-level tile fallback rendering.
+ */
+data class TileAncestor(
+    val zoom: Int,
+    val x: Int,
+    val y: Int,
+    val deltaZ: Int,
+    val subX: Int,
+    val subY: Int
+) {
+    /** Pixel size (within the 256x256 ancestor bitmap) of the sub-quadrant covering the child tile. */
+    val srcSize: Int get() = 256 shr deltaZ
+
+    /** Pixel offset of the sub-quadrant inside the ancestor bitmap. */
+    val srcOffsetX: Int get() = subX * srcSize
+    val srcOffsetY: Int get() = subY * srcSize
+}
+
 object TileMath {
     // Compliant User-Agent header per OpenStreetMap Tile Usage Policy
     const val OSM_USER_AGENT = "RideTogether-Android-Personal-App/1.0 (arpitkumar1101@gmail.com)"
@@ -139,6 +160,35 @@ object TileMath {
         val subdomains = listOf("a", "b", "c")
         val sub = subdomains[Math.floorMod(x + y, subdomains.size)]
         return "https://$sub.tile.opentopomap.org/$zoom/$x/$y.png"
+    }
+
+    /**
+     * Resolves the ancestor tile [deltaZ] zoom levels above [tileZoom] whose sub-quadrant
+     * geometrically encodes the requested child tile (tileZoom, x, y).
+     * Returns null when the resulting zoom would fall below the minimum supported zoom.
+     */
+    fun ancestorTile(tileZoom: Int, x: Int, y: Int, deltaZ: Int, minZoom: Int = 3): TileAncestor? {
+        if (deltaZ <= 0) return null
+        val ancestorZoom = tileZoom - deltaZ
+        if (ancestorZoom < minZoom) return null
+        return TileAncestor(
+            zoom = ancestorZoom,
+            x = x shr deltaZ,
+            y = y shr deltaZ,
+            deltaZ = deltaZ,
+            subX = x and ((1 shl deltaZ) - 1),
+            subY = y and ((1 shl deltaZ) - 1)
+        )
+    }
+
+    /**
+     * Builds the full chain of ancestor fallback candidates for a child tile,
+     * ordered coarsest-first (deltaZ descending) for back-to-front layered drawing.
+     */
+    fun ancestorFallbackChain(tileZoom: Int, x: Int, y: Int, minZoom: Int = 3, maxDeltaZ: Int = 4): List<TileAncestor> {
+        return (maxDeltaZ downTo 1).mapNotNull { deltaZ ->
+            ancestorTile(tileZoom, x, y, deltaZ, minZoom)
+        }
     }
 
     /**

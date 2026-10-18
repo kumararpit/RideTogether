@@ -57,7 +57,13 @@ data class RiderMember(
     val connectionStatus: ConnectionStatus = ConnectionStatus.CONNECTED,
     val location: LatLng,
     val speedKmh: Double = 0.0,
-    val headingDeg: Float = 0f,
+    /**
+     * Qualified heading in degrees (0..360, compass convention), or null when the
+     * fix provided no bearing and course-over-ground estimation was unavailable.
+     * Null must never be rendered as "north" (0°) — that is the Qualified Bearing
+     * contract shared by the camera, the marker animator, and Firestore sync.
+     */
+    val headingDeg: Float? = null,
     val accuracyMeters: Float = 10f,
     val sequenceNumber: Long = 0L,
     val lastUpdatedMs: Long = System.currentTimeMillis(),
@@ -170,10 +176,32 @@ data class Ride(
     val status: RideStatus = RideStatus.LOBBY,
     val members: List<RiderMember> = emptyList(),
     val routePoints: List<LatLng> = emptyList(),
+    val initialPlannedDistanceMeters: Double = 0.0,
     val totalDistanceMeters: Double = 0.0,
     val totalDurationSeconds: Double = 0.0,
     val navigationSteps: List<NavigationStep> = emptyList(),
     val actualRecordedDistanceMeters: Double = 0.0,
     val elapsedDurationSeconds: Double = 0.0,
+    val startedAtMs: Long = 0L,
     val createdAtMs: Long = System.currentTimeMillis()
-)
+) {
+    /**
+     * Best-effort trip distance for the ride summary.
+     *
+     * The GPS odometer is trusted only when it is plausible: it must have recorded a
+     * meaningful distance (>= 50 m) AND at least 15% of the planned route distance.
+     * This prevents glitched GPS sessions (e.g., a 7.5 km ride where GPS dropped out
+     * and only 100 m got recorded) from overwriting the planned distance in Recent Rides.
+     */
+    val finalSummaryDistanceMeters: Double
+        get() {
+            val planned = if (initialPlannedDistanceMeters > 0.0) initialPlannedDistanceMeters else totalDistanceMeters
+            return when {
+                // If actual GPS odometer recorded meaningful distance (at least 50m and at least 15% of planned route)
+                actualRecordedDistanceMeters >= 50.0 && (planned <= 0.0 || actualRecordedDistanceMeters >= planned * 0.15) ->
+                    actualRecordedDistanceMeters
+                planned > 0.0 -> planned
+                else -> actualRecordedDistanceMeters
+            }
+        }
+}

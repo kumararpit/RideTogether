@@ -37,6 +37,7 @@ import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -46,9 +47,14 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
@@ -73,6 +79,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.imageLoader
 import coil.request.ImageRequest
 import com.example.data.map.MapCameraMode
 import com.example.data.map.OrientationMode
@@ -81,11 +88,9 @@ import com.example.data.model.LatLng
 import com.example.data.model.MemberStatus
 import com.example.data.model.RiderMember
 import com.example.ui.theme.AmberPrimary
-import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
 import com.example.ui.theme.StatusEmergencyRed
 import com.example.ui.theme.StatusRidingGreen
-import com.example.ui.theme.StatusStoppedAmber
 import kotlin.math.PI
 import androidx.compose.runtime.withFrameNanos
 import kotlin.math.cos
@@ -109,36 +114,125 @@ fun RideMapCanvas(
     amenities: List<com.example.data.amenities.AmenityEntity> = emptyList(),
     selectedAmenity: com.example.data.amenities.AmenityEntity? = null,
     onSelectAmenity: (com.example.data.amenities.AmenityEntity?) -> Unit = {},
-    onViewportChanged: (minLat: Double, maxLat: Double, minLon: Double, maxLon: Double) -> Unit = { _, _, _, _ -> }
+    onViewportChanged: (minLat: Double, maxLat: Double, minLon: Double, maxLon: Double) -> Unit = { _, _, _, _ -> },
+    initialStartLocation: LatLng? = null,
+    onMapTapped: (() -> Unit)? = null,
+    // Task 18 — Automatic day/night map appearance.
+    // LIVE screen wiring: resolved lighting + theme override come from the ViewModel owner
+    // and are stable state (never recomputed per draw/tile). Without wiring the canvas
+    // preserves the legacy dark-default appearance and its local style toggle.
+    mapLighting: com.example.data.map.MapLighting = com.example.data.map.MapLighting.NIGHT,
+    allowThemeControl: Boolean = false,
+    mapThemeMode: com.example.data.map.MapThemeMode = com.example.data.map.MapThemeMode.AUTO,
+    onMapThemeModeChange: (com.example.data.map.MapThemeMode) -> Unit = {},
+    onThemeResumed: () -> Unit = {},
+    // Camera center reporting for AUTO lighting context gating (material-change throttled
+    // on the receiving controller; sampled here only on ~0.1° moves).
+    onLightingContext: (lat: Double, lng: Double) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
+    val imageLoader = context.imageLoader
     val density = LocalDensity.current
     val textMeasurer = rememberTextMeasurer()
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var isResumed by remember { mutableStateOf(true) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            isResumed = (event == Lifecycle.Event.ON_RESUME)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     val currentUser = members.find { it.isCurrentUser }
     val initialCenter = currentUser?.location ?: if (route.isNotEmpty()) route[0] else LatLng(18.5204, 73.8567)
+
+    /**
+     * Single owner of rider marker animation state: validates GPS targets from the
+     * members flow and glides rendered position/bearing toward them frame-by-frame.
+     * Consumed by the rideMapCanvas overlay only — never by camera logic or navigation.
+     */
+    val riderMarkerAnimator = remember { com.example.data.map.RiderMarkerAnimator() }
+    var animatedMarkerFrame by remember { mutableIntStateOf(0) }
+
+    // Target state updates: independent of animation frame timing (GPS flow cadence).
+    // Invalid, stale, or inaccurate updates never reach the animator.
+    LaunchedEffect(members) {
+        for (rider in members) {
+            if (rider.isStale()) continue                       // frozen target while stale
+            if (rider.accuracyMeters > 30f) continue            // inaccurate fix → ignore
+            riderMarkerAnimator.updateTarget(
+                riderId = rider.id,
+                lat = rider.location.latitude,
+                lng = rider.location.longitude,
+                bearingDeg = rider.headingDeg?.toDouble(),
+                speedKmh = rider.speedKmh,
+                accuracyMeters = rider.accuracyMeters
+            )
+        }
+        riderMarkerAnimator.retain(members.map { it.id })
+    }
 
     val cameraController = remember { com.example.data.map.MapCameraController() }
     val cameraState by cameraController.state.collectAsState()
 
     var displayCenterLat by remember { mutableFloatStateOf(initialCenter.latitude.toFloat()) }
     var displayCenterLng by remember { mutableFloatStateOf(initialCenter.longitude.toFloat()) }
-    var displayZoom by remember { mutableFloatStateOf(if (route.isNotEmpty()) 16f else 14f) }
+    var displayZoom by remember { mutableFloatStateOf(if (isFollowRiderMode) 17f else if (route.isNotEmpty()) 16f else 14f) }
     var displayHeading by remember { mutableFloatStateOf(0f) }
     var panOffsetX by remember { mutableFloatStateOf(0f) }
     var panOffsetY by remember { mutableFloatStateOf(0f) }
     var displayAnchorY by remember { mutableFloatStateOf(0f) }
-    var isDarkTacticalStyle by remember { mutableStateOf(true) }
+    // Legacy local style toggle for canvas instances without ViewModel theme wiring
+    // (lobby/summary previews): preserves the previous dark-default behavior.
+    var legacyDarkStyle by remember { mutableStateOf(true) }
     var hasInitialized by remember { mutableStateOf(false) }
+
+    // Effective resolved appearance: stable param state when wired, legacy behavior otherwise.
+    val effectiveLighting = if (allowThemeControl) {
+        mapLighting
+    } else {
+        if (legacyDarkStyle) com.example.data.map.MapLighting.NIGHT else com.example.data.map.MapLighting.DAY
+    }
+
+    // Report lifecycle resumes so AUTO lighting re-evaluates after backgrounding.
+    LaunchedEffect(isResumed, allowThemeControl) {
+        if (isResumed && allowThemeControl) onThemeResumed()
+    }
+    // Report the camera center as lighting context on material change only (~0.1°).
+    if (allowThemeControl) {
+        LaunchedEffect(allowThemeControl) {
+            snapshotFlow {
+                val lat = displayCenterLat.toDouble()
+                val lng = displayCenterLng.toDouble()
+                val latBucket = (lat * 10).toInt()
+                val lngBucket = (lng * 10).toInt()
+                latBucket to lngBucket
+            }.collect { (latBucket, lngBucket) ->
+                onLightingContext(latBucket / 10.0, lngBucket / 10.0)
+            }
+        }
+    }
     
-    // Initialize map position on first launch or when route becomes available
+    // Initialize map position on first launch or when route becomes available.
+    // LiveRide launches with isFollowRiderMode == true and must lock directly into
+    // FOLLOWING mode at navigation zoom — never into the Free-Pan route overview.
     LaunchedEffect(route, isFollowRiderMode) {
         if (!hasInitialized) {
             if (isFollowRiderMode) {
-                cameraController.recenter(initialCenter, currentUser?.headingDeg)
-                cameraController.setZoom(17f)
+                val followCenter = currentUser?.location
+                    ?: initialStartLocation
+                    ?: route.firstOrNull()
+                    ?: LatLng(18.5204, 73.8567)
+                // D5 fix (INV-E): boot locks FOLLOWING in ONE controller write.
+                // The old recenter()+setZoom(17f) pair wrote a 16f target that was
+                // immediately replaced by 17f — a two-step zoom target at startup.
+                cameraController.recenter(followCenter, currentUser?.headingDeg, 17f)
                 hasInitialized = true
             } else if (route.isNotEmpty()) {
+                // Lobby / summary previews only: overview the whole route once.
                 cameraController.showOverview(route)
                 hasInitialized = true
             }
@@ -163,48 +257,55 @@ fun RideMapCanvas(
         var lastTime = 0L
         while (true) {
             withFrameNanos { frameTimeNanos ->
-                if (lastTime != 0L) {
-                    val dt = (frameTimeNanos - lastTime) / 1_000_000_000f
-                    val tau = 0.25f
-                    val alpha = 1f - kotlin.math.exp(-dt / tau)
+                if (!isResumed) {
+                    lastTime = 0L
+                } else {
+                    if (lastTime != 0L) {
+                        val dt = (frameTimeNanos - lastTime) / 1_000_000_000f
+                        val tau = 0.25f
+                        val alpha = 1f - kotlin.math.exp(-dt / tau)
 
-                    val targetState = cameraController.state.value
+                        val targetState = cameraController.state.value
 
-                    if (targetState.mode == MapCameraMode.FOLLOWING || targetState.mode == MapCameraMode.OVERVIEW) {
                         displayCenterLat += (targetState.center.latitude.toFloat() - displayCenterLat) * alpha
                         displayCenterLng += (targetState.center.longitude.toFloat() - displayCenterLng) * alpha
                         displayZoom += (targetState.zoom - displayZoom) * alpha
-                    }
 
-                    val targetHeading = targetState.effectiveHeading
-                    val deltaH = ((targetHeading - displayHeading + 540f) % 360f) - 180f
-                    displayHeading = (displayHeading + deltaH * alpha + 360f) % 360f
+                        val targetHeading = targetState.effectiveHeading
+                        val deltaH = ((targetHeading - displayHeading + 540f) % 360f) - 180f
+                        displayHeading = (displayHeading + deltaH * alpha + 360f) % 360f
 
-                    if (targetState.mode == MapCameraMode.FOLLOWING || targetState.mode == MapCameraMode.OVERVIEW) {
-                        // Smoothly fold residual panOffset into center lat/lng when recentering
-                        if (kotlin.math.abs(panOffsetX) > 0.5f || kotlin.math.abs(panOffsetY) > 0.5f) {
-                            val invScale = 1f / with(density) { 256.dp.toPx() } 
-                            val unrotatedDx = (panOffsetX * cos(Math.toRadians(displayHeading.toDouble())) - panOffsetY * sin(Math.toRadians(displayHeading.toDouble()))).toFloat()
-                            val unrotatedDy = (panOffsetX * sin(Math.toRadians(displayHeading.toDouble())) + panOffsetY * cos(Math.toRadians(displayHeading.toDouble()))).toFloat()
-                            
-                            val tileXDelta = unrotatedDx * invScale
-                            val tileYDelta = unrotatedDy * invScale
-                            
-                            val currentTileX = TileMath.lonToTileX(displayCenterLng.toDouble(), displayZoom)
-                            val currentTileY = TileMath.latToTileY(displayCenterLat.toDouble(), displayZoom)
-                            
-                            displayCenterLng = TileMath.tileXToLon(currentTileX - tileXDelta, displayZoom).toFloat()
-                            displayCenterLat = TileMath.tileYToLat(currentTileY - tileYDelta, displayZoom).toFloat()
-                            
-                            panOffsetX = 0f
-                            panOffsetY = 0f
-                        } else {
-                            panOffsetX = 0f
-                            panOffsetY = 0f
+                        if (targetState.mode == MapCameraMode.FOLLOWING || targetState.mode == MapCameraMode.OVERVIEW) {
+                            // Smoothly fold residual panOffset into center lat/lng when recentering
+                            if (kotlin.math.abs(panOffsetX) > 0.5f || kotlin.math.abs(panOffsetY) > 0.5f) {
+                                val invScale = 1f / with(density) { 256.dp.toPx() } 
+                                val unrotatedDx = (panOffsetX * cos(Math.toRadians(displayHeading.toDouble())) - panOffsetY * sin(Math.toRadians(displayHeading.toDouble()))).toFloat()
+                                val unrotatedDy = (panOffsetX * sin(Math.toRadians(displayHeading.toDouble())) + panOffsetY * cos(Math.toRadians(displayHeading.toDouble()))).toFloat()
+                                
+                                val tileXDelta = unrotatedDx * invScale
+                                val tileYDelta = unrotatedDy * invScale
+                                
+                                val currentTileX = TileMath.lonToTileX(displayCenterLng.toDouble(), displayZoom)
+                                val currentTileY = TileMath.latToTileY(displayCenterLat.toDouble(), displayZoom)
+                                
+                                displayCenterLng = TileMath.tileXToLon(currentTileX - tileXDelta, displayZoom).toFloat()
+                                displayCenterLat = TileMath.tileYToLat(currentTileY - tileYDelta, displayZoom).toFloat()
+                                
+                                panOffsetX = 0f
+                                panOffsetY = 0f
+                            } else {
+                                panOffsetX = 0f
+                                panOffsetY = 0f
+                            }
                         }
+
+                        // Rider marker glide: same frame-paced loop, same elapsed-frame time.
+                        // Marker animation is render-only; camera center/zoom above are untouched.
+                        riderMarkerAnimator.advance(dt.toDouble())
+                        animatedMarkerFrame = riderMarkerAnimator.frameVersion
                     }
+                    lastTime = frameTimeNanos
                 }
-                lastTime = frameTimeNanos
             }
         }
     }
@@ -233,6 +334,17 @@ fun RideMapCanvas(
     val riderScreenPositions = remember { mutableMapOf<String, Offset>() }
     val amenityScreenPositions = remember { mutableMapOf<Long, Offset>() }
 
+    // Pan-jitter gate for follow-exit (px at this density): how much cumulative
+    // single-finger displacement must accumulate inside FOLLOWING before the map
+    // treats the gesture as a deliberate pan and abandons follow. ~24 dp absorbs
+    // finger-placement micro-drift so a pinch's first frames can't sabotage it.
+    val followExitPanJitterPx = with(density) { 24.dp.toPx() }
+    // Label anchors (screen-space, below each pin tip) written during draw; read only
+    // inside the same draw phase, so a plain map is sufficient (not snapshot state).
+    val amenityLabelAnchors = remember { mutableMapOf<Long, Float>() }
+    // One-frame label visibility memory for zoom hysteresis (draw-phase only).
+    val previousAmenityLabelIds = remember { HashSet<Long>() }
+
     val categoryPainters = com.example.data.amenities.AmenityType.entries.associateWith { type ->
         androidx.compose.ui.graphics.vector.rememberVectorPainter(AmenityIconConfig.getCategoryIcon(type))
     }
@@ -256,10 +368,27 @@ fun RideMapCanvas(
         }
         
         // Initialize anchor on first pass
-        if (displayAnchorY == 0f) displayAnchorY = targetAnchorY
-        
-        // Smoothly interpolate anchorY in the composition phase
-        displayAnchorY += (targetAnchorY - displayAnchorY) * 0.15f
+        if (displayAnchorY == 0f) {
+            displayAnchorY = targetAnchorY
+        } else if (kotlin.math.abs(targetAnchorY - displayAnchorY) > 0.5f) {
+            // D5 fix (INV-B + INV-C pivot-stability): the anchor is a projection
+            // PIVOT, not an animated channel. On a mode flip (FREE_EXPLORE ↔
+            // FOLLOWING) it jumps in this single frame while the same frame
+            // re-bases the display center so the map point currently rendered at
+            // the old anchor keeps its screen position:
+            //   screenY = anchorY + (tileY − centerTileY) · tileSize
+            //   ⇒ centerTileY′ = centerTileY + Δanchor / tileSize
+            // The old per-frame 0.15f anchor lerp animated the pivot at a rate
+            // disconnected from the dt-based zoom/center/heading loop — the
+            // second half of the recenter zoom-pop. No anchor clock remains:
+            // every remaining animated channel shares the one dt-based loop.
+            val anchorDeltaPx = targetAnchorY - displayAnchorY
+            val baseTilePx = with(density) { 256.dp.toPx() }
+            val centerTileY = TileMath.latToTileY(displayCenterLat.toDouble(), displayZoom)
+            val newCenterTileY = centerTileY + (anchorDeltaPx / baseTilePx).toDouble()
+            displayCenterLat = TileMath.tileYToLat(newCenterTileY, displayZoom).toFloat()
+            displayAnchorY = targetAnchorY
+        }
         
         val tileSizeDp = 256.dp
         val baseTileSizePx = with(density) { tileSizeDp.toPx() }
@@ -272,8 +401,11 @@ fun RideMapCanvas(
 
         val effectiveHeading = displayHeading
 
-        // Dark tactical color filter for high-contrast night/adventure rides
-        val darkTacticalColorFilter = remember {
+        // Task 18 — theme-driven tile appearance. The tile source is the fixed OSM
+        // standard light carto, so night/dusk are renderer-level color transformations
+        // (draw-time only — Coil caches raw bitmaps, so no cross-style contamination
+        // and no cache clearing is required when the theme changes).
+        val nightColorFilter = remember {
             ColorFilter.colorMatrix(ColorMatrix(floatArrayOf(
                 -0.80f, 0f, 0f, 0f, 215f,
                 0f, -0.75f, 0f, 0f, 220f,
@@ -281,6 +413,14 @@ fun RideMapCanvas(
                 0f, 0f, 0f, 1f, 0f
             )))
         }
+        // Light/dark only: DAY passes tiles through unfiltered, NIGHT uses the matrix.
+        val tileColorFilter = when (effectiveLighting) {
+            com.example.data.map.MapLighting.DAY -> null
+            com.example.data.map.MapLighting.NIGHT -> nightColorFilter
+        }
+        // Placeholder behind tiles must follow the lighting so loading/failed tiles no
+        // longer appear as dark squares among light tiles (documented inconsistency fix).
+        val tilePlaceholderColor = com.example.ui.theme.MapAppearancePalette.tilePlaceholder(effectiveLighting)
 
         // Center tile coordinates using continuous displayZoom for exact vector math
         val centerTileXDouble = TileMath.lonToTileX(displayCenterLng.toDouble(), displayZoom)
@@ -310,6 +450,33 @@ fun RideMapCanvas(
 
         fun latLngToRotatedScreen(latLng: LatLng): Offset {
             return unrotatedToRotatedScreen(latLngToUnrotatedScreen(latLng))
+        }
+
+        // Inverse of unrotatedToRotatedScreen: converts a rotated overlay-screen point
+        // back into unrotated map space (rotating by +heading undoes the map's -heading).
+        fun rotatedToUnrotatedScreen(rotated: Offset): Offset {
+            if (effectiveHeading == 0f) return rotated
+            val rad = Math.toRadians(effectiveHeading.toDouble())
+            val cosA = cos(rad)
+            val sinA = sin(rad)
+            val dx = rotated.x - anchorX
+            val dy = rotated.y - anchorY
+            return Offset(
+                (anchorX + dx * cosA - dy * sinA).toFloat(),
+                (anchorY + dx * sinA + dy * cosA).toFloat()
+            )
+        }
+
+        // Inverse of latLngToUnrotatedScreen: projects an unrotated screen pixel back
+        // to geographic coordinates at the CURRENT display zoom (snapshot-fresh reads —
+        // safe to call inside gesture callbacks between recompositions).
+        fun unrotatedScreenToLatLng(x: Float, y: Float): LatLng {
+            val zoom = displayZoom
+            val centerTileX = TileMath.lonToTileX(displayCenterLng.toDouble(), zoom)
+            val centerTileY = TileMath.latToTileY(displayCenterLat.toDouble(), zoom)
+            val tileX = centerTileX + (x - anchorX) / baseTileSizePx
+            val tileY = centerTileY + (y - anchorY) / baseTileSizePx
+            return LatLng(TileMath.tileYToLat(tileY, zoom), TileMath.tileXToLon(tileX, zoom))
         }
 
         // 1. Single Camera Transform Container (Holds Tiles Layer & Route Lines Canvas)
@@ -342,6 +509,21 @@ fun RideMapCanvas(
                 centerTileYDouble = centerTileYAtTileZoom,
                 zoomLevel = tileZoom,
                 tileSizePx = scaledTileSizePx
+            )
+
+            // TEMPORARY D7 DIAGNOSTIC LOGGING (remove after root cause confirmed):
+            // one line per stable range change: camera geometry + composed row bounds.
+            val d7Slice = mutableListOf<Int>()
+            for (tyx in tileRange.minY..tileRange.maxY) {
+                val yUn = anchorY + ((tyx - centerTileYAtTileZoom) * scaledTileSizePx).toFloat()
+                d7Slice.add((yUn + scaledTileSizePx).roundToInt())
+            }
+            android.util.Log.d(
+                "RT-D7",
+                "range z=%d disp=%.6f anchor=(%.1f,%.1f) cXY=(%.4f,%.4f) S=%.4f rowsY(top..bot)=%s lighting=%s phColor=%s".format(
+                    tileZoom, displayZoom, anchorX, anchorY, centerTileXAtTileZoom, centerTileYAtTileZoom,
+                    scaledTileSizePx, d7Slice, effectiveLighting, tilePlaceholderColor
+                )
             )
 
             LaunchedEffect(tileRange, tileZoom) {
@@ -377,17 +559,59 @@ fun RideMapCanvas(
                                         height = with(density) { (bottom - top).toDp() }
                                     )
                                     .clip(androidx.compose.ui.graphics.RectangleShape)
-                                    .background(SlateDark800)
+                                    .background(tilePlaceholderColor)
                             ) {
-                                // Fallback layer (parent tile) to prevent black stripes while loading
-                                if (tileZoom > 0) {
+                                // Fallback layer (multi-level ancestor tiles) to prevent black stripes.
+                                // The exact tile AsyncImage below always paints over these once loaded.
+                                if (tileZoom > 3) {
+                                    // 1. Cached coarse ancestors (deltaZ 4..2): only files already in the
+                                    //    Coil memory cache are used, so no extra tile-server requests.
+                                    val memoryCache = imageLoader.memoryCache
+                                    val cachedAncestors = TileMath.ancestorFallbackChain(tileZoom, tileX, tileY, minZoom = 3, maxDeltaZ = 4)
+                                        .filter { anc -> anc.deltaZ >= 2 }
+                                        .filter { anc ->
+                                            try {
+                                                memoryCache?.get(coil.memory.MemoryCache.Key(TileMath.getOsmTileUrl(anc.zoom, anc.x, anc.y))) != null
+                                            } catch (_: Exception) {
+                                                false
+                                            }
+                                        }
+                                    for (anc in cachedAncestors) {
+                                        val ancTileW = right - left
+                                        val ancTileH = bottom - top
+                                        val ancFullW = ancTileW * (1 shl anc.deltaZ)
+                                        val ancFullH = ancTileH * (1 shl anc.deltaZ)
+                                        AsyncImage(
+                                            model = ImageRequest.Builder(context)
+                                                .data(TileMath.getOsmTileUrl(anc.zoom, anc.x, anc.y))
+                                                .addHeader("User-Agent", TileMath.OSM_USER_AGENT)
+                                                .crossfade(false)
+                                                .build(),
+                                            contentDescription = "Ancestor map tile fallback (z${anc.zoom})",
+                                            contentScale = ContentScale.FillBounds,
+                                            colorFilter = tileColorFilter,
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .clipToBounds()
+                                                // Offset the full ancestor bitmap so its enclosing
+                                                // sub-quadrant (subX, subY) aligns exactly over this tile slot.
+                                                .offset { IntOffset(-anc.subX * ancTileW, -anc.subY * ancTileH) }
+                                                .size(
+                                                    width = with(density) { ancFullW.toDp() },
+                                                    height = with(density) { ancFullH.toDp() }
+                                                )
+                                        )
+                                    }
+
+                                    // 2. Immediate parent (deltaZ = 1) — always requested so it warms the
+                                    //    cache and acts as first-line fallback while the exact tile loads.
                                     val parentTileX = tileX / 2
                                     val parentTileY = tileY / 2
                                     val parentTileUrl = TileMath.getOsmTileUrl(tileZoom - 1, parentTileX, parentTileY)
-                                    
+
                                     val parentOffsetX = if (tileX % 2 == 0) 0 else -(right - left)
                                     val parentOffsetY = if (tileY % 2 == 0) 0 else -(bottom - top)
-                                    
+
                                     AsyncImage(
                                         model = ImageRequest.Builder(context)
                                             .data(parentTileUrl)
@@ -396,7 +620,7 @@ fun RideMapCanvas(
                                             .build(),
                                         contentDescription = "Parent map tile fallback",
                                         contentScale = ContentScale.FillBounds,
-                                        colorFilter = if (isDarkTacticalStyle) darkTacticalColorFilter else null,
+                                        colorFilter = tileColorFilter,
                                         modifier = Modifier
                                             .offset { IntOffset(parentOffsetX, parentOffsetY) }
                                             .size(
@@ -414,7 +638,7 @@ fun RideMapCanvas(
                                         .build(),
                                     contentDescription = "Map tile",
                                     contentScale = ContentScale.FillBounds,
-                                    colorFilter = if (isDarkTacticalStyle) darkTacticalColorFilter else null,
+                                    colorFilter = tileColorFilter,
                                     modifier = Modifier.fillMaxSize()
                                 )
                             }
@@ -473,10 +697,13 @@ fun RideMapCanvas(
                     }
 
                     // Start Marker
-                    val startScreen = routePoints.first()
-                    drawCircle(color = Color(0x664CAF50), radius = 16.dp.toPx(), center = startScreen)
-                    drawCircle(color = StatusRidingGreen, radius = 10.dp.toPx(), center = startScreen)
-                    drawCircle(color = Color.White, radius = 5.dp.toPx(), center = startScreen)
+                    val startPos = initialStartLocation ?: route.firstOrNull()
+                    if (startPos != null) {
+                        val startScreen = latLngToUnrotatedScreen(startPos)
+                        drawCircle(color = Color(0x664CAF50), radius = 16.dp.toPx(), center = startScreen)
+                        drawCircle(color = StatusRidingGreen, radius = 10.dp.toPx(), center = startScreen)
+                        drawCircle(color = Color.White, radius = 5.dp.toPx(), center = startScreen)
+                    }
 
                     // Destination Marker
                     val destScreen = routePoints.last()
@@ -493,23 +720,76 @@ fun RideMapCanvas(
                 .fillMaxSize()
                 .testTag("ride_map_canvas")
                 .pointerInput(effectiveHeading) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        if (zoom != 1f) {
-                            val zoomDelta = kotlin.math.log2(zoom)
-                            val newZoom = (displayZoom + zoomDelta).coerceIn(3f, 18f)
+                    // Cumulative single-finger pan swallowed while FOLLOWING before
+                    // the gesture counts as a deliberate pan→follow-exit. Covers the
+                    // finger-placement drift that otherwise sabotages every pinch
+                    // (the first finger's few-px micro-pan must not exit follow).
+                    var microPanAccumPx = 0f
+                    detectTransformGestures { centroid, pan, zoom, _ ->
+                        val zoomDeltaLog2 = kotlin.math.log2(zoom)
+                        val hasPinchZoom = kotlin.math.abs(zoomDeltaLog2) >= com.example.data.map.ZoomAnchorMath.PINCH_ZOOM_DELTA_LOG2
+                        if (hasPinchZoom) {
+                            microPanAccumPx = 0f
+                            val newZoom = (displayZoom + zoomDeltaLog2).coerceIn(3f, 18f)
                             if (newZoom != displayZoom) {
+                                val following = cameraController.state.value.mode == MapCameraMode.FOLLOWING
+                                if (following) {
+                                    // Defect D2 fix: a pinch inside FOLLOWING only changes the
+                                    // zoom level. The camera stays in FOLLOWING (rider stays
+                                    // anchored at the camera anchor) and the user's zoom
+                                    // override persists until the next recenter.
+                                    cameraController.setZoom(newZoom)
+                                } else {
+                                    // Defect D3 fix: outside FOLLOWING, zoom pivots on the
+                                    // pinch centroid — the map point under the fingers stays
+                                    // under the fingers instead of flying around the anchor.
+                                    val unrotated = rotatedToUnrotatedScreen(centroid)
+                                    val anchorLatLng = unrotatedScreenToLatLng(unrotated.x, unrotated.y)
+                                    val anchoredCenter = com.example.data.map.ZoomAnchorMath.anchoredCenter(
+                                        currentCenterLat = displayCenterLat.toDouble(),
+                                        currentCenterLng = displayCenterLng.toDouble(),
+                                        currentZoom = displayZoom,
+                                        newZoom = newZoom,
+                                        anchorLatLng = anchorLatLng,
+                                        anchorUnrotatedX = unrotated.x,
+                                        anchorUnrotatedY = unrotated.y,
+                                        anchorX = anchorX,
+                                        anchorY = anchorY,
+                                        tileSizePx = baseTileSizePx
+                                    )
+                                    cameraController.setZoomFree(newZoom, anchoredCenter)
+                                    displayCenterLat = anchoredCenter.latitude.toFloat()
+                                    displayCenterLng = anchoredCenter.longitude.toFloat()
+                                    onFollowRiderChange(false)
+                                }
                                 displayZoom = newZoom
-                                cameraController.setZoom(newZoom)
                             }
                         }
-                        if (pan != Offset.Zero) {
-                            cameraController.pan(pan.x, pan.y, displayZoom, effectiveHeading, baseTileSizePx)
-                            val targetState = cameraController.state.value
-                            displayCenterLat = targetState.center.latitude.toFloat()
-                            displayCenterLng = targetState.center.longitude.toFloat()
+                        if (pan != Offset.Zero && !hasPinchZoom) {
+                            val followingMode = cameraController.state.value.mode == MapCameraMode.FOLLOWING
+                            if (followingMode) {
+                                microPanAccumPx = (microPanAccumPx + pan.getDistance())
+                                    .coerceAtMost(followExitPanJitterPx * 2f)
+                                if (microPanAccumPx >= followExitPanJitterPx) {
+                                    // Deliberate pan confirmed: exit follow, then pan freely.
+                                    cameraController.onUserGesture()
+                                    onFollowRiderChange(false)
+                                    cameraController.pan(pan.x, pan.y, displayZoom, effectiveHeading, baseTileSizePx)
+                                    val targetState = cameraController.state.value
+                                    displayCenterLat = targetState.center.latitude.toFloat()
+                                    displayCenterLng = targetState.center.longitude.toFloat()
+                                }
+                                // Below threshold: fragment swallowed — the following
+                                // camera feed keeps the rider anchored (jitter-free).
+                            } else {
+                                cameraController.pan(pan.x, pan.y, displayZoom, effectiveHeading, baseTileSizePx)
+                                val targetState = cameraController.state.value
+                                displayCenterLat = targetState.center.latitude.toFloat()
+                                displayCenterLng = targetState.center.longitude.toFloat()
+                                cameraController.onUserGesture()
+                                onFollowRiderChange(false)
+                            }
                         }
-                        cameraController.onUserGesture()
-                        onFollowRiderChange(false)
                     }
                 }
                 .pointerInput(members, amenities) {
@@ -538,7 +818,11 @@ fun RideMapCanvas(
                                 }
                             }
                             onSelectAmenity(clickedAmenity)
-                            if (clickedAmenity != null) onSelectRider(null)
+                            if (clickedAmenity != null) {
+                                onSelectRider(null)
+                            } else {
+                                onMapTapped?.invoke()
+                            }
                         }
                     }
                 }
@@ -568,7 +852,8 @@ fun RideMapCanvas(
 
             // Draw Start & Finish text tags upright at their rotated screen positions
             if (route.size >= 2) {
-                val startRotated = latLngToRotatedScreen(route.first())
+                val startPos = initialStartLocation ?: route.first()
+                val startRotated = latLngToRotatedScreen(startPos)
                 drawSafeText(
                     text = "START",
                     x = startRotated.x - 20f,
@@ -587,6 +872,7 @@ fun RideMapCanvas(
 
             // Draw Custom Google Maps Style Amenity Pins
             amenityScreenPositions.clear()
+            amenityLabelAnchors.clear()
             for (amenity in amenities) {
                 val screenPos = latLngToRotatedScreen(LatLng(amenity.lat, amenity.lon))
 
@@ -651,11 +937,14 @@ fun RideMapCanvas(
                 }
 
                 drawPath(path = pinPath, color = categoryColor)
-                drawPath(path = pinPath, color = Color.White, style = Stroke(width = 1.8.dp.toPx()))
+                // Dual outline: dark rim first (separates the marker from pale daytime
+                // imagery where a white border alone is invisible), then bright inner rim.
+                drawPath(path = pinPath, color = Color(0x66101828), style = Stroke(width = 4.6.dp.toPx()))
+                drawPath(path = pinPath, color = Color.White, style = Stroke(width = 2.1.dp.toPx()))
 
                 // 4. White Category Icon Glyph
                 val painter = categoryPainters[amenity.type] ?: categoryPainters[com.example.data.amenities.AmenityType.UNKNOWN]!!
-                val glyphSize = pinRadiusPx * 1.15f
+                val glyphSize = pinRadiusPx * 1.25f
                 drawContext.transform.translate(left = cx - glyphSize / 2f, top = cy - glyphSize / 2f)
                 try {
                     with(painter) {
@@ -667,12 +956,99 @@ fun RideMapCanvas(
                 } finally {
                     drawContext.transform.translate(left = -(cx - glyphSize / 2f), top = -(cy - glyphSize / 2f))
                 }
+
+                // Label anchor (screen-space) just below the pin tip for Part B labels.
+                amenityLabelAnchors[amenity.osmId] = screenPos.y + 3.dp.toPx()
+            }
+
+            // Task 18 Part B — Amenity name labels: deterministic planner (zoom gate +
+            // hysteresis + priority + collision). Labels draw BEFORE rider markers so they
+            // can never obscure the current rider or navigation indicators; geographic
+            // coordinates are never modified, only screen-space suppression.
+            val labelReserveHalfW = 62.dp.toPx()
+            val labelReserveHalfH = 11.dp.toPx()
+            val labelCandidates = buildList {
+                for (amenity in amenities) {
+                    val anchorY = amenityLabelAnchors[amenity.osmId] ?: continue
+                    val head = amenityScreenPositions[amenity.osmId] ?: continue
+                    val name = amenity.name?.trim().orEmpty()
+                    if (name.isEmpty()) continue
+                    add(
+                        AmenityLabelPlanner.Candidate(
+                            id = amenity.osmId,
+                            xPx = head.x,
+                            yPx = anchorY,
+                            isSelected = amenity.osmId == selectedAmenity?.osmId,
+                            type = amenity.type
+                        )
+                    )
+                }
+            }
+            if (labelCandidates.isNotEmpty()) {
+                val plannedLabelIds = AmenityLabelPlanner.plan(
+                    candidates = labelCandidates,
+                    zoom = displayZoom,
+                    previouslyVisible = previousAmenityLabelIds,
+                    reserveHalfWidthPx = labelReserveHalfW,
+                    reserveHalfHeightPx = labelReserveHalfH
+                )
+                val pillBackground = com.example.ui.theme.MapAppearancePalette
+                    .amenityLabelBackground(effectiveLighting)
+                val labelForeground = com.example.ui.theme.MapAppearancePalette
+                    .amenityLabelText(effectiveLighting)
+                val maxTextWidthPx = (labelReserveHalfW * 2f - 12.dp.toPx()).roundToInt()
+                for (amenity in amenities) {
+                    if (amenity.osmId !in plannedLabelIds) continue
+                    val head = amenityScreenPositions[amenity.osmId] ?: continue
+                    val anchorY = amenityLabelAnchors[amenity.osmId] ?: continue
+                    val name = amenity.name?.trim() ?: continue
+                    val labelLayout = textMeasurer.measure(
+                        text = androidx.compose.ui.text.AnnotatedString(name),
+                        style = TextStyle(
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = labelForeground
+                        ),
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        constraints = androidx.compose.ui.unit.Constraints(maxWidth = maxTextWidthPx)
+                    )
+                    val pillW = labelLayout.size.width + 10.dp.toPx()
+                    val pillH = labelLayout.size.height + 5.dp.toPx()
+                    drawRoundRect(
+                        color = pillBackground,
+                        topLeft = Offset(head.x - pillW / 2f, anchorY),
+                        size = androidx.compose.ui.geometry.Size(pillW, pillH),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(6.dp.toPx())
+                    )
+                    drawText(
+                        textLayoutResult = labelLayout,
+                        topLeft = Offset(
+                            head.x - labelLayout.size.width / 2f,
+                            anchorY + (pillH - labelLayout.size.height) / 2f
+                        )
+                    )
+                }
+                previousAmenityLabelIds.clear()
+                previousAmenityLabelIds.addAll(plannedLabelIds)
+            } else {
+                previousAmenityLabelIds.clear()
             }
 
             // Draw Rider Markers at rotated screen positions
             riderScreenPositions.clear()
+            // Subscribe this draw scope to the frame-paced marker animation (draw-only
+            // invalidation; no recomposition of the map composition tree per frame).
+            @Suppress("UNUSED_EXPRESSION")
+            animatedMarkerFrame
             for (rider in members) {
-                val screenPos = latLngToRotatedScreen(rider.location)
+                // Rendered (interpolated) position/bearing from the marker animator;
+                // falls back to the raw member location until the first valid target.
+                val animLat = riderMarkerAnimator.renderedLat(rider.id)
+                val animLng = riderMarkerAnimator.renderedLng(rider.id)
+                val animBearing = riderMarkerAnimator.renderedBearing(rider.id)
+                val markerLatLng = if (animLat != null && animLng != null) LatLng(animLat, animLng) else rider.location
+                val screenPos = latLngToRotatedScreen(markerLatLng)
                 riderScreenPositions[rider.id] = screenPos
 
                 // Skip drawing markers far outside the viewport
@@ -774,8 +1150,14 @@ fun RideMapCanvas(
                 }
 
                 // Layer E: Directional Arrowhead ▲ inside marker disc
-                // Relative to screen top, arrow direction is (rider.headingDeg - effectiveHeading)
-                val arrowAngleDeg = rider.headingDeg - effectiveHeading
+                // Relative to screen top, arrow direction is (bearing - effectiveHeading);
+                // source preference: animator bearing (qualified source shared with
+                // the camera) → member heading → conservative 0 (arrow up) only when
+                // no qualified bearing has EVER been available for this rider.
+                val arrowSourceBearingDeg = animBearing?.toFloat()
+                    ?: rider.headingDeg
+                    ?: 0f
+                val arrowAngleDeg = arrowSourceBearingDeg - effectiveHeading
                 val angleRad = (arrowAngleDeg - 90f) * (PI.toFloat() / 180f)
                 val arrowLen = markerRadius * 0.7f
 
@@ -843,11 +1225,12 @@ fun RideMapCanvas(
         }
 
         // Floating Map Controls (Compass Toggle, Recenter, Overview, Zoom In, Zoom Out, Style)
+        // Positioned adaptively below topInsetDp (turn banner) to prevent overlap on all device sizes
         Column(
             modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .padding(end = 16.dp)
-                .padding(bottom = 140.dp) // Avoid overlapping bottom sheet elements
+                .align(Alignment.TopEnd)
+                .padding(top = topInsetDp + 12.dp, end = 16.dp),
+            horizontalAlignment = Alignment.End
         ) {
             // Compass Toggle Button (Heading-Up vs North-Up)
             SmallFloatingActionButton(
@@ -855,8 +1238,8 @@ fun RideMapCanvas(
                     cameraController.toggleOrientationMode()
                 },
                 modifier = Modifier.testTag("compass_toggle_button"),
-                containerColor = SlateDark800,
-                contentColor = if (cameraState.orientationMode == OrientationMode.NORTH_UP) AmberPrimary else Color.White
+                containerColor = Color(0xFF1B222E),
+                contentColor = if (cameraState.orientationMode == OrientationMode.NORTH_UP) Color(0xFF38BDF8) else Color.White
             ) {
                 Icon(
                     imageVector = Icons.Default.Explore,
@@ -869,17 +1252,22 @@ fun RideMapCanvas(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Re-center on current user button
+            // Re-center on current user button (Primary Blue when active)
             FloatingActionButton(
                 onClick = {
                     cameraController.recenter(currentUser?.location, currentUser?.headingDeg)
+                    // Immediate rider/camera alignment: snap the marker to its current
+                    // target, bypassing the normal 150 ms position glide.
+                    if (currentUser != null) {
+                        riderMarkerAnimator.snap(currentUser.id)
+                    }
                     onFollowRiderChange(true)
                 },
                 modifier = Modifier
                     .size(48.dp)
                     .testTag("recenter_button"),
-                containerColor = if (isFollowRiderMode) AmberPrimary else SlateDark800,
-                contentColor = if (isFollowRiderMode) SlateDark900 else AmberPrimary,
+                containerColor = if (isFollowRiderMode) Color(0xFF2563EB) else Color(0xFF1B222E),
+                contentColor = Color.White,
                 elevation = FloatingActionButtonDefaults.elevation(4.dp)
             ) {
                 Icon(
@@ -900,8 +1288,8 @@ fun RideMapCanvas(
                     }
                 },
                 modifier = Modifier.testTag("fit_group_button"),
-                containerColor = SlateDark800,
-                contentColor = AmberPrimary
+                containerColor = Color(0xFF1B222E),
+                contentColor = Color(0xFF38BDF8)
             ) {
                 Icon(imageVector = Icons.Default.FilterCenterFocus, contentDescription = "Fit Group in View")
             }
@@ -911,13 +1299,13 @@ fun RideMapCanvas(
             // Zoom In (+)
             SmallFloatingActionButton(
                 onClick = {
-                    if (cameraState.zoom < 18f) {
-                        val newZoom = cameraState.zoom + 1f
-                        cameraController.setZoom(newZoom)
+                    val curZoom = cameraController.state.value.zoom
+                    if (curZoom < 18f) {
+                        cameraController.setZoom(curZoom + 1f)
                     }
                 },
                 modifier = Modifier.testTag("zoom_in_button"),
-                containerColor = SlateDark800,
+                containerColor = Color(0xFF1B222E),
                 contentColor = Color.White
             ) {
                 Icon(imageVector = Icons.Default.Add, contentDescription = "Zoom In")
@@ -928,13 +1316,13 @@ fun RideMapCanvas(
             // Zoom Out (-)
             SmallFloatingActionButton(
                 onClick = {
-                    if (cameraState.zoom > 3f) {
-                        val newZoom = cameraState.zoom - 1f
-                        cameraController.setZoom(newZoom)
+                    val curZoom = cameraController.state.value.zoom
+                    if (curZoom > 3f) {
+                        cameraController.setZoom(curZoom - 1f)
                     }
                 },
                 modifier = Modifier.testTag("zoom_out_button"),
-                containerColor = SlateDark800,
+                containerColor = Color(0xFF1B222E),
                 contentColor = Color.White
             ) {
                 Icon(imageVector = Icons.Default.Remove, contentDescription = "Zoom Out")
@@ -942,16 +1330,52 @@ fun RideMapCanvas(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Map Style Toggle (Dark Tactical vs OpenStreetMap Standard)
+            // Map Appearance Control — cycles Auto → Day → Night when wired to the
+            // theme owner (live screen); legacy dark/standard toggle otherwise.
             SmallFloatingActionButton(
                 onClick = {
-                    isDarkTacticalStyle = !isDarkTacticalStyle
+                    if (allowThemeControl) {
+                        val next = when (mapThemeMode) {
+                            com.example.data.map.MapThemeMode.AUTO -> com.example.data.map.MapThemeMode.DAY
+                            com.example.data.map.MapThemeMode.DAY -> com.example.data.map.MapThemeMode.NIGHT
+                            com.example.data.map.MapThemeMode.NIGHT -> com.example.data.map.MapThemeMode.AUTO
+                        }
+                        onMapThemeModeChange(next)
+                    } else {
+                        legacyDarkStyle = !legacyDarkStyle
+                    }
                 },
                 modifier = Modifier.testTag("map_style_toggle_button"),
-                containerColor = SlateDark800,
-                contentColor = if (isDarkTacticalStyle) AmberPrimary else Color.White
+                containerColor = Color(0xFF1B222E),
+                contentColor = if (allowThemeControl) {
+                    when (mapThemeMode) {
+                        com.example.data.map.MapThemeMode.AUTO -> Color(0xFF38BDF8)
+                        com.example.data.map.MapThemeMode.DAY -> Color(0xFFFBBF24)
+                        com.example.data.map.MapThemeMode.NIGHT -> Color.White
+                    }
+                } else {
+                    if (legacyDarkStyle) Color(0xFF38BDF8) else Color.White
+                }
             ) {
                 Icon(imageVector = Icons.Default.Layers, contentDescription = "Toggle Map Style")
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Map Scale Bar (500 m)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    modifier = Modifier
+                        .width(48.dp)
+                        .height(2.dp)
+                        .background(Color.White.copy(alpha = 0.8f))
+                )
+                Text(
+                    text = "500 m",
+                    color = Color.White.copy(alpha = 0.8f),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
         }
     }

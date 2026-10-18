@@ -71,16 +71,38 @@ service cloud.firestore {
 
     // Rides collection
     match /rides/{rideId} {
-      allow read, write: if true;
+      // NOTE (Task 21): reads remain open for lobby/preview discovery by invite code
+      // (see below for the exact change and why hardening is incremental).
+      allow read: if true;
+
+      // Create/delete unchanged: ride creation happens before the leader has any
+      // member-side state, and delete is not exercised by the app.
+      allow create, delete: if true;
+
+      // Shared ride status is CANONICAL group lifecycle state (Task 21): moving a ride
+      // between lifecycle states (CREATED/LOBBY/ACTIVE/COMPLETED/CANCELLED) is
+      // leader-only. Non-status field updates (distance telemetry, leader transfer
+      // inside the same doc) keep working for any authenticated rider; the ride leader
+      // check uses the server-side document's leaderId, not client-supplied data.
+      allow update: if (!('status' in request.resource.data)
+            || request.resource.data.status == resource.data.status
+            || (request.resource.data.status in ['ACTIVE', 'COMPLETED', 'CANCELLED']
+                && request.auth != null
+                && request.auth.uid == resource.data.leaderId));
 
       // Riders subcollection
       match /riders/{riderId} {
         allow read, write: if true;
       }
 
-      // Quick Messages subcollection
+      // Quick Messages subcollection (Task 21): sender identity must match the
+      // authenticated user — a client cannot spoof another rider's senderId. The app
+      // already sets senderId from the Firebase auth uid in sendQuickMessage().
       match /messages/{messageId} {
-        allow read, write: if true;
+        allow read: if true;
+        allow create: if request.auth != null
+          && request.resource.data.senderId == request.auth.uid;
+        allow update, delete: if false;
       }
 
       // SOS Events subcollection

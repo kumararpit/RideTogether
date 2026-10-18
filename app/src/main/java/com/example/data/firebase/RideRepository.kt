@@ -12,6 +12,7 @@ import com.example.data.model.NavigationStep
 import com.example.data.model.QuickMessage
 import com.example.data.model.QuickMessageType
 import com.example.data.model.Ride
+import com.example.data.model.RideLifecyclePolicy
 import com.example.data.model.RideRole
 import com.example.data.model.RideStatus
 import com.example.data.model.RiderMember
@@ -33,6 +34,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.tasks.await
 import java.security.SecureRandom
 import java.util.UUID
@@ -40,6 +43,7 @@ import java.util.UUID
 class RideRepository(
     val locationTracker: LocationTracker,
     val firestore: FirebaseFirestore?,
+    val context: Context? = null,
     val stopDetector: StopDetector = StopDetector(
         stopSpeedThresholdKmh = 5.0,
         resumeSpeedThresholdKmh = 8.0,
@@ -47,13 +51,14 @@ class RideRepository(
     )
 ) {
     // Secondary constructor for convenience resolving default database
-    constructor(@Suppress("UNUSED_PARAMETER") context: Context, locationTracker: LocationTracker) : this(
+    constructor(context: Context, locationTracker: LocationTracker) : this(
         locationTracker = locationTracker,
         firestore = try {
             FirebaseFirestore.getInstance()
         } catch (_: Exception) {
             null
-        }
+        },
+        context = context
     )
 
     private val auth: FirebaseAuth?
@@ -73,6 +78,22 @@ class RideRepository(
     private val _recentMessage = MutableStateFlow<QuickMessage?>(null)
     val recentMessage: StateFlow<QuickMessage?> = _recentMessage.asStateFlow()
 
+    /**
+     * Bounded chronological history of group messages seen on this device (local echo
+     * + server snapshots), deduplicated by stable message id. The UI toast renders each
+     * new id once, so a rapid burst can no longer overwrite/lose an earlier message.
+     */
+    private val messageRegistry = QuickMessageRegistry()
+    private val _recentMessages = MutableStateFlow<List<QuickMessage>>(emptyList())
+    val recentMessages: StateFlow<List<QuickMessage>> = _recentMessages.asStateFlow()
+
+    /**
+     * Surfaced send outcome for group messages: `true` when the LAST send exhausted all
+     * Firestore write attempts (e.g. fully offline). Never silently swallowed.
+     */
+    private val _messageSendError = MutableStateFlow(false)
+    val messageSendError: StateFlow<Boolean> = _messageSendError.asStateFlow()
+
     private val _currentRiderStatus = MutableStateFlow(MemberStatus.RIDING)
     val currentRiderStatus: StateFlow<MemberStatus> = _currentRiderStatus.asStateFlow()
 
@@ -84,12 +105,46 @@ class RideRepository(
     private var messagesListener: ListenerRegistration? = null
     private var sosListener: ListenerRegistration? = null
 
+    private val roomDb: com.example.data.db.RideDatabase? by lazy {
+        this.context?.let { com.example.data.db.RideDatabase.getInstance(it) }
+    }
+
     private var currentUserId: String = auth?.currentUser?.uid ?: "rider_unknown"
     private var currentUserName: String = auth?.currentUser?.displayName ?: "Rider"
     private var currentMotorcycleModel: String = ""
     private var localSequenceNumber: Long = 0L
+    /** Wall-clock ms when the ride transitioned to ACTIVE. Reset on leave/end. */
+    private var rideStartedAtMs: Long = 0L
+
+    /**
+     * Session-local suppression of SOS alerts on this device: resolve tombstones
+     * ("I'm okay" applied locally before the server write flushes) and manual member
+     * dismissals. A stale Firestore snapshot of a suppressed event can never re-apply
+     * the alert on this device; a NEW SOS event (different id) always surfaces.
+     * See [SosSuppressionState] for policy details.
+     */
+    private val suppressedSosIds = SosSuppressionState()
+
+    /**
+     * In-flight guard against duplicate ride-completion submissions (double-tap "Complete
+     * Ride" or leader+listener echo racing). See [endRide].
+     */
+    private val isCompletingRide = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Ride ids whose shared COMPLETED status this client has OBSERVED (locally decided or
+     * from the authoritative snapshot). Drives the once-per-ride terminal handling so a
+     * repeated COMPLETED snapshot never repeats cleanup (service stop / tracker stop /
+     * history save), and lets [mergeSharedRideStatus] reject stale terminal mutations.
+     */
+    private val sharedCompletedRideIds = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    )
     private val riderLatestSequence = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private var lastRecordedGpsPoint: LatLng? = null
+    private var lastGpsTimestampMs: Long = 0L
+    private var lastFirestoreSyncMs: Long = 0L
+    private var lastSyncedDistanceMeters: Double = 0.0
 
     init {
         // Collect real location updates and sync to active ride in Firestore
@@ -165,6 +220,13 @@ class RideRepository(
             }
 
             if (activeDoc != null) {
+                // Never restore a ride from a cached snapshot over an in-session ride with a
+                // different id — a startup fetch ran asynchronously may otherwise clobber a
+                // ride the user just created/joined this session with stale session data.
+                val localCurrent = _currentRide.value
+                if (localCurrent != null && localCurrent.id != activeDoc.id) {
+                    return localCurrent
+                }
                 val rideId = activeDoc.id
                 val rideName = activeDoc.getString("name") ?: "Group Ride"
                 val startLocName = activeDoc.getString("startLocationName") ?: "Start"
@@ -178,6 +240,40 @@ class RideRepository(
                 val statusStr = activeDoc.getString("status") ?: "LOBBY"
                 val status = runCatching { RideStatus.valueOf(statusStr) }.getOrDefault(RideStatus.LOBBY)
 
+                val totalDist = activeDoc.getDouble("totalDistanceMeters") ?: 0.0
+                val totalDur = activeDoc.getDouble("totalDurationSeconds") ?: 0.0
+                // Preserve the planned distance of the in-flight local ride for the same id,
+                // mirroring listenToRide(): a same-session refresh must never clobber the
+                // immutable trip origin/route plan with a Firestore snapshot that predates
+                // the planned-distance write.
+                val preservedLocalPlanned = _currentRide.value
+                    ?.takeIf { it.id == activeDoc.id }
+                    ?.initialPlannedDistanceMeters
+                    ?.takeIf { it > 0.0 }
+                val initPlannedDist = activeDoc.getDouble("initialPlannedDistanceMeters")
+                    ?.takeIf { it > 0.0 }
+                    ?: preservedLocalPlanned
+                    ?: totalDist
+                val startedAt = activeDoc.getLong("startedAtMs") ?: 0L
+
+                val localTelemetry = try { roomDb?.activeRideTelemetryDao()?.getTelemetry(rideId) } catch (_: Exception) { null }
+                val restoredStartAt = if (startedAt > 0L) startedAt else (localTelemetry?.startedAtMs ?: 0L)
+                if (restoredStartAt > 0L) {
+                    rideStartedAtMs = restoredStartAt
+                }
+
+                val restoredActualDist = maxOf(
+                    activeDoc.getDouble("actualRecordedDistanceMeters") ?: 0.0,
+                    localTelemetry?.actualRecordedDistanceMeters ?: 0.0
+                )
+
+                val tLat = localTelemetry?.lastGpsLat
+                val tLng = localTelemetry?.lastGpsLng
+                if (tLat != null && tLng != null) {
+                    lastRecordedGpsPoint = LatLng(tLat, tLng)
+                    lastGpsTimestampMs = localTelemetry.lastGpsTimestampMs
+                }
+
                 val restoredRide = Ride(
                     id = rideId,
                     name = rideName,
@@ -187,7 +283,12 @@ class RideRepository(
                     destinationLocation = LatLng(destLat, destLng),
                     leaderId = leaderId,
                     inviteCode = code,
-                    status = status
+                    status = status,
+                    initialPlannedDistanceMeters = initPlannedDist,
+                    totalDistanceMeters = totalDist,
+                    totalDurationSeconds = totalDur,
+                    actualRecordedDistanceMeters = restoredActualDist,
+                    startedAtMs = restoredStartAt
                 )
                 _currentRide.value = restoredRide
                 listenToRide(rideId)
@@ -269,7 +370,7 @@ class RideRepository(
         }
     }
 
-    private fun processLocationUpdate(loc: LocationUpdate) {
+    internal fun processLocationUpdate(loc: LocationUpdate) {
         val (detectedStatus, stoppedSec) = stopDetector.processSpeed(loc.speedKmh, loc.timestampMs)
         val finalStatus = if (_activeSos.value?.riderId == currentUserId) {
             MemberStatus.EMERGENCY
@@ -280,19 +381,27 @@ class RideRepository(
 
         val activeRide = _currentRide.value
         val activeRideId = activeRide?.id ?: return
-        val currentUid = auth?.currentUser?.uid ?: return
+        val currentUid = auth?.currentUser?.uid ?: currentUserId.ifBlank { "user_rider" }
 
-        // Accumulate actual recorded distance if ride is ACTIVE and GPS accuracy is good (< 30m)
-        if (activeRide.status == RideStatus.ACTIVE && loc.accuracyMeters <= 30f) {
+        // Ignore duplicate or out-of-order fixes when timestamp is explicitly provided
+        if (loc.timestampMs > 0L && lastGpsTimestampMs > 0L && loc.timestampMs <= lastGpsTimestampMs) return
+
+        // Accumulate actual recorded distance if ride is ACTIVE and GPS accuracy is good (< 25m)
+        if (activeRide.status == RideStatus.ACTIVE && loc.accuracyMeters <= 25f) {
             val prev = lastRecordedGpsPoint
-            if (prev != null) {
+            if (prev == null) {
+                lastRecordedGpsPoint = loc.latLng
+            } else {
                 val deltaMeters = prev.distanceTo(loc.latLng) * 1000.0
-                if (deltaMeters in 3.0..300.0) { // filter micro-jitter and teleport jumps
+                if (deltaMeters in 1.0..500.0 && loc.speedKmh >= 1.5) {
                     val newActual = activeRide.actualRecordedDistanceMeters + deltaMeters
                     _currentRide.value = activeRide.copy(actualRecordedDistanceMeters = newActual)
+                    lastRecordedGpsPoint = loc.latLng
+                } else if (deltaMeters > 500.0) {
+                    // Reset anchor after a large GPS jump without adding the glitch distance
+                    lastRecordedGpsPoint = loc.latLng
                 }
             }
-            lastRecordedGpsPoint = loc.latLng
         }
 
         val seq = ++localSequenceNumber
@@ -345,6 +454,7 @@ class RideRepository(
         val safeRideName = rideName.ifBlank { "${startName.ifBlank { "Pune" }} → ${destName.ifBlank { "Lonavala" }}" }
         val safeUserName = currentUserName.ifBlank { "Rider" }
 
+        val initialApproxMeters = startLoc.distanceTo(destLoc) * 1000.0
         val createdRide = Ride(
             id = rideId,
             name = safeRideName,
@@ -354,7 +464,9 @@ class RideRepository(
             destinationLocation = destLoc,
             leaderId = uid,
             inviteCode = inviteCode,
-            status = RideStatus.LOBBY
+            status = RideStatus.LOBBY,
+            initialPlannedDistanceMeters = initialApproxMeters,
+            totalDistanceMeters = initialApproxMeters
         )
 
         val leaderMember = RiderMember(
@@ -390,6 +502,7 @@ class RideRepository(
             "leaderId" to uid,
             "inviteCode" to inviteCode,
             "status" to RideStatus.LOBBY.name,
+            "initialPlannedDistanceMeters" to initialApproxMeters,
             "totalDistanceMeters" to 0.0,
             "totalDurationSeconds" to 0.0,
             "createdAt" to FieldValue.serverTimestamp(),
@@ -622,10 +735,65 @@ class RideRepository(
                 val leaderId = snapshot.getString("leaderId") ?: ""
                 val code = snapshot.getString("inviteCode") ?: ""
                 val statusStr = snapshot.getString("status") ?: "LOBBY"
-                val status = runCatching { RideStatus.valueOf(statusStr) }.getOrDefault(RideStatus.LOBBY)
+                val incomingStatus = runCatching { RideStatus.valueOf(statusStr) }.getOrDefault(RideStatus.LOBBY)
 
-                val current = _currentRide.value
-                _currentRide.value = (current ?: Ride(
+                // Ignore snapshots belonging to a ride this client already left (obsolete
+                // listener callback must not mutate the current ride's metadata).
+                val existingRide = _currentRide.value?.takeIf { it.id == rideId }
+                if (_currentRide.value != null && existingRide == null) {
+                    Log.d("RideRepository", "Ignoring ride-doc snapshot for a different ride $rideId (current=${_currentRide.value?.id})")
+                    return@addSnapshotListener
+                }
+
+                // Canonical shared lifecycle reconciliation: a stale snapshot can never
+                // move a COMPLETED/CANCELLED ride back to ACTIVE/LOBBY.
+                val status = mergeSharedRideStatus(existingRide?.status, incomingStatus, rideId)
+
+                val totalDist = snapshot.getDouble("totalDistanceMeters")
+                    ?.takeIf { it > 0.0 }
+                    ?: existingRide?.totalDistanceMeters
+                    ?: 0.0
+                val totalDur = snapshot.getDouble("totalDurationSeconds")
+                    ?.takeIf { it > 0.0 }
+                    ?: existingRide?.totalDurationSeconds
+                    ?: 0.0
+
+                val snapshotStartedAt = snapshot.getLong("startedAtMs") ?: 0L
+                val localTelemetry = try {
+                    kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                        roomDb?.activeRideTelemetryDao()?.getTelemetry(rideId)
+                    }
+                } catch (_: Exception) { null }
+                val restoredStartedAt = if (snapshotStartedAt > 0L) {
+                    snapshotStartedAt
+                } else if ((existingRide?.startedAtMs ?: 0L) > 0L) {
+                    existingRide!!.startedAtMs
+                } else {
+                    localTelemetry?.startedAtMs ?: 0L
+                }
+
+                if (restoredStartedAt > 0L && rideStartedAtMs <= 0L) {
+                    rideStartedAtMs = restoredStartedAt
+                }
+
+                val initialPlannedDist = snapshot.getDouble("initialPlannedDistanceMeters")
+                    ?.takeIf { it > 0.0 }
+                    ?: existingRide?.initialPlannedDistanceMeters?.takeIf { it > 0.0 }
+                    ?: totalDist
+                val preservedActualDist = maxOf(
+                    existingRide?.actualRecordedDistanceMeters ?: 0.0,
+                    localTelemetry?.actualRecordedDistanceMeters ?: 0.0,
+                    snapshot.getDouble("actualRecordedDistanceMeters") ?: 0.0
+                )
+                // Preserve the larger elapsed duration: local (in-progress ride) wins over Firestore
+                // unless Firestore has a non-zero completed value (e.g. after rejoin).
+                val remoteElapsedSec = snapshot.getDouble("elapsedDurationSeconds") ?: 0.0
+                val preservedElapsedSec = maxOf(
+                    existingRide?.elapsedDurationSeconds ?: 0.0,
+                    remoteElapsedSec
+                )
+
+                val baseRide = existingRide ?: Ride(
                     id = rideId,
                     name = name,
                     startLocationName = startLocName,
@@ -634,10 +802,24 @@ class RideRepository(
                     destinationLocation = LatLng(destLat, destLng),
                     leaderId = leaderId,
                     inviteCode = code,
-                    status = status
-                )).copy(
+                    status = status,
+                    initialPlannedDistanceMeters = initialPlannedDist,
+                    totalDistanceMeters = totalDist,
+                    totalDurationSeconds = totalDur,
+                    actualRecordedDistanceMeters = preservedActualDist,
+                    elapsedDurationSeconds = preservedElapsedSec,
+                    startedAtMs = restoredStartedAt
+                )
+
+                _currentRide.value = baseRide.copy(
                     name = name,
-                    status = status
+                    status = status,
+                    initialPlannedDistanceMeters = initialPlannedDist,
+                    totalDistanceMeters = if (totalDist > 0.0) totalDist else baseRide.totalDistanceMeters,
+                    totalDurationSeconds = if (totalDur > 0.0) totalDur else baseRide.totalDurationSeconds,
+                    actualRecordedDistanceMeters = preservedActualDist,
+                    elapsedDurationSeconds = preservedElapsedSec,
+                    startedAtMs = restoredStartedAt
                 )
             }
         }
@@ -666,29 +848,18 @@ class RideRepository(
         val messagesRef = fs.collection("rides").document(rideId).collection("messages")
         messagesListener = messagesRef.addSnapshotListener { snapshot, error ->
             if (error != null) {
+                // Explicit listener-error handling (never silently swallowed): damage is
+                // bounded — no message is dropped locally, and the error is surfaced.
                 handleFirestoreError(error, OperationType.LIST, messagesRef.path)
+                _messageSendError.value = true
                 return@addSnapshotListener
             }
-            if (snapshot != null && !snapshot.isEmpty) {
-                val latestDoc = snapshot.documents.maxByOrNull {
-                    it.getLong("timestampMs") ?: 0L
-                }
-                if (latestDoc != null) {
-                    val senderId = latestDoc.getString("senderId") ?: ""
-                    val senderName = latestDoc.getString("senderName") ?: "Rider"
-                    val typeStr = latestDoc.getString("type") ?: "IM_OKAY"
-                    val type = runCatching { QuickMessageType.valueOf(typeStr) }.getOrDefault(QuickMessageType.IM_OKAY)
-                    val text = latestDoc.getString("text") ?: type.label
-                    val ts = latestDoc.getLong("timestampMs") ?: System.currentTimeMillis()
-
-                    _recentMessage.value = QuickMessage(
-                        id = latestDoc.id,
-                        senderId = senderId,
-                        senderName = senderName,
-                        type = type,
-                        text = text,
-                        timestampMs = ts
-                    )
+            // Obsolete-ride guard: a callback racing a ride switch must not publish
+            // another ride's messages into the current one.
+            if (_currentRide.value != null && _currentRide.value?.id != rideId) return@addSnapshotListener
+            if (snapshot != null) {
+                snapshot.documents.forEach { doc ->
+                    parseQuickMessageDoc(doc)?.let { msg -> publishQuickMessage(msg, fromLocalEcho = false) }
                 }
             }
         }
@@ -707,7 +878,10 @@ class RideRepository(
                     compareBy<DocumentSnapshot> { it.getLong("timestampMs") ?: 0L }
                         .thenBy { it.id }
                 )
-                if (activeSosDoc != null) {
+                // Suppress tombstoned/resolved and member-dismissed events so stale or
+                // replayed snapshots can never re-apply a locally-removed alert.
+                val suppressedDoc = activeSosDoc?.takeIf { suppressedSosIds.isSuppressed(it.id) }
+                if (!snapshot.isEmpty && activeSosDoc != null && suppressedDoc == null) {
                     val riderId = activeSosDoc.getString("riderId") ?: ""
                     val riderName = activeSosDoc.getString("riderName") ?: "Rider"
                     val lat = activeSosDoc.getDouble("latitude") ?: 0.0
@@ -763,7 +937,10 @@ class RideRepository(
         val rawLng = doc.getDouble("longitude") ?: doc.getDouble("startLng")
 
         val speedKmh = doc.getDouble("speedKmh") ?: 0.0
-        val headingDeg = (doc.getDouble("headingDeg") ?: 0.0).toFloat()
+        // Qualified Bearing: missing/invalid heading stays null (never 0° north).
+        val headingDeg = doc.getDouble("headingDeg")
+            ?.toFloat()
+            ?.takeIf { it.isFinite() && it >= 0f }
         val stoppedSec = doc.getLong("stoppedDurationSec") ?: 0L
         val rawLastUpdated = doc.getLong("lastUpdatedMs") ?: doc.getDouble("lastUpdatedMs")?.toLong()
         val serverTimestampMs = doc.getTimestamp("updatedAt")?.toDate()?.time
@@ -860,8 +1037,14 @@ class RideRepository(
         steps: List<NavigationStep>
     ) {
         val current = _currentRide.value ?: return
+        val initDist = if (current.status == RideStatus.LOBBY || current.initialPlannedDistanceMeters <= 0.0) {
+            totalDistanceMeters
+        } else {
+            current.initialPlannedDistanceMeters
+        }
         _currentRide.value = current.copy(
             routePoints = routePoints,
+            initialPlannedDistanceMeters = initDist,
             totalDistanceMeters = totalDistanceMeters,
             totalDurationSeconds = totalDurationSeconds,
             navigationSteps = steps
@@ -873,6 +1056,7 @@ class RideRepository(
                 firestore?.collection("rides")?.document(current.id)
                     ?.update(
                         mapOf(
+                            "initialPlannedDistanceMeters" to initDist,
                             "totalDistanceMeters" to totalDistanceMeters,
                             "totalDurationSeconds" to totalDurationSeconds,
                             "updatedAt" to FieldValue.serverTimestamp()
@@ -886,6 +1070,15 @@ class RideRepository(
 
     fun startRide() {
         val ride = _currentRide.value ?: return
+        // Lifecycle guard: a terminal ride can never be "started" again (stale UI or a
+        // stale ACTIVE write must not resurrect a completed/cancelled ride).
+        val transitionAllowed = RideLifecyclePolicy.canTransition(ride.status, RideStatus.ACTIVE)
+        if (!transitionAllowed) {
+            Log.w("RideRepository", "startRide rejected: ride ${ride.id} status ${ride.status} → ACTIVE is not legal")
+            return
+        }
+        rideStartedAtMs = System.currentTimeMillis()
+        lastRecordedGpsPoint = null
         _currentRide.value = ride.copy(status = RideStatus.ACTIVE)
         locationTracker.startTracking()
 
@@ -904,28 +1097,177 @@ class RideRepository(
         }
     }
 
-    suspend fun endRide() {
-        val ride = _currentRide.value ?: return
-        val currentUid = auth?.currentUser?.uid ?: currentUserId
-        val activeSos = _activeSos.value
-        if (activeSos != null && activeSos.riderId == currentUid && !activeSos.isResolved) {
-            resolveSos()
+    /**
+     * Lifecycle reconciliation for ride-status updates arriving from any source
+     * (authoritative shared snapshot, local leader decision, or test injection).
+     * Enforces [RideLifecyclePolicy]: a stale `ACTIVE`/`LOBBY` snapshot can never
+     * reactivate a COMPLETED/CANCELLED ride; a legit `ACTIVE → COMPLETED` always wins.
+     */
+    internal fun mergeSharedRideStatus(current: RideStatus?, incoming: RideStatus, rideId: String): RideStatus {
+        if (current == null) return incoming
+        if (current == incoming) return current
+        if (RideLifecyclePolicy.canTransition(current, incoming)) {
+            Log.d("RideRepository", "Shared ride status transition ride=$rideId $current → $incoming")
+            return incoming
         }
-        _currentRide.value = ride.copy(status = RideStatus.COMPLETED)
-        _activeSos.value = null
-        locationTracker.stopTracking()
+        Log.w("RideRepository", "Stale ride-status update rejected ride=$rideId $current ➜ $incoming (current state is authoritative)")
+        return current
+    }
+
+    suspend fun endRide(): Result<Unit> {
+        val ride = _currentRide.value ?: return Result.failure(IllegalStateException("No active ride to complete"))
+        val currentUid = auth?.currentUser?.uid ?: currentUserId
+
+        // Only the ride leader is authorized to complete the shared ride. A member must
+        // use leaveRide(); allowing any rider to flip the shared status would let a
+        // member's device mutate group-wide lifecycle state.
+        if (ride.leaderId != currentUid) {
+            Log.w("RideRepository", "Ride completion DENIED: rider $currentUid is not the leader of ride ${ride.id} (leader=${ride.leaderId})")
+            return Result.failure(SecurityException("Only the ride leader can complete the ride"))
+        }
+
+        // Prevent duplicate completion submissions (double tap + listener echo races).
+        if (!isCompletingRide.compareAndSet(false, true)) {
+            Log.d("RideRepository", "Ride completion already in progress for ride ${ride.id}; ignoring duplicate request")
+            return Result.success(Unit)
+        }
 
         try {
-            firestore?.collection("rides")?.document(ride.id)
-                ?.update(
-                    mapOf(
-                        "status" to RideStatus.COMPLETED.name,
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                )?.await()
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.UPDATE, "rides/${ride.id}")
+            val activeSos = _activeSos.value
+            if (activeSos != null && activeSos.riderId == currentUid && !activeSos.isResolved) {
+                resolveSos()
+            }
+            // Compute actual elapsed seconds from wall-clock start timestamp.
+            // Fall back to totalDurationSeconds only if we never recorded a start time (e.g. rejoin).
+            val nowMs = System.currentTimeMillis()
+            val actualElapsedSec: Double = if (rideStartedAtMs > 0L) {
+                ((nowMs - rideStartedAtMs) / 1000.0).coerceAtLeast(0.0)
+            } else {
+                ride.totalDurationSeconds
+            }
+
+            // 1. Authoritative shared write FIRST: in-flight transactions and pending
+            //    writes confirm the state via the ride listener; the leader's local UI
+            //    transition below matches this outcome.
+            var lastError: Exception? = null
+            var attemptsUsed = 0
+            val fs = firestore
+            if (fs != null) {
+                val rideRef = fs.collection("rides").document(ride.id)
+                for (attempt in 1..FirestoreWriteRetryPolicy.MAX_ATTEMPTS) {
+                    attemptsUsed = attempt
+                    val backoff = FirestoreWriteRetryPolicy.delayBeforeAttemptMs(attempt)
+                    if (backoff > 0) delay(backoff)
+                    try {
+                        fs.runTransaction { transaction ->
+                            val snapshot = transaction.get(rideRef)
+                            val currentStatus = snapshot.getString("status") ?: "LOBBY"
+                            if (snapshot.exists() && currentStatus != RideStatus.COMPLETED.name) {
+                                transaction.update(
+                                    rideRef,
+                                    mapOf(
+                                        "status" to RideStatus.COMPLETED.name,
+                                        "elapsedDurationSeconds" to actualElapsedSec,
+                                        "updatedAt" to FieldValue.serverTimestamp()
+                                    )
+                                )
+                            }
+                        }.await()
+                        lastError = null
+                        break
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        lastError = e
+                        Log.w("RideRepository", "Shared ride completion attempt $attempt failed: ${e.message}")
+                    }
+                }
+            } else {
+                lastError = IllegalStateException("Firestore unavailable for ride completion")
+            }
+
+            // 2. The local device transition is applied once, regardless of the write
+            //    outcome, so the leader's own session is never stuck in ACTIVE when the
+            //    network fails (offline Firestore persistence replays queued writes).
+            _currentRide.value = _currentRide.value?.copy(
+                status = RideStatus.COMPLETED,
+                elapsedDurationSeconds = actualElapsedSec
+            )
+            sharedCompletedRideIds.add(ride.id)
+            rideStartedAtMs = 0L
+            _activeSos.value = null
+            locationTracker.stopTracking()
+
+            if (lastError == null) {
+                Log.d("RideRepository", "Shared ride COMPLETED written for ride ${ride.id} (attempts=$attemptsUsed, elapsed=${actualElapsedSec}s)")
+                return Result.success(Unit)
+            }
+
+            // 3. Fallback: a plain update() queues into Firestore offline persistence, so
+            //    completion still propagates once connectivity returns (transactions do
+            //    not work offline; simple writes do). A transaction-only failure path
+            //    would leave members staring at an ACTIVE ride forever.
+            Log.w("RideRepository", "Transaction-based completion failed for ride ${ride.id}; falling back to queued update write")
+            return if (fs == null) {
+                Result.failure(lastError!!)
+            } else {
+                try {
+                    fs.collection("rides").document(ride.id)
+                        .update(
+                            mapOf(
+                                "status" to RideStatus.COMPLETED.name,
+                                "elapsedDurationSeconds" to actualElapsedSec,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    Log.d("RideRepository", "Queued completion write accepted for ride ${ride.id} (offline persistence will flush)")
+                    Result.success(Unit)
+                } catch (e: Exception) {
+                    handleFirestoreError(e, OperationType.UPDATE, "rides/${ride.id}")
+                    Result.failure(e)
+                }
+            }
+        } finally {
+            isCompletingRide.set(false)
         }
+    }
+
+    /**
+     * Client-side handling for an observed shared COMPLETED status (each joined device).
+     * Stops ride-scoped work that must not continue past completion; the per-ride
+     * once-only UI/navigation side effects live in the ViewModel.
+     */
+    fun onSharedRideCompleted(rideId: String) {
+        val wasNew = sharedCompletedRideIds.add(rideId)
+        locationTracker.stopTracking()
+        stopDetector.reset()
+        rideStartedAtMs = 0L
+        if (_currentRide.value?.id == rideId) {
+            _activeSos.value = null
+        }
+        Log.d("RideRepository", "Shared COMPLETED observed for ride $rideId; ride-scoped tracking ${if (wasNew) "stopped (first)" else "already stopped"}")
+    }
+
+    internal fun isSharedRideCompletedObserved(rideId: String): Boolean =
+        sharedCompletedRideIds.contains(rideId)
+
+    // ---- Test-only seams (internal visibility, not for production call sites) ----
+
+    /** Applies a shared status update through the SAME policy path as the live listener. */
+    internal fun applySharedRideStatusForTest(next: RideStatus) {
+        val ride = _currentRide.value ?: return
+        val merged = mergeSharedRideStatus(ride.status, next, ride.id)
+        _currentRide.value = ride.copy(status = merged)
+        if (merged == RideStatus.COMPLETED) sharedCompletedRideIds.add(ride.id)
+    }
+
+    /** Lets tests exercise listener reconciliation (dedup/ordering) without Firestore. */
+    internal fun ingestSharedMessageForTest(msg: QuickMessage) = publishQuickMessage(msg, fromLocalEcho = false)
+
+    /** Lets tests simulate the "not the leader" authorization failure deterministically. */
+    internal fun updateLeaderIdForTest(newLeaderId: String) {
+        val ride = _currentRide.value ?: return
+        _currentRide.value = ride.copy(leaderId = newLeaderId)
     }
 
     suspend fun leaveRide() {
@@ -949,6 +1291,12 @@ class RideRepository(
 
         detachListeners()
         locationTracker.stopTracking()
+        rideStartedAtMs = 0L
+        lastRecordedGpsPoint = null
+        messageRegistry.clear()
+        _recentMessages.value = emptyList()
+        _recentMessage.value = null
+        _messageSendError.value = false
         _currentRide.value = null
         _activeSos.value = null
         _members.value = emptyList()
@@ -1000,6 +1348,11 @@ class RideRepository(
         val activeRideId = _currentRide.value?.id ?: return
         val currentUid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return
 
+        _messageSendError.value = false
+
+        // Stable id generated ONCE — retries reuse the same id so a retry can never
+        // create a duplicate document, and double-sends are distinct messages (each
+        // user tap is an intentional dispatch).
         val msgId = UUID.randomUUID().toString()
         val msg = QuickMessage(
             id = msgId,
@@ -1009,28 +1362,92 @@ class RideRepository(
             text = type.label,
             timestampMs = System.currentTimeMillis()
         )
-        _recentMessage.value = msg
+        val doc = mapOf(
+            "id" to msgId,
+            "rideId" to activeRideId,
+            "senderId" to currentUid,
+            "senderName" to currentUserName,
+            "type" to type.name,
+            "text" to type.label,
+            "timestampMs" to msg.timestampMs,
+            "createdAt" to FieldValue.serverTimestamp()
+        )
+
+        // Local echo first (instant own-device feedback); the same stable id is later
+        // reconciled against the server snapshot (dedup, no double display).
+        publishQuickMessage(msg, fromLocalEcho = true)
 
         repositoryScope.launch {
-            try {
-                val doc = mapOf(
-                    "id" to msgId,
-                    "rideId" to activeRideId,
-                    "senderId" to currentUid,
-                    "senderName" to currentUserName,
-                    "type" to type.name,
-                    "text" to type.label,
-                    "timestampMs" to System.currentTimeMillis(),
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-                firestore?.collection("rides")?.document(activeRideId)
-                    ?.collection("messages")?.document(msgId)
-                    ?.set(doc)
-                    ?.await()
-            } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.CREATE, "rides/$activeRideId/messages/$msgId")
+            val fs = firestore
+            if (fs == null) {
+                Log.w("RideRepository", "Group message send failed: firestore unavailable (msgId=$msgId ride=$activeRideId)")
+                _messageSendError.value = true
+                return@launch
+            }
+            val msgRef = fs.collection("rides").document(activeRideId).collection("messages").document(msgId)
+            var lastError: Exception? = null
+            var attemptsUsed = 0
+            for (attempt in 1..FirestoreWriteRetryPolicy.MAX_ATTEMPTS) {
+                attemptsUsed = attempt
+                val backoff = FirestoreWriteRetryPolicy.delayBeforeAttemptMs(attempt)
+                if (backoff > 0) delay(backoff)
+                try {
+                    msgRef.set(doc).await()
+                    lastError = null
+                    break
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    lastError = e
+                    Log.w("RideRepository", "Group message send attempt $attempt/$msgId failed: ${e.message}")
+                }
+            }
+            if (lastError == null) {
+                Log.d("RideRepository", "Group message sent confirmed (msgId=$msgId ride=$activeRideId attempts=$attemptsUsed)")
+            } else {
+                // Unrecoverable send failure is surfaced, not silently swallowed.
+                handleFirestoreError(lastError, OperationType.CREATE, "rides/$activeRideId/messages/$msgId")
+                _messageSendError.value = true
             }
         }
+    }
+
+    /**
+     * Single reconciliation entry point for every group message reaching this device
+     * (local echo and server snapshots). Deduplicates by stable id, keeps a bounded
+     * chronological history and publishes the legacy single-slot "recent message".
+     */
+    private fun publishQuickMessage(msg: QuickMessage, fromLocalEcho: Boolean) {
+        val isNew = messageRegistry.accept(msg)
+        val history = messageRegistry.snapshot()
+        _recentMessages.value = history
+        if (isNew) {
+            // Newest message (by registry order) wins the legacy single-slot view; older
+            // new arrivals remain available in the list view for the sequential toast.
+            _recentMessage.value = messageRegistry.newest()
+            Log.d(
+                "RideRepository",
+                "Group message ${if (fromLocalEcho) "echo" else "recv"}: msgId=${msg.id} senderId=${msg.senderId} ts=${msg.timestampMs} (history=${history.size})"
+            )
+        }
+    }
+
+    private fun parseQuickMessageDoc(doc: com.google.firebase.firestore.DocumentSnapshot): QuickMessage? {
+        val senderId = doc.getString("senderId") ?: return null
+        val senderName = doc.getString("senderName") ?: "Rider"
+        val typeStr = doc.getString("type") ?: "IM_OKAY"
+        val type = runCatching { QuickMessageType.valueOf(typeStr) }.getOrDefault(QuickMessageType.IM_OKAY)
+        val text = doc.getString("text") ?: type.label
+        val ts = doc.getLong("timestampMs") ?: 0L
+        // Stable doc id is the canonical message id (sender echo and receiver agree).
+        return QuickMessage(
+            id = doc.id,
+            senderId = senderId,
+            senderName = senderName,
+            type = type,
+            text = text,
+            timestampMs = ts
+        )
     }
 
     suspend fun triggerSos(): Result<SosEvent> {
@@ -1134,9 +1551,16 @@ class RideRepository(
         }
 
         repositoryScope.launch {
-            try {
-                val sosRef = firestore?.collection("rides")?.document(activeRideId)?.collection("sos")?.document(sosId)
-                if (sosRef != null) {
+            val sosRef = firestore?.collection("rides")?.document(activeRideId)?.collection("sos")?.document(sosId)
+            if (sosRef == null) {
+                Log.w("RideRepository", "SOS acknowledge skipped: firestore unavailable")
+                return@launch
+            }
+            var lastError: Exception? = null
+            for (attempt in 1..SosRetryPolicy.MAX_ATTEMPTS) {
+                val backoff = SosRetryPolicy.delayBeforeAttemptMs(attempt)
+                if (backoff > 0) delay(backoff)
+                try {
                     firestore.runTransaction { transaction ->
                         val snapshot = transaction.get(sosRef)
                         val isResolved = snapshot.getBoolean("isResolved") ?: false
@@ -1144,12 +1568,41 @@ class RideRepository(
                             transaction.update(sosRef, "acknowledgedBy", FieldValue.arrayUnion(currentUid))
                         }
                     }.await()
+                    lastError = null
+                    break
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // Retry: without a confirmed server write the acknowledgment only
+                    // exists on the acking device — the SOS sender never learns someone
+                    // is coming ("ack only goes to the acking user").
+                    lastError = e
+                    Log.w("RideRepository", "SOS ack attempt $attempt failed: ${e.message}")
                 }
-            } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/sos/$sosId")
+            }
+            if (lastError != null) {
+                handleFirestoreError(lastError, OperationType.UPDATE, "rides/$activeRideId/sos/$sosId")
             }
         }
     }
+
+    /**
+     * Manual per-device removal of the SOS popup by a non-sender member. Purely local
+     * courtesy control: it hides THIS member's banner and suppresses stale replays of
+     * the event on this device, but never resolves or cancels the sender's emergency
+     * (only the sender or the ride leader can [resolveSosInternal]).
+     */
+    fun dismissSosBanner(sosId: String? = null) {
+        val id = sosId ?: _activeSos.value?.id ?: return
+        if (id.isBlank()) return
+        suppressedSosIds.suppress(id)
+        if (_activeSos.value?.id == id) {
+            _activeSos.value = null
+        }
+    }
+
+    internal fun isSosSuppressedThisSession(sosId: String?): Boolean =
+        suppressedSosIds.isSuppressed(sosId)
 
     suspend fun resolveSosInternal(sosId: String? = null): Result<Unit> {
         val activeRideId = _currentRide.value?.id ?: return Result.failure(IllegalStateException("No active ride"))
@@ -1164,9 +1617,6 @@ class RideRepository(
             return Result.failure(SecurityException("Only SOS sender or ride leader can resolve SOS alert"))
         }
 
-        val previousSos = _activeSos.value
-        val previousStatus = _currentRiderStatus.value
-
         val fs = firestore
         if (fs == null) {
             return Result.failure(IllegalStateException("Firestore unavailable"))
@@ -1176,30 +1626,50 @@ class RideRepository(
             _activeSos.value = null
             _currentRiderStatus.value = MemberStatus.RIDING
         }
+        // Tombstone this id so the live SOS listener can never re-apply a stale unresolved
+        // snapshot of the event on this device.
+        suppressedSosIds.suppress(targetEvent.id)
 
-        return try {
-            val sosRef = fs.collection("rides").document(activeRideId).collection("sos").document(targetEvent.id)
-            fs.runTransaction { transaction ->
-                val snapshot = transaction.get(sosRef)
-                if (snapshot.exists() && snapshot.getBoolean("isResolved") != true) {
-                    transaction.update(
-                        sosRef,
-                        mapOf(
-                            "isResolved" to true,
-                            "resolvedAtMs" to System.currentTimeMillis(),
-                            "updatedAt" to FieldValue.serverTimestamp()
+        val sosRef = fs.collection("rides").document(activeRideId).collection("sos").document(targetEvent.id)
+        var lastError: Exception? = null
+        for (attempt in 1..SosRetryPolicy.MAX_ATTEMPTS) {
+            val backoff = SosRetryPolicy.delayBeforeAttemptMs(attempt)
+            if (backoff > 0) delay(backoff)
+            try {
+                fs.runTransaction { transaction ->
+                    val snapshot = transaction.get(sosRef)
+                    if (snapshot.exists() && snapshot.getBoolean("isResolved") != true) {
+                        transaction.update(
+                            sosRef,
+                            mapOf(
+                                "isResolved" to true,
+                                "resolvedAtMs" to System.currentTimeMillis(),
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
                         )
-                    )
-                }
-            }.await()
-            Result.success(Unit)
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/sos/${targetEvent.id}")
-            if (_activeSos.value == null) {
-                _activeSos.value = previousSos
-                _currentRiderStatus.value = previousStatus
+                    }
+                }.await()
+                lastError = null
+                break
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Retry transient failures: an unresolved doc left on the server keeps the
+                // alert ringing on every other member's device indefinitely.
+                lastError = e
+                Log.w("RideRepository", "SOS resolve attempt $attempt failed: ${e.message}")
             }
-            Result.failure(e)
+        }
+        return if (lastError == null) {
+            Result.success(Unit)
+        } else {
+            handleFirestoreError(lastError, OperationType.UPDATE, "rides/$activeRideId/sos/${targetEvent.id}")
+            // Intentionally do NOT resurrect the alert here: once the rider leader/sender has
+            // resolved locally, that state is authoritative for the session. Firestore will
+            // propagate the resolve when connectivity returns; restoring a "previousSos"
+            // snapshot after a transient offline write failure made the banner flash back on
+            // the UI (and broke resolve idempotency in tests).
+            Result.failure(lastError)
         }
     }
 

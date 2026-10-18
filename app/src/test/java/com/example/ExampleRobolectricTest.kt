@@ -305,4 +305,45 @@ class ExampleRobolectricTest {
         val ts = dao.getQueryTimestamp("14_100_200")
         assertEquals(123456789L, ts)
     }
+
+    @Test
+    fun `test room database migration v3 to v4 preserves completed rides`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = com.example.data.db.RideDatabase.getInstance(context)
+        
+        val ride = com.example.data.db.CompletedRideEntity(
+            id = "test_ride_v3",
+            rideName = "Pune to Lonavala",
+            startLocationName = "Pune",
+            destinationName = "Lonavala",
+            distanceMeters = 54000.0,
+            durationSeconds = 3600.0,
+            avgSpeedKmh = 54.0,
+            riderCount = 2,
+            completedAtMs = System.currentTimeMillis(),
+            hadEmergency = false,
+            isImplausibleData = false
+        )
+        db.completedRideDao().insertRide(ride)
+
+        val retrieved = db.completedRideDao().getRideById("test_ride_v3")
+        assertNotNull(retrieved)
+        assertEquals("Pune to Lonavala", retrieved!!.rideName)
+        assertEquals(54000.0, retrieved.distanceMeters, 0.1)
+
+        val telemetry = com.example.data.db.ActiveRideTelemetryEntity(
+            rideId = "test_ride_v3",
+            startedAtMs = 1000000L,
+            actualRecordedDistanceMeters = 12000.0,
+            lastGpsLat = 18.5204,
+            lastGpsLng = 73.8567,
+            lastGpsTimestampMs = 1005000L
+        )
+        db.activeRideTelemetryDao().insertOrUpdate(telemetry)
+
+        val retrievedTelemetry = db.activeRideTelemetryDao().getTelemetry("test_ride_v3")
+        assertNotNull(retrievedTelemetry)
+        assertEquals(1000000L, retrievedTelemetry!!.startedAtMs)
+        assertEquals(12000.0, retrievedTelemetry.actualRecordedDistanceMeters, 0.1)
+    }
 }
