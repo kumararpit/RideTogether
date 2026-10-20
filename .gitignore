@@ -19,3 +19,8 @@ debug.keystore
 *-debug.log
 firebase-debug.log
 firestore-debug.log
+
+# Dependency trees, IDE state and build output
+node_modules/
+.idea/
+app/build/
