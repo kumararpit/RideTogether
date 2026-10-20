@@ -150,8 +150,9 @@ class ExampleRobolectricTest {
         // indefinitely (>30 min observed, thread-dumped).
         //
         // The repository's Firestore dependency is nullable and every access is
-        // null-safe, so the repository is exercised fully in-memory: the offline
-        // suite stays hermetic and repeatable.
+        // null-safe, so the repository can be exercised fully in-memory. The
+        // assertions below cover the same repository behaviour without touching
+        // the network, which keeps the offline suite hermetic and repeatable.
         val repo = RideRepository(
             locationTracker = tracker,
             firestore = null,

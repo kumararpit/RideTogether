@@ -384,6 +384,21 @@ class RideViewModel(
                         )
                         _routeResult.value = result
                         navEngine.setRoute(result)
+                        // B-02: a new route restarts guidance — the voice must not
+                        // inherit the previous route's announcement suppression,
+                        // otherwise the new route's first maneuvers are silent.
+                        navAudioGuidance.resetAnnounceHistory()
+                    } else if (isNewRide && !routeEligible) {
+                        // B-03 (audit F12-D1): the ride was restored (process
+                        // death) but the ride document carries no geometry — the
+                        // navigation engine would stay empty ("Follow Route",
+                        // Remaining 0 m, no route line) until an off-route
+                        // reroute rebuilt a route.
+                        //
+                        // The geometry is persisted separately (rides/{id}/route);
+                        // fetch it once per ride and re-arm the engine with it.
+                        currentRouteRideId = ride.id
+                        restorePersistedRouteGeometry(ride.id)
                     }
 
                     // Shared completion observed from the authoritative ride document —
@@ -508,11 +523,15 @@ class RideViewModel(
         val navProg = navEngine.processLocation(locUpdate)
 
         // Voice Guidance Instruction Announcement
+        // The spoken instruction is the UPCOMING maneuver — the same step the
+        // banner shows and the same step [NavigationProgress.distanceToNextManeuverMeters]
+        // counts down to (audit F1-D1). The announcement key is the upcoming
+        // maneuver index, so each maneuver is spoken exactly once.
         val currentStep = navEngine.getCurrentStep()
         if (currentStep != null && _currentScreen.value == AppScreen.LIVE_RIDE) {
             navAudioGuidance.speakManeuver(
                 instruction = currentStep.instruction,
-                maneuverIndex = navProg.currentManeuverIndex,
+                maneuverIndex = navProg.upcomingManeuverIndex,
                 distanceMeters = navProg.distanceToNextManeuverMeters
             )
         }
@@ -546,6 +565,36 @@ class RideViewModel(
                 android.util.Log.d("RideViewModel", "Rerouting triggered. Dist: $distMeters, Threshold: $adaptiveThreshold")
                 rerouteFromCurrentLocation()
             }
+        }
+    }
+
+    /**
+     * B-03: re-arms the navigation engine with the route geometry persisted for
+     * a restored ride. Runs once per ride; a missing document (older rides) or a
+     * failed read simply leaves the current behaviour untouched.
+     */
+    private fun restorePersistedRouteGeometry(rideId: String) {
+        viewModelScope.launch {
+            val stored = repository.fetchRouteGeometry(rideId) ?: return@launch
+            if (stored.points.size < 2) return@launch
+            // A newer route may have been installed while the fetch was in
+            // flight — never overwrite a live route with a stale document.
+            if (currentRouteRideId != rideId) return@launch
+            if (!_routeResult.value?.coordinates.isNullOrEmpty()) return@launch
+
+            val result = RouteResult(
+                coordinates = stored.points,
+                totalDistanceMeters = stored.totalDistanceMeters,
+                totalDurationSeconds = stored.totalDurationSeconds,
+                steps = stored.steps
+            )
+            _routeResult.value = result
+            navEngine.setRoute(result)
+            navAudioGuidance.resetAnnounceHistory()
+            android.util.Log.d(
+                "RideViewModel",
+                "Restored persisted route geometry for ride $rideId (${stored.points.size} points)"
+            )
         }
     }
 
@@ -701,6 +750,8 @@ class RideViewModel(
                     _routeResult.value = result
                     _routePlanError.value = null
                     navEngine.setRoute(result)
+                    // B-02: new route ⇒ new guidance announcements (see above).
+                    navAudioGuidance.resetAnnounceHistory()
                     repository.updateRoute(
                         result.coordinates,
                         result.totalDistanceMeters,
@@ -770,6 +821,10 @@ class RideViewModel(
                     _routeResult.value = result
                     _routePlanError.value = null
                     navEngine.setRoute(result)
+                    // B-02: a reroute installs a NEW route — its first maneuvers
+                    // must be announced, so the previous route's announcement
+                    // suppression must be cleared (audit F1-D3).
+                    navAudioGuidance.resetAnnounceHistory()
                     repository.updateRoute(
                         result.coordinates,
                         result.totalDistanceMeters,

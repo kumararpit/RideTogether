@@ -147,11 +147,22 @@ class MapCameraController {
         )
     }
 
+    /**
+     * Fits the given points into the viewport.
+     *
+     * Phase B (backlog B-06): the padding is **chrome-aware** — the caller
+     * passes the insets occupied by the maneuver banner (top) and the trip HUD
+     * (bottom), so a fitted route is not hidden underneath them. The previous
+     * uniform 100 px padding ignored the chrome entirely and could place the
+     * riders or the route under the control column and the telemetry card.
+     */
     fun showOverview(
-        points: List<LatLng>, 
-        widthPx: Float = 1080f, 
+        points: List<LatLng>,
+        widthPx: Float = 1080f,
         heightPx: Float = 1920f,
-        paddingPx: Float = 100f
+        paddingPx: Float = 100f,
+        topInsetPx: Float = 0f,
+        bottomInsetPx: Float = 0f
     ) {
         if (points.isEmpty()) return
 
@@ -161,7 +172,10 @@ class MapCameraController {
         val maxLng = points.maxOf { it.longitude }
 
         val usableWidthPx = (widthPx - paddingPx * 2).coerceAtLeast(100f) * 0.75f
-        val usableHeightPx = (heightPx - paddingPx * 2).coerceAtLeast(100f) * 0.75f
+        // Chrome-aware usable height: the space between the banner and the trip
+        // HUD, minus the base padding on both sides.
+        val usableHeightPx =
+            (heightPx - paddingPx * 2 - topInsetPx - bottomInsetPx).coerceAtLeast(100f) * 0.75f
 
         val lonSpanTile = kotlin.math.abs(TileMath.lonToTileX(maxLng, 0f) - TileMath.lonToTileX(minLng, 0f))
         val latSpanTile = kotlin.math.abs(TileMath.latToTileY(minLat, 0f) - TileMath.latToTileY(maxLat, 0f))

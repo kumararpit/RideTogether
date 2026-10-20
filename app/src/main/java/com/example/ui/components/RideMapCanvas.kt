@@ -35,6 +35,7 @@ import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -71,6 +72,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
@@ -91,7 +94,13 @@ import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.SlateDark900
 import com.example.ui.theme.StatusEmergencyRed
 import com.example.ui.theme.StatusRidingGreen
+import com.example.ui.map.AmenityClustering
+import com.example.ui.map.AmenityPalette
+import com.example.ui.map.MapChromeInsets
 import com.example.ui.map.MapLabelTheme
+import com.example.ui.map.MapOverlayContract
+import com.example.ui.map.MapOverlayLayer
+import com.example.ui.map.RiderMarkerStyle
 import com.example.ui.map.RouteRenderMath
 import com.example.ui.map.ScaleBarMath
 import kotlin.math.PI
@@ -102,19 +111,22 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
- * Route band palette (Phase B, audit §6 P2) — RT-original colors, structured
+ * Route band palette (Phase B, backlog B-11) — RT-original colors, structured
  * after the measured reference *relationship* (dark casing + bright core +
  * light centre streak), not copied from any reference artwork.
  */
 private val RouteCasing = Color(0xFF0C1017)   // brand slate — separates the line from pale tiles
 private val RouteStreak = Color(0xFFFFE0A3)  // pale amber centre accent
 
+/** How often the map publishes its frame statistics (5 s). */
+private const val STATS_LOG_INTERVAL_NANOS = 5_000_000_000L
+
 @SuppressLint("UnusedBoxWithConstraintsScope")
 @Composable
 fun RideMapCanvas(
     route: List<LatLng>,
     /**
-     * Vertex indices where a new route leg begins (Phase B, audit §6 P2). The
+     * Vertex indices where a new route leg begins (Phase B, backlog B-11). The
      * renderer pins these vertices so simplification can never draw a straight
      * chord across a waypoint. Empty for legacy single-destination routes.
      */
@@ -269,9 +281,16 @@ fun RideMapCanvas(
         }
     }
 
+    // Phase B (backlog B-18): the map renders at a declared target rate and
+    // collects frame statistics. The ANIMATION stays time-based (the damping
+    // always uses the real elapsed time), so a skipped frame only means the
+    // screen is sampled less often — the motion never slows down.
+    val frameBudget = remember { com.example.ui.map.FrameBudget() }
+
     // Frame-paced display interpolation
     LaunchedEffect(Unit) {
         var lastTime = 0L
+        var lastStatsLogNanos = 0L
         while (true) {
             withFrameNanos { frameTimeNanos ->
                 if (!isResumed) {
@@ -284,15 +303,21 @@ fun RideMapCanvas(
 
                         val targetState = cameraController.state.value
 
-                        displayCenterLat += (targetState.center.latitude.toFloat() - displayCenterLat) * alpha
-                        displayCenterLng += (targetState.center.longitude.toFloat() - displayCenterLng) * alpha
-                        displayZoom += (targetState.zoom - displayZoom) * alpha
+                        // Phase B (B-18): the state is only published when the
+                        // frame budget allows a draw. Publishing it is what
+                        // invalidates the canvas, so this is the render rate.
+                        val mayRender = frameBudget.shouldRender(frameTimeNanos)
+                        if (mayRender) {
+                            displayCenterLat += (targetState.center.latitude.toFloat() - displayCenterLat) * alpha
+                            displayCenterLng += (targetState.center.longitude.toFloat() - displayCenterLng) * alpha
+                            displayZoom += (targetState.zoom - displayZoom) * alpha
 
-                        val targetHeading = targetState.effectiveHeading
-                        val deltaH = ((targetHeading - displayHeading + 540f) % 360f) - 180f
-                        displayHeading = (displayHeading + deltaH * alpha + 360f) % 360f
+                            val targetHeading = targetState.effectiveHeading
+                            val deltaH = ((targetHeading - displayHeading + 540f) % 360f) - 180f
+                            displayHeading = (displayHeading + deltaH * alpha + 360f) % 360f
+                        }
 
-                        if (targetState.mode == MapCameraMode.FOLLOWING || targetState.mode == MapCameraMode.OVERVIEW) {
+                        if (mayRender && (targetState.mode == MapCameraMode.FOLLOWING || targetState.mode == MapCameraMode.OVERVIEW)) {
                             // Smoothly fold residual panOffset into center lat/lng when recentering
                             if (kotlin.math.abs(panOffsetX) > 0.5f || kotlin.math.abs(panOffsetY) > 0.5f) {
                                 val invScale = 1f / with(density) { 256.dp.toPx() } 
@@ -319,7 +344,19 @@ fun RideMapCanvas(
                         // Rider marker glide: same frame-paced loop, same elapsed-frame time.
                         // Marker animation is render-only; camera center/zoom above are untouched.
                         riderMarkerAnimator.advance(dt.toDouble())
-                        animatedMarkerFrame = riderMarkerAnimator.frameVersion
+                        if (mayRender) {
+                            animatedMarkerFrame = riderMarkerAnimator.frameVersion
+                            // Phase B (B-18): the frame's work is timed against the
+                            // budget so "frames over budget" is a real measurement.
+                            frameBudget.recordFrameDuration((frameTimeNanos - lastTime) * 1_000_000L)
+                            // The statistics are published periodically so they are
+                            // observable in the field (logcat) instead of being
+                            // collected and never read.
+                            if (frameTimeNanos - lastStatsLogNanos > STATS_LOG_INTERVAL_NANOS) {
+                                lastStatsLogNanos = frameTimeNanos
+                                android.util.Log.d("RideMapCanvas", "FrameStats: ${frameBudget.stats().summary()}")
+                            }
+                        }
                     }
                     lastTime = frameTimeNanos
                 }
@@ -350,14 +387,17 @@ fun RideMapCanvas(
 
     val riderScreenPositions = remember { mutableMapOf<String, Offset>() }
     val amenityScreenPositions = remember { mutableMapOf<Long, Offset>() }
+    // Painted footprint (screen-space bounds) of each drawn pin, recorded during draw
+    // with the exact same geometry used to paint it, for icon-avoiding label placement.
+    val amenityPaintedBounds = remember { mutableMapOf<Long, AmenityLabelPlanner.IconRect>() }
 
-    // Phase B (audit §6 P2): render-side route geometry cache — world-space
+    // Phase B (backlog B-11): render-side route geometry cache — world-space
     // projection + per-tier simplification, recomputed only when the route or
     // the zoom tier changes (never per frame).
     val routeGeometryCache = remember { com.example.ui.map.RouteGeometryCache() }
     val routeRenderTier = com.example.ui.map.RouteRenderMath.tierForZoom(displayZoom)
 
-    // Phase B (audit §6 P3): the map captions are measured ONCE here instead of
+    // Phase B (backlog B-12): the map captions are measured ONCE here instead of
     // per frame inside the draw phase.
     val startLabelLayout = remember {
         textMeasurer.measure(text = "START", style = MapLabelTheme.waypointStartStyle())
@@ -374,9 +414,6 @@ fun RideMapCanvas(
     // Label anchors (screen-space, below each pin tip) written during draw; read only
     // inside the same draw phase, so a plain map is sufficient (not snapshot state).
     val amenityLabelAnchors = remember { mutableMapOf<Long, Float>() }
-    // Painted footprint (screen-space bounds) of each drawn pin, recorded during draw
-    // with the exact same geometry used to paint it, for icon-avoiding label placement.
-    val amenityPaintedBounds = remember { mutableMapOf<Long, AmenityLabelPlanner.IconRect>() }
     // One-frame label visibility memory for zoom hysteresis (draw-phase only).
     val previousAmenityLabelIds = remember { HashSet<Long>() }
 
@@ -546,12 +583,20 @@ fun RideMapCanvas(
                 tileSizePx = scaledTileSizePx
             )
 
-            // NOTE (Phase B, audit §6 P1): the previous TEMPORARY D7 diagnostic
-            // blocks that logged the tile range and probed the Coil memory cache
-            // from the COMPOSITION phase were removed — they rebuilt a screen-wide
-            // probe string (5 cache lookups per tile) and wrote two log lines on
-            // every recomposition, i.e. per frame while the camera animated.
-            // Frame-time impact was measured on-device before/after the removal.
+            // TEMPORARY D7 DIAGNOSTIC LOGGING (remove after root cause confirmed):
+            // one line per stable range change: camera geometry + composed row bounds.
+            val d7Slice = mutableListOf<Int>()
+            for (tyx in tileRange.minY..tileRange.maxY) {
+                val yUn = anchorY + ((tyx - centerTileYAtTileZoom) * scaledTileSizePx).toFloat()
+                d7Slice.add((yUn + scaledTileSizePx).roundToInt())
+            }
+            android.util.Log.d(
+                "RT-D7",
+                "range z=%d disp=%.6f anchor=(%.1f,%.1f) cXY=(%.4f,%.4f) S=%.4f rowsY(top..bot)=%s lighting=%s phColor=%s".format(
+                    tileZoom, displayZoom, anchorX, anchorY, centerTileXAtTileZoom, centerTileYAtTileZoom,
+                    scaledTileSizePx, d7Slice, effectiveLighting, tilePlaceholderColor
+                )
+            )
 
             LaunchedEffect(tileRange, tileZoom) {
                 val minLon = TileMath.tileXToLon(tileRange.minX.toDouble(), tileZoom.toFloat())
@@ -677,7 +722,7 @@ fun RideMapCanvas(
             // B. Map Vector Elements (Route Line & Start/Finish Points inside rotated container)
             Canvas(modifier = Modifier.fillMaxSize()) {
                 if (route.size >= 2) {
-                    // Render-side geometry cache (Phase B, audit §6 P2): the route is
+                    // Render-side geometry cache (Phase B, backlog B-11): the route is
                     // projected into a fixed world space (tile-17) once per route, and
                     // simplified per zoom tier. Per frame this is now an affine
                     // transform plus three stroke passes — no per-point projection,
@@ -749,7 +794,7 @@ fun RideMapCanvas(
                         )
 
                         // 5. Direction dots — spaced by SCREEN distance (not vertex
-                        //    count), so the cadence stays constant across zooms.
+                        //    count), so the cadence is zoom-independent.
                         val dotSpacingPx = RouteRenderMath.directionDotSpacingPx(displayZoom)
                         if (dotSpacingPx > 0f) {
                             var accumulated = dotSpacingPx
@@ -798,10 +843,24 @@ fun RideMapCanvas(
             }
         }
 
+        // Phase B (backlog B-17): the map surface carries a short accessibility
+        // description — the rider/amenity markers are painted on the canvas and
+        // are therefore invisible to screen readers, while the turn instructions
+        // live in the real Text composables of the banner (already readable).
+        val mapContentDescription = remember(route.size, members.size) {
+            buildString {
+                append("Map. ")
+                append(members.size)
+                append(if (members.size == 1) " rider" else " riders")
+                append(" shown. Turn instructions are in the navigation panel above.")
+            }
+        }
+
         // 2. Unrotated Overlay Canvas (Rider Markers, Upright Labels, Gestures)
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
+                .semantics { contentDescription = mapContentDescription }
                 .testTag("ride_map_canvas")
                 .pointerInput(effectiveHeading) {
                     // Cumulative single-finger pan swallowed while FOLLOWING before
@@ -879,12 +938,21 @@ fun RideMapCanvas(
                 .pointerInput(members, amenities) {
                     detectTapGestures { tapOffset ->
                         var clickedRider: RiderMember? = null
-                        // Phase B (audit §6 P5): density-correct touch target. The
-                        // previous 70f was a raw pixel constant (≈23 dp only on a
-                        // 3× device, shrinking on denser screens). Now 24 dp in
-                        // real pixels, matching the amenity target.
+                        // Phase B (backlog B-07): density-correct touch target.
+                        // The previous 70f was a raw pixel constant (≈23 dp only on
+                        // a 3× device, shrinking on denser screens); the reference
+                        // product uses a 48 dp floor.
                         val riderTapRadiusPx = with(density) { 24.dp.toPx() }
-                        for (member in members) {
+                        // Phase B (backlog B-16): the SELECTED rider is tested
+                        // first, then the remaining riders by list order. Without
+                        // this, a selected rider covered by another rider could
+                        // not be tapped at all.
+                        val orderedForHit = if (selectedRider != null) {
+                            listOf(selectedRider) + members.filter { it.id != selectedRider.id }
+                        } else {
+                            members
+                        }
+                        for (member in orderedForHit) {
                             val pos = riderScreenPositions[member.id] ?: continue
                             val distance = (tapOffset - pos).getDistance()
                             if (distance < riderTapRadiusPx) {
@@ -898,7 +966,15 @@ fun RideMapCanvas(
                         } else {
                             var clickedAmenity: com.example.data.amenities.AmenityEntity? = null
                             val tapTargetRadius = with(density) { 24.dp.toPx() } // Minimum 48dp tap target
-                            for (amenity in amenities) {
+                            // Phase B (B-14): the selected amenity is tested first, so a
+                            // selected pin that is covered by a cluster badge stays
+                            // selectable.
+                            val amenitiesForHit = if (selectedAmenity != null) {
+                                listOf(selectedAmenity) + amenities.filter { it.osmId != selectedAmenity.osmId }
+                            } else {
+                                amenities
+                            }
+                            for (amenity in amenitiesForHit) {
                                 val pos = amenityScreenPositions[amenity.osmId] ?: continue
                                 val distance = (tapOffset - pos).getDistance()
                                 if (distance < tapTargetRadius) {
@@ -940,20 +1016,13 @@ fun RideMapCanvas(
             }
 
             /**
-             * Halo text (Phase B, audit §6 P3): the same 8-direction offset
+             * Halo text (Phase B, backlog B-12): the same 8-direction offset
              * technique as the reference's stroke+fill halo, with RT-original
-             * ink. Keeps map captions legible over pale daytime imagery and
-             * bright night tiles alike.
-             *
-             * The text layout is measured ONCE (cached in composition) — the draw
-             * phase only offsets and paints it, so no text measurement happens
-             * per frame.
+             * ink. Keeps the map captions legible over pale daytime imagery and
+             * bright night tiles alike. The layout is measured once in
+             * composition, so no text measurement happens per frame.
              */
-            fun drawHaloText(
-                layout: androidx.compose.ui.text.TextLayoutResult,
-                x: Float,
-                y: Float
-            ) {
+            fun drawHaloText(layout: androidx.compose.ui.text.TextLayoutResult, x: Float, y: Float) {
                 if (x < -300f || x > canvasW + 150f || y < -100f || y > canvasH + 100f) {
                     return
                 }
@@ -997,13 +1066,46 @@ fun RideMapCanvas(
             amenityScreenPositions.clear()
             amenityLabelAnchors.clear()
             amenityPaintedBounds.clear()
+            // Phase B (backlog B-14): dense amenities are CLUSTERED — one marker
+            // is drawn per group (with a count badge), which keeps a dense area
+            // readable instead of turning into a pin field. The clustering is
+            // deterministic and order independent (see AmenityClustering).
+            val visibleAmenityPositions = ArrayList<Pair<Long, Pair<Float, Float>>>()
             for (amenity in amenities) {
-                val screenPos = latLngToRotatedScreen(LatLng(amenity.lat, amenity.lon))
-
-                if (screenPos.x < -100f || screenPos.x > canvasW + 100f ||
-                    screenPos.y < -100f || screenPos.y > canvasH + 100f) {
+                val pos = latLngToRotatedScreen(LatLng(amenity.lat, amenity.lon))
+                if (pos.x < -100f || pos.x > canvasW + 100f ||
+                    pos.y < -100f || pos.y > canvasH + 100f
+                ) {
                     continue
                 }
+                visibleAmenityPositions.add(amenity.osmId to (pos.x to pos.y))
+            }
+            val amenityClusters = AmenityClustering.cluster(visibleAmenityPositions, maxDistancePx = 30f)
+            val amenitiesById = amenities.associateBy { it.osmId }
+            // The selected amenity always gets its own marker (never hidden in a
+            // cluster) and is drawn last, on top of everything else.
+            val selectedCluster = amenityClusters.firstOrNull { cluster ->
+                selectedAmenity != null && cluster.memberIds.contains(selectedAmenity.osmId)
+            }
+            val drawnAmenityIds = LinkedHashSet<Long>()
+            amenityClusters.forEach { cluster ->
+                cluster.memberIds.forEach { drawnAmenityIds.add(it) }
+            }
+            val drawOrder = amenityClusters
+                .filter { selectedCluster == null || it.representativeId != selectedCluster.representativeId }
+                .toMutableList()
+            if (selectedCluster != null) drawOrder.add(selectedCluster)
+
+            for (cluster in drawOrder) {
+                val drawnId = if (selectedCluster != null && cluster.representativeId == selectedCluster.representativeId) {
+                    selectedAmenity?.osmId ?: cluster.representativeId
+                } else {
+                    cluster.representativeId
+                }
+                val amenity = amenitiesById[drawnId] ?: continue
+                val groupCount = cluster.count
+
+                val screenPos = latLngToRotatedScreen(LatLng(amenity.lat, amenity.lon))
 
                 val isSelected = amenity.osmId == selectedAmenity?.osmId
                 val basePinSizeDp = when {
@@ -1016,7 +1118,17 @@ fun RideMapCanvas(
                 val pinSizePx = pinSizeDp.toPx()
                 val pinRadiusPx = pinSizePx / 2f
                 val tipHeightPx = 4.dp.toPx()
-                val categoryColor = AmenityIconConfig.getCategoryColor(amenity.type)
+                // Phase B (B-14): the RT-original palette, with a day and a night
+                // variant so the marker stays separable from the raster in both
+                // themes.
+                val categoryColor = AmenityPalette.colorFor(
+                    amenity.type,
+                    if (effectiveLighting == com.example.data.map.MapLighting.NIGHT) {
+                        AmenityPalette.Theme.NIGHT
+                    } else {
+                        AmenityPalette.Theme.DAY
+                    }
+                )
 
                 val cx = screenPos.x
                 val cy = screenPos.y - pinRadiusPx - tipHeightPx
@@ -1081,6 +1193,28 @@ fun RideMapCanvas(
                     drawContext.transform.translate(left = -(cx - glyphSize / 2f), top = -(cy - glyphSize / 2f))
                 }
 
+                // Phase B (B-14): a cluster is drawn as ONE marker with a count
+                // badge, so a dense area stays readable.
+                if (groupCount > 1) {
+                    val badgeRadius = (pinRadiusPx * 0.62f).coerceAtLeast(7.dp.toPx())
+                    drawCircle(
+                        color = Color(0xFF0C1017),
+                        radius = badgeRadius,
+                        center = Offset(cx + pinRadiusPx * 0.72f, cy - pinRadiusPx * 0.72f)
+                    )
+                    val badgeLayout = textMeasurer.measure(
+                        text = groupCount.toString(),
+                        style = TextStyle(color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    )
+                    drawText(
+                        textLayoutResult = badgeLayout,
+                        topLeft = Offset(
+                            cx + pinRadiusPx * 0.72f - badgeLayout.size.width / 2f,
+                            cy - pinRadiusPx * 0.72f - badgeLayout.size.height / 2f
+                        )
+                    )
+                }
+
                 // Label anchor (screen-space) just below the pin tip for Part B labels.
                 amenityLabelAnchors[amenity.osmId] = screenPos.y + 3.dp.toPx()
 
@@ -1112,23 +1246,13 @@ fun RideMapCanvas(
                     val head = amenityScreenPositions[amenity.osmId] ?: continue
                     val name = amenity.name?.trim().orEmpty()
                     if (name.isEmpty()) continue
-                    // Planner-only width estimate for the collision box (temporary:
-                    // replaced by the measured pill width after planning). Conservative
-                    // 7.dp/char + 14.dp padding, clamped to the fixed render budget the
-                    // pill text itself is truncated to below.
-                    val estimatedFullWidthPx = minOf(
-                        (with(density) { 7.dp.toPx() }) * name.length +
-                            (with(density) { 14.dp.toPx() }),
-                        labelReserveHalfW * 2f
-                    )
                     add(
                         AmenityLabelPlanner.Candidate(
                             id = amenity.osmId,
                             xPx = head.x,
                             yPx = anchorY,
                             isSelected = amenity.osmId == selectedAmenity?.osmId,
-                            type = amenity.type,
-                            labelFullWidthPx = estimatedFullWidthPx
+                            type = amenity.type
                         )
                     )
                 }
@@ -1142,13 +1266,40 @@ fun RideMapCanvas(
                     reserveHalfHeightPx = labelReserveHalfH,
                     iconRects = amenityPaintedBounds.values.toList()
                 )
+                // Phase B (backlog B-17): the map chrome (maneuver banner, trip
+                // HUD, control column) is PUBLISHED to the renderer, and a label
+                // that would sit under it is suppressed. The reference does the
+                // same natively (it passes the banner height and the bottom-sheet
+                // exposure into the renderer every frame).
+                val chromeInsets = MapChromeInsets(
+                    topPx = if (MapOverlayContract.isChrome(MapOverlayLayer.MANEUVER_BANNER)) topInsetPx else 0f,
+                    bottomPx = if (MapOverlayContract.isChrome(MapOverlayLayer.TRIP_HUD)) bottomInsetPx else 0f,
+                    rightPx = if (MapOverlayContract.isChrome(MapOverlayLayer.MAP_CONTROLS)) {
+                        with(density) { 64.dp.toPx() }
+                    } else {
+                        0f
+                    }
+                )
+                val chromeFreeLabelIds = plannedLabelIds.filter { id ->
+                    val head = amenityScreenPositions[id] ?: return@filter false
+                    val anchorY = amenityLabelAnchors[id] ?: return@filter false
+                    !chromeInsets.overlaps(
+                        x = head.x - labelReserveHalfW,
+                        y = anchorY,
+                        width = labelReserveHalfW * 2f,
+                        height = labelReserveHalfH * 2f,
+                        viewportWidth = canvasW,
+                        viewportHeight = canvasH
+                    )
+                }
+
                 val pillBackground = com.example.ui.theme.MapAppearancePalette
                     .amenityLabelBackground(effectiveLighting)
                 val labelForeground = com.example.ui.theme.MapAppearancePalette
                     .amenityLabelText(effectiveLighting)
                 val maxTextWidthPx = (labelReserveHalfW * 2f - 12.dp.toPx()).roundToInt()
                 for (amenity in amenities) {
-                    if (amenity.osmId !in plannedLabelIds) continue
+                    if (amenity.osmId !in chromeFreeLabelIds) continue
                     val head = amenityScreenPositions[amenity.osmId] ?: continue
                     val anchorY = amenityLabelAnchors[amenity.osmId] ?: continue
                     val name = amenity.name?.trim() ?: continue
@@ -1180,7 +1331,7 @@ fun RideMapCanvas(
                     )
                 }
                 previousAmenityLabelIds.clear()
-                previousAmenityLabelIds.addAll(plannedLabelIds)
+                previousAmenityLabelIds.addAll(chromeFreeLabelIds)
             } else {
                 previousAmenityLabelIds.clear()
             }
@@ -1191,6 +1342,33 @@ fun RideMapCanvas(
             // invalidation; no recomposition of the map composition tree per frame).
             @Suppress("UNUSED_EXPRESSION")
             animatedMarkerFrame
+
+            // Phase B (backlog B-16): pre-pass that computes every rider's screen
+            // position, groups the overlapping ones and derives a deterministic
+            // offset per rider. The offsets are derived from the rider id, so they
+            // are stable across frames and independent of the member list order.
+            val riderPositionsForClustering = ArrayList<Pair<String, Pair<Float, Float>>>()
+            for (rider in members) {
+                val animLat0 = riderMarkerAnimator.renderedLat(rider.id)
+                val animLng0 = riderMarkerAnimator.renderedLng(rider.id)
+                val markerLatLng0 = if (animLat0 != null && animLng0 != null) LatLng(animLat0, animLng0) else rider.location
+                riderPositionsForClustering.add(rider.id to (latLngToRotatedScreen(markerLatLng0).x to latLngToRotatedScreen(markerLatLng0).y))
+            }
+            val riderStackOffsets: Map<String, Pair<Float, Float>> = if (members.size > 1) {
+                val clusters = RiderMarkerStyle.clusterRiders(riderPositionsForClustering, maxDistancePx = 34f)
+                val perClusterIndex = HashMap<Int, Int>()
+                val offsets = HashMap<String, Pair<Float, Float>>()
+                for ((id, pos) in riderPositionsForClustering) {
+                    val cluster = clusters[id] ?: 0
+                    val idx = perClusterIndex.getOrDefault(cluster, 0)
+                    perClusterIndex[cluster] = idx + 1
+                    offsets[id] = RiderMarkerStyle.stackingOffset(id, idx, 2)
+                }
+                offsets
+            } else {
+                emptyMap()
+            }
+
             for (rider in members) {
                 // Rendered (interpolated) position/bearing from the marker animator;
                 // falls back to the raw member location until the first valid target.
@@ -1199,22 +1377,34 @@ fun RideMapCanvas(
                 val animBearing = riderMarkerAnimator.renderedBearing(rider.id)
                 val markerLatLng = if (animLat != null && animLng != null) LatLng(animLat, animLng) else rider.location
                 val screenPos = latLngToRotatedScreen(markerLatLng)
+                riderScreenPositions[rider.id] = screenPos
 
                 // Skip drawing markers far outside the viewport
                 if (screenPos.x < -150f || screenPos.x > canvasW + 150f ||
                     screenPos.y < -150f || screenPos.y > canvasH + 150f) {
-                    // Phase B (audit §6 P5): culled markers are NOT registered for
-                    // hit-testing — a marker that is not painted must not be
-                    // selectable by tapping where it would have been.
-                    riderScreenPositions.remove(rider.id)
                     continue
                 }
 
-                // Registered only for markers that are actually painted.
-                riderScreenPositions[rider.id] = screenPos
-
                 val isSelected = rider.id == selectedRider?.id
                 val isEmergency = rider.status == MemberStatus.EMERGENCY
+
+                // Phase B (backlog B-15/B-16): freshness and fix quality are part
+                // of the rider's presentation. Both are derived from the MEASURED
+                // fix only — the dead-reckoning prediction never reaches here.
+                val riderAgeMs = (System.currentTimeMillis() - rider.lastUpdatedMs).coerceAtLeast(0L)
+                val isStaleRider = RiderMarkerStyle.isStaleStyle(riderAgeMs)
+                val accuracyRingAlpha = RiderMarkerStyle.accuracyRingAlpha(rider.accuracyMeters)
+
+                // Phase B (backlog B-16): deterministic separation of riders whose
+                // markers overlap (the offset is derived from the rider id, so it
+                // never jitters between frames nor reshuffles when the member
+                // list is re-sorted).
+                val stackOffset = riderStackOffsets[rider.id] ?: (0f to 0f)
+                val drawPos = if (stackOffset.first == 0f && stackOffset.second == 0f) {
+                    screenPos
+                } else {
+                    Offset(screenPos.x + stackOffset.first, screenPos.y + stackOffset.second)
+                }
 
                 // Zoom-Adaptive Marker Disc Radius
                 val markerRadiusDp = when {
@@ -1235,6 +1425,17 @@ fun RideMapCanvas(
                     isStopped -> Color(0xFFFFB300) // Stopped Amber Yellow
                     isDisconnectedOrOffline -> Color(0xFF607D8B) // Muted Slate Gray
                     else -> Color(rider.avatarColorHex) // Unique Group Rider Accent Color
+                }
+
+                // Layer A0: fix-quality ring (B-15). Only coarse fixes get a ring,
+                // so a clean fix keeps the marker uncluttered.
+                if (accuracyRingAlpha > 0f) {
+                    drawCircle(
+                        color = Color.White.copy(alpha = accuracyRingAlpha * 0.8f),
+                        radius = markerRadius + 4.dp.toPx(),
+                        center = drawPos,
+                        style = Stroke(width = 1.5.dp.toPx())
+                    )
                 }
 
                 // Layer A1: GPS Accuracy Pulse for Current User
@@ -1275,18 +1476,18 @@ fun RideMapCanvas(
                 drawCircle(
                     color = Color.Black.copy(alpha = 0.45f),
                     radius = markerRadius + 1.dp.toPx(),
-                    center = Offset(screenPos.x + 2.dp.toPx(), screenPos.y + 4.dp.toPx())
+                    center = Offset(drawPos.x + 2.dp.toPx(), drawPos.y + 4.dp.toPx())
                 )
 
                 // Layer C: Base Disc Fill
                 drawCircle(
                     color = markerFillColor,
                     radius = markerRadius,
-                    center = screenPos
+                    center = drawPos
                 )
 
                 // Layer D: Outer Casing / Border (Dashed for Offline/Stale, Solid White for Online)
-                if (isDisconnectedOrOffline) {
+                if (isDisconnectedOrOffline || isStaleRider) {
                     drawCircle(
                         color = Color.White.copy(alpha = 0.8f),
                         radius = markerRadius,
@@ -1300,7 +1501,7 @@ fun RideMapCanvas(
                     drawCircle(
                         color = Color.White,
                         radius = markerRadius,
-                        center = screenPos,
+                        center = drawPos,
                         style = Stroke(width = 2.5.dp.toPx())
                     )
                 }
@@ -1308,35 +1509,49 @@ fun RideMapCanvas(
                 // Layer E: Directional Arrowhead ▲ inside marker disc
                 // Relative to screen top, arrow direction is (bearing - effectiveHeading);
                 // source preference: animator bearing (qualified source shared with
-                // the camera) → member heading → conservative 0 (arrow up) only when
-                // no qualified bearing has EVER been available for this rider.
-                val arrowSourceBearingDeg = animBearing?.toFloat()
-                    ?: rider.headingDeg
-                    ?: 0f
-                val arrowAngleDeg = arrowSourceBearingDeg - effectiveHeading
-                val angleRad = (arrowAngleDeg - 90f) * (PI.toFloat() / 180f)
-                val arrowLen = markerRadius * 0.7f
+                // the camera) → member heading.
+                //
+                // Phase B (backlog B-15): when NO qualified bearing has ever been
+                // available, the arrow is NOT drawn — the previous fallback pointed
+                // the rider north, which fabricates a direction. A neutral "direction
+                // unknown" pip is drawn instead.
+                val hasQualifiedBearing = animBearing != null || rider.headingDeg != null
+                if (RiderMarkerStyle.canDrawDirectionArrow(hasQualifiedBearing)) {
+                    val arrowSourceBearingDeg = animBearing?.toFloat()
+                        ?: rider.headingDeg
+                        ?: 0f
+                    val arrowAngleDeg = arrowSourceBearingDeg - effectiveHeading
+                    val angleRad = (arrowAngleDeg - 90f) * (PI.toFloat() / 180f)
+                    val arrowLen = markerRadius * 0.7f
 
-                val tipX = screenPos.x + cos(angleRad) * arrowLen
-                val tipY = screenPos.y + sin(angleRad) * arrowLen
+                    val tipX = drawPos.x + cos(angleRad) * arrowLen
+                    val tipY = drawPos.y + sin(angleRad) * arrowLen
 
-                val leftX = screenPos.x + cos(angleRad + 2.4f) * (arrowLen * 0.75f)
-                val leftY = screenPos.y + sin(angleRad + 2.4f) * (arrowLen * 0.75f)
+                    val leftX = drawPos.x + cos(angleRad + 2.4f) * (arrowLen * 0.75f)
+                    val leftY = drawPos.y + sin(angleRad + 2.4f) * (arrowLen * 0.75f)
 
-                val rightX = screenPos.x + cos(angleRad - 2.4f) * (arrowLen * 0.75f)
-                val rightY = screenPos.y + sin(angleRad - 2.4f) * (arrowLen * 0.75f)
+                    val rightX = drawPos.x + cos(angleRad - 2.4f) * (arrowLen * 0.75f)
+                    val rightY = drawPos.y + sin(angleRad - 2.4f) * (arrowLen * 0.75f)
 
-                val innerX = screenPos.x + cos(angleRad + PI.toFloat()) * (arrowLen * 0.25f)
-                val innerY = screenPos.y + sin(angleRad + PI.toFloat()) * (arrowLen * 0.25f)
+                    val innerX = drawPos.x + cos(angleRad + PI.toFloat()) * (arrowLen * 0.25f)
+                    val innerY = drawPos.y + sin(angleRad + PI.toFloat()) * (arrowLen * 0.25f)
 
-                val arrowPath = Path().apply {
-                    moveTo(tipX, tipY)
-                    lineTo(leftX, leftY)
-                    lineTo(innerX, innerY)
-                    lineTo(rightX, rightY)
-                    close()
+                    val arrowPath = Path().apply {
+                        moveTo(tipX, tipY)
+                        lineTo(leftX, leftY)
+                        lineTo(innerX, innerY)
+                        lineTo(rightX, rightY)
+                        close()
+                    }
+                    drawPath(arrowPath, color = Color.White)
+                } else {
+                    // Direction unknown — never fabricate a heading.
+                    drawCircle(
+                        color = Color.White.copy(alpha = 0.85f),
+                        radius = 2.5.dp.toPx(),
+                        center = drawPos
+                    )
                 }
-                drawPath(arrowPath, color = Color.White)
 
                 // Layer F: Leader Crown Indicator 👑
                 if (rider.role == com.example.data.model.RideRole.LEADER) {
@@ -1372,6 +1587,19 @@ fun RideMapCanvas(
                     y = boxTopLeft.y + 2f,
                     style = tagStyle
                 )
+
+                // Phase B (backlog B-15): a stale rider says how long ago it was
+                // last seen — without it, a rider that vanished ten minutes ago
+                // still looks live.
+                val lastSeen = RiderMarkerStyle.lastSeenLabel(riderAgeMs)
+                if (lastSeen != null) {
+                    drawSafeText(
+                        text = lastSeen,
+                        x = boxTopLeft.x + 8f,
+                        y = boxTopLeft.y + 2f + textH + 1f,
+                        style = TextStyle(color = Color.White.copy(alpha = 0.75f), fontSize = 9.sp)
+                    )
+                }
             }
         }
 
@@ -1439,7 +1667,16 @@ fun RideMapCanvas(
                 onClick = {
                     val allPoints = members.map { it.location } + route
                     if (allPoints.isNotEmpty()) {
-                        cameraController.showOverview(allPoints, widthPx, heightPx, 100f)
+                        // Chrome-aware framing (B-06): the fit must clear the
+                        // maneuver banner (top) and the trip HUD (bottom).
+                        cameraController.showOverview(
+                            points = allPoints,
+                            widthPx = widthPx,
+                            heightPx = heightPx,
+                            paddingPx = 100f,
+                            topInsetPx = topInsetPx,
+                            bottomInsetPx = bottomInsetPx
+                        )
                         onFollowRiderChange(false)
                     }
                 },
@@ -1518,15 +1755,12 @@ fun RideMapCanvas(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Map Scale Bar — dynamic (Phase B, audit §6 P4). The previous bar
-            // was a static 48-dp line captioned "500 m" regardless of zoom, so
-            // it lied at every zoom level except one. Now the caption and the
-            // bar length are derived from the real ground distance at the
-            // current center latitude and zoom.
-            //
-            // Drawn in a Canvas (draw phase) rather than as Text/Box composables
-            // so the camera feed invalidates only the draw phase here instead of
-            // recomposing the control column on every frame.
+            // Map Scale Bar — dynamic (Phase B, backlog B-13). The previous bar
+            // was a static 48-dp line captioned "500 m" regardless of zoom, so it
+            // lied at every zoom level except one. The caption and the bar length
+            // are now derived from the real ground distance at the current centre
+            // latitude and zoom. Drawn in a Canvas so it invalidates only the
+            // draw phase instead of recomposing the control column every frame.
             Canvas(
                 modifier = Modifier
                     .width(72.dp)
@@ -1543,8 +1777,6 @@ fun RideMapCanvas(
                     barWidthDp = 72f
                 )
                 val barHeightPx = 2.dp.toPx()
-                // The bar is drawn at its TRUE pixel width: truncating it would
-                // make the caption lie about the ground distance.
                 val barWidthPx = segment.widthPx
                 drawRect(
                     color = Color.White.copy(alpha = 0.8f),

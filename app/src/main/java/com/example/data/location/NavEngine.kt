@@ -11,7 +11,22 @@ import kotlin.math.max
 
 data class NavigationProgress(
     val currentSegmentIndex: Int = 0,
+    /**
+     * Index of the **last maneuver the rider has passed** (bookkeeping only).
+     * The guidance shown to the rider is driven by [upcomingManeuverIndex].
+     */
     val currentManeuverIndex: Int = 0,
+    /**
+     * Index of the **upcoming maneuver** — the first step whose maneuver vertex
+     * has not yet been passed by the rider's projected position.
+     *
+     * This is the step the banner instruction, the maneuver icon, the spoken
+     * prompt AND [distanceToNextManeuverMeters] all refer to. Keeping one index
+     * for all four is what guarantees the displayed distance always belongs to
+     * the displayed instruction (audit F1-D1: the previous implementation showed
+     * the *previous* step's text next to the *next* step's distance).
+     */
+    val upcomingManeuverIndex: Int = 0,
     val distanceToNextManeuverMeters: Double = 0.0,
     val remainingRouteDistanceMeters: Double = 0.0,
     val remainingDurationSeconds: Double = 0.0,
@@ -75,8 +90,12 @@ class NavEngine {
         // Map each navigation step to its corresponding vertex index in coordinates
         stepVertexIndices = computeStepVertexIndices(points, steps)
 
+        // The first maneuver the rider has not yet passed. OSRM's step 0 is the
+        // "depart" maneuver at the origin, so the first *upcoming* maneuver is
+        // step 1 whenever the route has more than one step.
+        val initialUpcoming = if (steps.size > 1 && stepVertexIndices.size > 1) 1 else 0
         val initialNextStepDist = if (steps.isNotEmpty() && stepVertexIndices.size > 1) {
-            val nextVertex = stepVertexIndices.getOrElse(1) { points.size - 1 }
+            val nextVertex = stepVertexIndices.getOrElse(initialUpcoming) { points.size - 1 }
             RouteGeometry.remainingDistanceMeters(0, points.take(nextVertex + 1))
         } else {
             adjustedRoute.totalDistanceMeters
@@ -85,6 +104,7 @@ class NavEngine {
         _progress.value = NavigationProgress(
             currentSegmentIndex = 0,
             currentManeuverIndex = 0,
+            upcomingManeuverIndex = initialUpcoming.coerceIn(0, (steps.size - 1).coerceAtLeast(0)),
             distanceToNextManeuverMeters = initialNextStepDist,
             remainingRouteDistanceMeters = adjustedRoute.totalDistanceMeters,
             remainingDurationSeconds = adjustedRoute.totalDurationSeconds,
@@ -208,23 +228,39 @@ class NavEngine {
         var currentManeuverIdx = prevProgress.currentManeuverIndex
 
         if (steps.isNotEmpty() && stepVertexIndices.size == steps.size) {
-            // Advance maneuver index when rider reaches or passes the vertex threshold for the next step
-            while (currentManeuverIdx < steps.size - 1) {
+            // Advance the *performed* maneuver index when the rider reaches or
+            // passes the vertex of the next step.
+            //
+            // B-04 (audit F1-D2): the advance is now GUARDED —
+            //  * at most ONE maneuver per location fix, so a single stale or
+            //    jumpy fix can never skip several maneuvers at once;
+            //  * only an accuracy-reliable fix (≤30 m) may advance the index,
+            //    matching the discipline already applied to leg advancement.
+            // The guidance the rider sees does NOT depend on this counter — it is
+            // derived from the projected position (see [upcomingManeuverIndex]) —
+            // so a conservative advance can never hide a turn.
+            if (isAccuracyReliable && currentManeuverIdx < steps.size - 1) {
                 val nextManeuverVertex = stepVertexIndices[currentManeuverIdx + 1]
                 val distToNextManeuver = userLoc.distanceTo(points[nextManeuverVertex]) * 1000.0
                 if (closestIdx >= nextManeuverVertex || distToNextManeuver <= 25.0) {
                     currentManeuverIdx++
-                } else {
-                    break
                 }
             }
         }
 
-        // Calculate dynamic distance along polyline to the next maneuver vertex
-        val targetVertexIdx = if (stepVertexIndices.isNotEmpty() && currentManeuverIdx + 1 < stepVertexIndices.size) {
-            stepVertexIndices[currentManeuverIdx + 1]
-        } else {
-            points.size - 1
+        // The upcoming maneuver: the first step whose maneuver vertex has NOT
+        // been passed by the rider's projected position. Everything the rider is
+        // told (banner text, maneuver icon, spoken prompt) and the distance that
+        // is counted down all refer to this single step.
+        val upcomingManeuverIdx = computeUpcomingManeuverIndex(closestIdx, steps.size)
+
+        // Distance along the polyline to the upcoming maneuver's vertex. When every
+        // maneuver vertex has been passed, the distance is to the destination.
+        val targetVertexIdx = when {
+            steps.isEmpty() -> points.size - 1
+            upcomingManeuverIdx >= stepVertexIndices.size -> points.size - 1
+            stepVertexIndices[upcomingManeuverIdx] > closestIdx -> stepVertexIndices[upcomingManeuverIdx]
+            else -> points.size - 1
         }
 
         val nextStepMeters = if (targetVertexIdx > closestIdx) {
@@ -276,6 +312,7 @@ class NavEngine {
         val newProgress = NavigationProgress(
             currentSegmentIndex = closestIdx,
             currentManeuverIndex = currentManeuverIdx.coerceIn(0, (steps.size - 1).coerceAtLeast(0)),
+            upcomingManeuverIndex = upcomingManeuverIdx.coerceIn(0, (steps.size - 1).coerceAtLeast(0)),
             distanceToNextManeuverMeters = nextStepMeters,
             remainingRouteDistanceMeters = remDistMeters,
             remainingDurationSeconds = remDurationSec,
@@ -323,9 +360,36 @@ class NavEngine {
         return indices
     }
 
+    /**
+     * Resolves the **upcoming maneuver**: the first step whose maneuver vertex
+     * has not been passed by the rider's projected position [closestIdx].
+     *
+     * Because the projection is monotonic along the route, this index never moves
+     * backwards, and it is independent of the (conservatively advanced) performed
+     * maneuver counter — so the guidance the rider sees always describes the
+     * maneuver the displayed distance belongs to.
+     *
+     * When every maneuver vertex has been passed, the last step is returned and
+     * the distance falls back to the destination.
+     */
+    private fun computeUpcomingManeuverIndex(closestIdx: Int, stepCount: Int): Int {
+        if (stepCount <= 0) return 0
+        val vertices = stepVertexIndices
+        for (i in vertices.indices) {
+            if (i >= stepCount) break
+            if (vertices[i] > closestIdx) return i
+        }
+        return (stepCount - 1).coerceAtLeast(0)
+    }
+
+    /**
+     * The step the rider is currently being guided towards — the same step the
+     * maneuver icon, the banner text and [NavigationProgress.distanceToNextManeuverMeters]
+     * refer to.
+     */
     fun getCurrentStep(): NavigationStep? {
         val steps = activeRoute?.steps ?: return null
-        val idx = _progress.value.currentManeuverIndex
+        val idx = _progress.value.upcomingManeuverIndex
         return if (idx in steps.indices) steps[idx] else null
     }
 
@@ -344,9 +408,10 @@ class NavEngine {
         }
     }
 
+    /** The step AFTER the upcoming one (the banner's secondary "Then: …" line). */
     fun getNextStep(): NavigationStep? {
         val steps = activeRoute?.steps ?: return null
-        val idx = _progress.value.currentManeuverIndex + 1
+        val idx = _progress.value.upcomingManeuverIndex + 1
         return if (idx in steps.indices) steps[idx] else null
     }
 
