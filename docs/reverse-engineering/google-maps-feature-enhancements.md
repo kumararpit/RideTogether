@@ -307,3 +307,44 @@ The renderer port (B-11/B-12/B-13) was taken from the main repository **after** 
 **Suite (worktree): 35 classes / 328 tests / 0 failures / 0 errors / 0 skipped**; apk md5 `69ae8277634aea2b13d6237e8b104683`, installed on fbe12520 (17:29).
 
 **Device verification is partial and stated as such:** the build installs, launches and renders correctly (`b4_live.png`, `b4_overview.png`), but four behaviours could not be demonstrated with a single parked rider on a fresh fix — the chrome-aware label suppression, the rider stacking/selection priority, the stale "last seen" label and the bearingless pip. Those are code-verified and unit-tested, not claimed as device-observed.
+
+## 14. Reconciliation with the ride-platform branch
+
+The navigation/rendering work and the ride-platform work (multi-stop planning, amenity
+pipeline, place search, telemetry) developed in separate trees and were reconciled on a
+single integration branch.
+
+**Method.** The platform tree's uncommitted work was committed first (`5202faf`), the
+navigation/rendering work second (`0f1bce7`), and the six files that both sides had
+touched were merged three-way against `f103759` — the snapshot that both trees branched
+from — instead of against `b7406b5`, which reduced a ~50-file divergence to 6 files.
+No history was rewritten and nothing was squashed.
+
+**Per-file outcome.**
+
+| File | Resolution |
+| --- | --- |
+| `RideRepository.kt`, `CreateRideScreen.kt`, `RideViewModel.kt` | clean three-way merge (0 hunks); route-geometry persistence added, SOS paths untouched |
+| `NavEngine.kt` | union: `getNextStop()`/`currentLegIndex`/`legCount` (multi-stop) **and** `getCurrentStep()`/`getNextStep()`/`upcomingManeuverIndex` (maneuver-accurate guidance) |
+| `ExampleRobolectricTest.kt` | the newer batched DAO API plus the hermetic in-memory repository |
+| `RideMapCanvas.kt` | the navigation/rendering implementation (frame budget, palette/clustering, rider states, overlay contract, halo labels, dynamic scale bar) plus the platform's icon-footprint label avoidance |
+
+`MapCameraController.kt` (chrome-aware framing) and `NavAudioGuidance.kt` (announcement
+history) came from the navigation/rendering tree; the platform tree still held their
+pre-batch versions.
+
+**Verification.** The suite was run per class with a hard timeout, because five
+pre-existing test classes (`NavEngineAndSosTest`, `RiderStatusAndSyncAuditTest`,
+`SosAckDeliveryAndDismissalTest`, `SosLifecycleAndDeliveryTest`,
+`RideCompletionAndChatSyncTest`) construct a real `RideRepository` and call live
+Firestore; on a network that accepts the gRPC connection but does not answer, they block
+inside `NioSocketImpl.read` and never return. Those files are byte-identical to the
+platform commit and no SOS code was changed by the reconciliation.
+
+- `43 classes / 380 tests / 0 failures / 0 errors / 0 skipped`
+- `:app:assembleDebug` succeeds; apk md5 `464913a5f40bdfd96556c2f61318ae0e`
+- the five live-network classes above remain excluded from the offline gate and are
+  recorded as an environmental limitation, not a pass
+
+**Diagnostics.** The `RT-D7` instrumentation stays in place; the open coordinate item is
+still open.
