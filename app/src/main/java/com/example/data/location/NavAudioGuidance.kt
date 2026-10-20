@@ -13,6 +13,38 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.Locale
 
+/**
+ * Pure announcement-suppression state (Phase B, audit F1-D3 / backlog B-02).
+ *
+ * A maneuver is announced **at most once**. Because a new route restarts the
+ * maneuver indices at 0, the history must be reset together with the route —
+ * otherwise the new route's first maneuvers are suppressed as "already
+ * announced" and the rider hears nothing.
+ *
+ * Kept free of Android dependencies so the contract is unit-testable.
+ */
+class AnnouncementHistory {
+
+    /** Last maneuver index announced; -1 means "nothing announced yet". */
+    var lastSpokenManeuverIndex: Int = -1
+        private set
+
+    /** True when [maneuverIndex] has not been announced yet. */
+    fun shouldAnnounce(maneuverIndex: Int): Boolean = maneuverIndex > lastSpokenManeuverIndex
+
+    /** Records that [maneuverIndex] has been announced. */
+    fun markSpoken(maneuverIndex: Int) {
+        if (maneuverIndex > lastSpokenManeuverIndex) {
+            lastSpokenManeuverIndex = maneuverIndex
+        }
+    }
+
+    /** Clears the history — call whenever a new route is installed. */
+    fun reset() {
+        lastSpokenManeuverIndex = -1
+    }
+}
+
 class NavAudioGuidance(context: Context) : TextToSpeech.OnInitListener {
 
     private var tts: TextToSpeech? = TextToSpeech(context.applicationContext, this)
@@ -50,8 +82,27 @@ class NavAudioGuidance(context: Context) : TextToSpeech.OnInitListener {
     /** No-op focus listener (informational focus changes are not acted on). */
     private val focusListener = AudioManager.OnAudioFocusChangeListener { }
 
-    private var lastSpokenManeuverIndex = -1
+    /** Announcement suppression state (pure, unit-testable — see [AnnouncementHistory]). */
+    private val announcementHistory = AnnouncementHistory()
 
+    /**
+     * Read-only view of the announcement history (regression tests, audit B-02).
+     * -1 means "nothing announced yet".
+     */
+    val announcedHistory: Int get() = announcementHistory.lastSpokenManeuverIndex
+
+    companion object {
+        /**
+         * Duplicate-suppression rule: a maneuver is announced **at most once**.
+         *
+         * A route change must reset the history (see [resetAnnounceHistory]),
+         * because the new route's maneuver indices restart at 0 and would
+         * otherwise be suppressed as "already announced" (audit F1-D3).
+         */
+        @JvmStatic
+        fun shouldAnnounceManeuver(maneuverIndex: Int, lastSpokenManeuverIndex: Int): Boolean =
+            maneuverIndex > lastSpokenManeuverIndex
+    }
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             val result = tts?.setLanguage(Locale.US)
@@ -116,7 +167,7 @@ class NavAudioGuidance(context: Context) : TextToSpeech.OnInitListener {
 
     fun speakManeuver(instruction: String, maneuverIndex: Int, distanceMeters: Double) {
         if (_isMuted.value || !isTtsReady) return
-        if (maneuverIndex <= lastSpokenManeuverIndex) return
+        if (!announcementHistory.shouldAnnounce(maneuverIndex)) return
 
         val textToSpeak = when {
             distanceMeters > 500 -> "In ${(distanceMeters / 100).toInt() * 100} meters, $instruction"
@@ -130,7 +181,7 @@ class NavAudioGuidance(context: Context) : TextToSpeech.OnInitListener {
 
         try {
             tts?.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, null, "maneuver_$maneuverIndex")
-            lastSpokenManeuverIndex = maneuverIndex
+            announcementHistory.markSpoken(maneuverIndex)
             Log.d("NavAudioGuidance", "Spoke maneuver [$maneuverIndex]: $textToSpeak")
         } catch (e: Exception) {
             abandonDuckFocus()
@@ -156,7 +207,7 @@ class NavAudioGuidance(context: Context) : TextToSpeech.OnInitListener {
     }
 
     fun resetAnnounceHistory() {
-        lastSpokenManeuverIndex = -1
+        announcementHistory.reset()
     }
 
     fun shutdown() {

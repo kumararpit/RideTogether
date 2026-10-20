@@ -1066,6 +1066,61 @@ class RideRepository(
                 handleFirestoreError(e, OperationType.UPDATE, "rides/${current.id}")
             }
         }
+
+        // B-03 (audit F12-D1 / F7-D2): persist the route GEOMETRY as well, so a
+        // process death does not restore a ride without a route.
+        //
+        // The geometry is stored in a dedicated subcollection document
+        // (`rides/{rideId}/route`) rather than in the ride document itself: the
+        // ride document is re-read by every listener on every member/location
+        // update, so a large polyline there would be re-parsed constantly (and
+        // would push the document towards Firestore's 1 MiB limit).
+        repositoryScope.launch {
+            try {
+                firestore?.collection("rides")?.document(current.id)
+                    ?.collection("route")?.document("current")
+                    ?.set(
+                        RouteGeometryCodec.encode(
+                            points = routePoints,
+                            steps = steps,
+                            totalDistanceMeters = totalDistanceMeters,
+                            totalDurationSeconds = totalDurationSeconds
+                        ) + mapOf("updatedAt" to FieldValue.serverTimestamp())
+                    )?.await()
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.UPDATE, "rides/${current.id}/route")
+            }
+        }
+    }
+
+    /**
+     * Reads the persisted route geometry for a ride (B-03). Returns `null` when
+     * the ride has no stored geometry (older rides) or when the read fails —
+     * the caller then falls back to a route refetch.
+     */
+    suspend fun fetchRouteGeometry(rideId: String): StoredRouteGeometry? {
+        val fs = firestore ?: return null
+        return try {
+            val snapshot = fs.collection("rides").document(rideId)
+                .collection("route").document("current").get().await()
+            if (!snapshot.exists()) return null
+            val geometry = RouteGeometryCodec.decode(
+                rawPoints = snapshot.get("points"),
+                rawSteps = snapshot.get("steps"),
+                totalDistanceMeters = (snapshot.get("totalDistanceMeters") as? Number)?.toDouble() ?: 0.0,
+                totalDurationSeconds = (snapshot.get("totalDurationSeconds") as? Number)?.toDouble() ?: 0.0
+            )
+            if (geometry != null) {
+                android.util.Log.d(
+                    "RideRepository",
+                    "Loaded persisted route geometry for $rideId: ${RouteGeometryCodec.describe(geometry)}"
+                )
+            }
+            geometry
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.GET, "rides/$rideId/route")
+            null
+        }
     }
 
     fun startRide() {

@@ -14,6 +14,7 @@ import com.example.data.model.RiderMember
 import com.example.data.firebase.RideRepository
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -140,16 +141,23 @@ class ExampleRobolectricTest {
     @Test
     fun `test ride repository flow`() = kotlinx.coroutines.runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        if (com.google.firebase.FirebaseApp.getApps(context).isEmpty()) {
-            val options = com.google.firebase.FirebaseOptions.Builder()
-                .setApplicationId("1:13707892827:android:e982c3179342c585f0877e")
-                .setApiKey("AIzaSyBwTrOliLZV_Z2UkyCVjOKq2JbxoxOj0Yg")
-                .setProjectId("gen-lang-client-0349632077")
-                .build()
-            com.google.firebase.FirebaseApp.initializeApp(context, options)
-        }
         val tracker = LocationTracker(context)
-        val repo = RideRepository(context, tracker)
+        // B-09 (audit F12-D3): this test used to initialise a LIVE Firebase app
+        // and perform real Firestore writes from inside a Robolectric
+        // `runBlocking`. With no network the Firestore callback could never
+        // resume (it needs the Robolectric main looper, which `runBlocking`
+        // occupies) and the whole `:app:testDebugUnitTest` task hung
+        // indefinitely (>30 min observed, thread-dumped).
+        //
+        // The repository's Firestore dependency is nullable and every access is
+        // null-safe, so the repository can be exercised fully in-memory. The
+        // assertions below cover the same repository behaviour without touching
+        // the network, which keeps the offline suite hermetic and repeatable.
+        val repo = RideRepository(
+            locationTracker = tracker,
+            firestore = null,
+            context = context
+        )
         repo.initCurrentUser("user_arpit", "Arpit")
 
         val ride = repo.createRide(
@@ -174,13 +182,22 @@ class ExampleRobolectricTest {
         assertEquals("Wait for me", repo.recentMessage.value?.text)
 
         // Test SOS trigger
-        repo.triggerSos()
-        assertNotNull(repo.activeSos.value)
-        assertEquals("Arpit", repo.activeSos.value?.riderName)
+        //
+        // B-09: the SOS lifecycle itself is covered exhaustively (and offline)
+        // by SosLifecycleAndDeliveryTest / SosAckDeliveryAndDismissalTest with a
+        // fake backend. What is verified HERE is the repository's behaviour when
+        // no Firestore backend is available: the trigger must fail EXPLICITLY
+        // and must not leave a dangling local alert behind.
+        val sosResult = repo.triggerSos()
+        assertTrue("SOS trigger must fail explicitly without a backend", sosResult.isFailure)
+        assertNull("no local SOS may be left behind", repo.activeSos.value)
 
         // Test SOS resolve
-        repo.resolveSosInternal()
-        assertEquals(null, repo.activeSos.value)
+        // Resolving when there is no active alert is a no-op SUCCESS (there is
+        // nothing to resolve) and must not leave an alert behind.
+        val resolveResult = repo.resolveSosInternal()
+        assertTrue("resolving without an active alert must be a harmless no-op", resolveResult.isSuccess)
+        assertNull("no local SOS may be left behind after resolve", repo.activeSos.value)
 
         // Test Route Update
         val pts = listOf(LatLng(18.52, 73.85), LatLng(18.60, 73.65), LatLng(18.75, 73.40))

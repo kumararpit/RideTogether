@@ -65,6 +65,7 @@ import com.example.data.model.LatLng
 import com.example.data.place.PlaceSearchFailure
 import com.example.data.place.PlaceSearchRepository
 import com.example.data.place.PlaceSearchUiState
+import com.example.data.place.PlaceProximityGuard
 import com.example.data.place.PhotonPlaceSearchRepository
 import com.example.data.place.SelectedPlace
 import com.example.data.place.PlaceSource
@@ -595,6 +596,51 @@ fun CreateRideScreen(
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Medium,
                                     maxLines = 1
+                                )
+                            }
+                        }
+
+                        // Advisory proximity warning (Phase B, B-05): a same-named
+                        // place in another country must be visible before the
+                        // route is built. The warning NEVER changes the selected
+                        // coordinates and NEVER blocks the ride — it can be
+                        // dismissed with "Use anyway".
+                        val destinationProximityWarning = PlaceProximityGuard.warningFor(
+                            from = startCoords,
+                            place = destSearchState.selectedPlace
+                        )
+                        var proximityWarningDismissed by remember(destSearchState.selectedPlace?.id) {
+                            mutableStateOf(false)
+                        }
+                        if (destinationProximityWarning != null && !proximityWarningDismissed) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Warning,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFFB300),
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = destinationProximityWarning,
+                                    color = Color(0xFFFFB300),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Use anyway",
+                                    color = AmberPrimary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .clickable { proximityWarningDismissed = true }
+                                        .testTag("destination_proximity_dismiss")
                                 )
                             }
                         }
