@@ -1,134 +1,164 @@
 package com.example.data.amenities
 
 import android.util.Log
+import androidx.room.withTransaction
 import com.example.data.db.RideDatabase
 import com.example.data.map.TileMath
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.math.max
+import kotlin.math.min
 
-class AmenityRepository(private val database: RideDatabase) {
+/**
+ * Amenity POI provider backed by a Room cache of Overpass zoom-14 cells.
+ *
+ * 2026-10-19 pipeline rework (Phases 1–5 of the Overpass audit):
+ *  - [getAmenitiesCached] reads the local DB only — the ride screen shows cached
+ *    POIs instantly without waiting for the network.
+ *  - [refreshAmenities] refreshes stale cells with ONE [OverpassQueryBuilder]-built
+ *    POST per batch (≤[MAX_CELLS_PER_FETCH] cells), then re-reads the bbox.
+ *  - A refresh failure NEVER poisons the cache: cache marks are written only for
+ *    successful HTTP responses, all writes go through one Room transaction, and
+ *    classification in [OverpassResilience] retries only true-transient failures.
+ *  - Cell keys are query-versioned ("14_v2_x_y"): any future QL change bumps
+ *    [OverpassQueryBuilder.QUERY_VERSION] and forces one respectful re-fetch.
+ */
+class AmenityRepository(
+    private val database: RideDatabase,
+    internal val overpassApi: OverpassApiService = OverpassApiClient.api
+) {
+
     private val dao = database.amenityDao()
     private val queryMutex = Mutex()
     private val inFlightCells = mutableSetOf<String>()
 
     private val CACHE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000L // 7 days
-    private val CELL_ZOOM = 14
+    private val MAX_CELLS_PER_FETCH = 16
 
-    suspend fun getAmenitiesInViewport(
+    /** Injectable offline probe (ConnectivityManager); null ⇒ treated as online. */
+    var isOfflineProbe: (() -> Boolean)? = null
+
+    /** One-time cleanup of pre-versioning cache marks (see QUERY_VERSION). */
+    private var preVersionedKeysCleaned = false
+
+    /**
+     * Latest cached POIs for the viewport WITHOUT any network involvement.
+     * Acceptance criterion: cached POIs appear without waiting for Overpass.
+     */
+    suspend fun getAmenitiesCached(
         minLat: Double, maxLat: Double, minLon: Double, maxLon: Double
-    ): List<AmenityEntity> = withContext(Dispatchers.IO) {
-        val safeMinLat = minOf(minLat, maxLat)
-        val safeMaxLat = maxOf(minLat, maxLat)
-        val safeMinLon = minOf(minLon, maxLon)
-        val safeMaxLon = maxOf(minLon, maxLon)
-
-        // Find cells intersecting with viewport
-        val minX = TileMath.lonToTileX(safeMinLon, CELL_ZOOM.toFloat()).toInt()
-        val maxX = TileMath.lonToTileX(safeMaxLon, CELL_ZOOM.toFloat()).toInt()
-        val maxY = TileMath.latToTileY(safeMinLat, CELL_ZOOM.toFloat()).toInt()
-        val minY = TileMath.latToTileY(safeMaxLat, CELL_ZOOM.toFloat()).toInt()
-
-        val cellsToFetch = mutableListOf<Pair<Int, Int>>()
-        val now = System.currentTimeMillis()
-
-        for (x in minX..maxX) {
-            for (y in minY..maxY) {
-                val cellKey = "${CELL_ZOOM}_${x}_${y}"
-                val ts: Long? = dao.getQueryTimestamp(cellKey)
-                if (ts == null || now - ts > CACHE_EXPIRY_MS) {
-                    cellsToFetch.add(x to y)
-                }
-            }
+    ): List<AmenityEntity> {
+        val box = SafeBox(minLat, maxLat, minLon, maxLon)
+        return withContext(Dispatchers.IO) {
+            dao.getAmenitiesInBox(box.minLat, box.maxLat, box.minLon, box.maxLon)
         }
-
-        // Limit maximum cells per query batch to avoid Overpass timeout
-        val boundedCells = cellsToFetch.take(16)
-
-        if (boundedCells.isNotEmpty()) {
-            fetchAndCacheCells(boundedCells)
-        }
-        
-        // Return local db data
-        dao.getAmenitiesInBox(safeMinLat, safeMaxLat, safeMinLon, safeMaxLon)
     }
 
-    private suspend fun fetchAndCacheCells(cells: List<Pair<Int, Int>>) {
-        val cellsToFetch = mutableListOf<Pair<Int, Int>>()
-        
+    /**
+     * Refreshes every z14 cell intersecting the viewport whose cache mark is
+     * missing or older than [CACHE_EXPIRY_MS], then returns the bbox rows
+     * (fresh rows included). Cells carrying a fresh mark are never re-fetched.
+     */
+    suspend fun refreshAmenities(
+        minLat: Double, maxLat: Double, minLon: Double, maxLon: Double
+    ): List<AmenityEntity> = withContext(Dispatchers.IO) {
+        val box = SafeBox(minLat, maxLat, minLon, maxLon)
+        val cells = cellsForBBox(box)
+        val staleCells = findStaleCells(cells)
+
+        if (staleCells.isNotEmpty()) {
+            if (!preVersionedKeysCleaned) {
+                dao.deletePreV2QueryTimestamps()
+                preVersionedKeysCleaned = true
+            }
+            fetchAndCacheCells(staleCells.take(MAX_CELLS_PER_FETCH))
+        }
+
+        Log.d(
+            "AmenityPerf",
+            "refresh done: cells=%d stale=%d (boundedTo=%d)".format(
+                cells.size, staleCells.size, min(staleCells.size, MAX_CELLS_PER_FETCH)
+            )
+        )
+        dao.getAmenitiesInBox(box.minLat, box.maxLat, box.minLon, box.maxLon)
+    }
+
+    private suspend fun findStaleCells(cells: List<AmenityCell>): List<AmenityCell> {
+        if (cells.isEmpty()) return emptyList()
+        val now = System.currentTimeMillis()
+        // One Room round-trip for the whole batch instead of one SELECT per cell.
+        val marks = dao.getQueryTimestamps(cells.map { it.key })
+            .associateBy({ it.cellKey }, { it.timestampMs })
+        return cells.filter { cell ->
+            val ts = marks[cell.key]
+            ts == null || now - ts > CACHE_EXPIRY_MS
+        }
+    }
+
+    private suspend fun fetchAndCacheCells(cells: List<AmenityCell>) {
+        val cellsToFetch = mutableListOf<AmenityCell>()
+
         queryMutex.withLock {
             for (cell in cells) {
-                val key = "${CELL_ZOOM}_${cell.first}_${cell.second}"
-                if (!inFlightCells.contains(key)) {
-                    inFlightCells.add(key)
-                    cellsToFetch.add(cell)
-                }
+                if (inFlightCells.add(cell.key)) cellsToFetch.add(cell)
             }
         }
-        
+
         if (cellsToFetch.isEmpty()) return
 
+        val startedAt = System.currentTimeMillis()
+        var parseMs = -1L
+        var elementCount = -1
         try {
-            // Build Overpass QL for all these bounding boxes
-            val queryBuilder = StringBuilder("[out:json][timeout:25];(")
-            for (cell in cellsToFetch) {
-                val s = TileMath.tileYToLat((cell.second + 1).toDouble(), CELL_ZOOM.toFloat())
-                val n = TileMath.tileYToLat(cell.second.toDouble(), CELL_ZOOM.toFloat())
-                val w = TileMath.tileXToLon(cell.first.toDouble(), CELL_ZOOM.toFloat())
-                val e = TileMath.tileXToLon((cell.first + 1).toDouble(), CELL_ZOOM.toFloat())
-                
-                val bbox = "$s,$w,$n,$e"
-                queryBuilder.append("node[\"amenity\"=\"fuel\"]($bbox);")
-                queryBuilder.append("way[\"amenity\"=\"fuel\"]($bbox);")
-                queryBuilder.append("node[\"amenity\"=\"cafe\"]($bbox);")
-                queryBuilder.append("way[\"amenity\"=\"cafe\"]($bbox);")
-                queryBuilder.append("node[\"shop\"=\"motorcycle_repair\"]($bbox);")
-                queryBuilder.append("way[\"shop\"=\"motorcycle_repair\"]($bbox);")
-                queryBuilder.append("node[\"amenity\"=\"motorcycle_repair\"]($bbox);")
-                queryBuilder.append("way[\"amenity\"=\"motorcycle_repair\"]($bbox);")
-                queryBuilder.append("node[\"highway\"=\"rest_area\"]($bbox);")
-                queryBuilder.append("way[\"highway\"=\"rest_area\"]($bbox);")
-                queryBuilder.append("node[\"shop\"=\"convenience\"]($bbox);")
-                queryBuilder.append("way[\"shop\"=\"convenience\"]($bbox);")
-                queryBuilder.append("node[\"shop\"=\"supermarket\"]($bbox);")
-                queryBuilder.append("way[\"shop\"=\"supermarket\"]($bbox);")
-                queryBuilder.append("node[\"tourism\"=\"hotel\"]($bbox);")
-                queryBuilder.append("way[\"tourism\"=\"hotel\"]($bbox);")
-                queryBuilder.append("node[\"tourism\"=\"motel\"]($bbox);")
-                queryBuilder.append("way[\"tourism\"=\"motel\"]($bbox);")
-                queryBuilder.append("node[\"amenity\"=\"restaurant\"]($bbox);")
-                queryBuilder.append("way[\"amenity\"=\"restaurant\"]($bbox);")
-                queryBuilder.append("node[\"amenity\"=\"fast_food\"]($bbox);")
-                queryBuilder.append("way[\"amenity\"=\"fast_food\"]($bbox);")
-                queryBuilder.append("node[\"amenity\"=\"toilets\"]($bbox);")
-                queryBuilder.append("way[\"amenity\"=\"toilets\"]($bbox);")
-                queryBuilder.append("node[\"tourism\"=\"viewpoint\"]($bbox);")
-                queryBuilder.append("way[\"tourism\"=\"viewpoint\"]($bbox);")
-            }
-            queryBuilder.append(");out center;")
-            
-            Log.d("AmenityRepository", "Fetching ${cellsToFetch.size} cells from Overpass")
-            val response = OverpassApiClient.api.query(queryBuilder.toString())
+            // One consolidated QL for the whole batch (8 statements per cell).
+            val query = OverpassQueryBuilder.buildQuery(cellsToFetch.map { it.box })
+            val fetchStart = System.currentTimeMillis()
+            val response = OverpassResilience.queryWithOneRetry(
+                isProbablyOffline = isOfflineProbe?.invoke() ?: false
+            ) { overpassApi.query(query) }
+            val fetchMs = System.currentTimeMillis() - fetchStart
+
+            val parseStart = System.currentTimeMillis()
             val entities = parseOverpassResponse(response)
-            
-            if (entities.isNotEmpty()) {
-                dao.insertAmenities(entities)
+            parseMs = System.currentTimeMillis() - parseStart
+            elementCount = entities.size
+
+            // Cache marks for successful responses (empty or not): an empty cell
+            // is a real OSM fact, so a 7-day mark avoids hammering the public
+            // endpoint for genuinely sparse rural cells.
+            val marks = cellsToFetch.map { cell -> AmenityQueryCacheEntity(cell.key, startedAt) }
+            // One Room transaction for data + marks: a crash between the two can
+            // only cost one redundant re-fetch, never a half-applied cache.
+            database.withTransaction {
+                if (entities.isNotEmpty()) dao.insertAmenities(entities)
+                dao.insertQueryCaches(marks)
             }
-            
-            val now = System.currentTimeMillis()
-            for (cell in cellsToFetch) {
-                val key = "${CELL_ZOOM}_${cell.first}_${cell.second}"
-                dao.insertQueryCache(AmenityQueryCacheEntity(key, now))
-            }
+
+            Log.d(
+                "AmenityPerf",
+                "fetch ok: cells=%d elements=%d fetchMs=%d parseMs=%d".format(
+                    cellsToFetch.size, elementCount, fetchMs, parseMs
+                )
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.e("AmenityRepository", "Failed to fetch amenities", e)
+            Log.e(
+                "AmenityRepository",
+                "Failed to fetch amenities after %dms".format(System.currentTimeMillis() - startedAt),
+                e
+            )
+            Log.d(
+                "AmenityPerf",
+                "fetch failed: cells=%d transient=%s".format(
+                    cellsToFetch.size, OverpassResilience.isTransientFailure(e)
+                )
+            )
         } finally {
             queryMutex.withLock {
-                for (cell in cellsToFetch) {
-                    val key = "${CELL_ZOOM}_${cell.first}_${cell.second}"
-                    inFlightCells.remove(key)
-                }
+                inFlightCells.removeAll(cellsToFetch.map { it.key }.toSet())
             }
         }
     }
@@ -153,20 +183,59 @@ class AmenityRepository(private val database: RideDatabase) {
                     else -> AmenityType.UNKNOWN
                 }
                 if (type != AmenityType.UNKNOWN) {
-                    val tagsJson = tags.entries.joinToString(separator = ",", prefix = "{", postfix = "}") { 
-                        "\"${it.key}\":\"${it.value.replace("\"", "\\\"")}\"" 
+                    val tagsJson = tags.entries.joinToString(separator = ",", prefix = "{", postfix = "}") {
+                        "\"${it.key}\":\"${it.value.replace("\"", "\\\"")}\""
                     }
-                    list.add(AmenityEntity(
-                        osmId = el.id,
-                        type = type,
-                        lat = lat,
-                        lon = lon,
-                        name = tags["name"],
-                        tagsJson = tagsJson
-                    ))
+                    list.add(
+                        AmenityEntity(
+                            osmId = el.id,
+                            type = type,
+                            lat = lat,
+                            lon = lon,
+                            name = tags["name"],
+                            tagsJson = tagsJson
+                        )
+                    )
                 }
             }
         }
         return list.distinctBy { it.osmId }
     }
+
+    internal data class SafeBox(val minLat: Double, val maxLat: Double, val minLon: Double, val maxLon: Double)
+
+    /** Viewport → zoom-14 cell list with versioned keys (pure; unit-tested). */
+    internal fun cellsForBBox(box: SafeBox, zoom: Int = OverpassQueryBuilder.CELL_ZOOM): List<AmenityCell> {
+        val safeMinLat = min(box.minLat, box.maxLat)
+        val safeMaxLat = max(box.minLat, box.maxLat)
+        val safeMinLon = min(box.minLon, box.maxLon)
+        val safeMaxLon = max(box.minLon, box.maxLon)
+
+        val minX = TileMath.lonToTileX(safeMinLon, zoom.toFloat()).toInt()
+        val maxX = TileMath.lonToTileX(safeMaxLon, zoom.toFloat()).toInt()
+        val maxY = TileMath.latToTileY(safeMinLat, zoom.toFloat()).toInt()
+        val minY = TileMath.latToTileY(safeMaxLat, zoom.toFloat()).toInt()
+
+        val cells = mutableListOf<AmenityCell>()
+        for (x in minX..maxX) {
+            for (y in minY..maxY) {
+                val south = TileMath.tileYToLat((y + 1).toDouble(), zoom.toFloat())
+                val north = TileMath.tileYToLat(y.toDouble(), zoom.toFloat())
+                val west = TileMath.tileXToLon(x.toDouble(), zoom.toFloat())
+                val east = TileMath.tileXToLon((x + 1).toDouble(), zoom.toFloat())
+                cells.add(
+                    AmenityCell(
+                        key = "${zoom}_v${OverpassQueryBuilder.QUERY_VERSION}_${x}_${y}",
+                        box = OverpassQueryBuilder.Cell(south, west, north, east)
+                    )
+                )
+            }
+        }
+        return cells
+    }
+
+    internal data class AmenityCell(
+        val key: String,
+        val box: OverpassQueryBuilder.Cell
+    )
 }

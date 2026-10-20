@@ -360,4 +360,24 @@ class NavigationProgressAndEtaTest {
 
         assertTrue("Fallback route must set isFallback flag to true", routeFallback.isFallback)
     }
+
+    @Test
+    fun `test 17 - realistic motorcycle touring planned duration calculation for long route`() {
+        val navEngine = NavEngine()
+
+        // 49.8 km route (Pune to Lonavala)
+        val pStart = LatLng(18.5204, 73.8567)
+        val pEnd = LatLng(18.7546, 73.4062)
+        val distMeters = 49800.0
+        val optimisticRawOsrmDurationSec = 2400.0 // Raw OSRM 40 min car speed (~75 km/h)
+
+        // Realistic planned duration calculation should clamp average speed to motorcycle touring baseline (max 48 km/h == 13.33 m/s)
+        val realisticSec = NavEngine.calculateRealisticPlannedDuration(distMeters, optimisticRawOsrmDurationSec)
+        assertTrue("Realistic motorcycle duration ($realisticSec s) for 49.8 km must be >= 3700s (~62-66 min)", realisticSec >= 3700.0)
+
+        navEngine.setRoute(RouteResult(listOf(pStart, pEnd), distMeters, optimisticRawOsrmDurationSec, emptyList()))
+
+        val initialProgress = navEngine.progress.value
+        assertEquals("Remaining duration on setRoute must use realistic planned duration", realisticSec, initialProgress.remainingDurationSeconds, 1.0)
+    }
 }

@@ -28,7 +28,9 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.GroupAdd
+import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.TwoWheeler
 import androidx.compose.material3.Button
@@ -48,9 +50,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.db.CompletedRideEntity
@@ -66,6 +70,9 @@ import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
 import com.example.ui.theme.StatusRidingGreen
 import com.example.ui.theme.SurfaceCard
+import com.example.ui.theme.SurfaceCardElevated
+import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.TextTertiary
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -94,6 +101,10 @@ fun WelcomeScreen(
     var showHistorySheet by remember { mutableStateOf(false) }
     var selectedHistoryRideForDetails by remember { mutableStateOf<CompletedRideEntity?>(null) }
 
+    val hasActiveRide = activeRide != null &&
+        activeRide.status != RideStatus.COMPLETED &&
+        activeRide.status != RideStatus.CANCELLED
+
     Surface(
         modifier = modifier
             .fillMaxSize()
@@ -107,21 +118,22 @@ fun WelcomeScreen(
                 .navigationBarsPadding()
                 .imePadding()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp)
+                .padding(horizontal = 20.dp)
         ) {
-            // A. Compact Header (Small logo + Title + Avatar initial)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // ── A. App Header ────────────────────────────────────────────────
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 4.dp),
+                    .padding(top = 4.dp, bottom = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
-                            .size(40.dp)
+                            .size(38.dp)
                             .clip(CircleShape)
                             .background(AmberPrimary),
                         contentAlignment = Alignment.Center
@@ -130,35 +142,34 @@ fun WelcomeScreen(
                             imageVector = Icons.Default.TwoWheeler,
                             contentDescription = "RideTogether",
                             tint = SlateDark900,
-                            modifier = Modifier.size(24.dp)
+                            modifier = Modifier.size(22.dp)
                         )
                     }
-
                     Spacer(modifier = Modifier.width(10.dp))
-
                     Column {
                         Text(
                             text = "RideTogether",
                             color = Color.White,
-                            fontSize = 20.sp,
+                            fontSize = 19.sp,
                             fontWeight = FontWeight.Black,
                             letterSpacing = (-0.5).sp
                         )
                         Text(
-                            text = "Ride together. Stay connected.",
-                            color = Color(0xFF90A4AE),
+                            text = "Ride · Track · Stay Together",
+                            color = TextTertiary,
                             fontSize = 11.sp
                         )
                     }
                 }
 
-                // Profile Avatar Initial
+                // Profile avatar / edit toggle
                 Box(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)
                         .background(SlateDark800)
-                        .clickable { isEditingProfile = !isEditingProfile },
+                        .clickable { isEditingProfile = !isEditingProfile }
+                        .testTag("profile_avatar"),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
@@ -170,112 +181,121 @@ fun WelcomeScreen(
                 }
             }
 
-            // B. Compact Rider Profile Row
-            Column {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = currentName.ifBlank { "Rider" },
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = if (currentMotorcycle.isNotBlank()) "🏎️ $currentMotorcycle" else "Motorcycle model not set",
-                            color = Color(0xFF90A4AE),
-                            fontSize = 12.sp
-                        )
-                    }
+            Spacer(modifier = Modifier.height(6.dp))
 
-                    Surface(
-                        color = SlateDark800,
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { isEditingProfile = !isEditingProfile }
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Edit,
-                                contentDescription = "Edit Profile",
-                                tint = AmberPrimary,
-                                modifier = Modifier.size(13.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = if (isEditingProfile) "Done" else "Edit",
-                                color = AmberPrimary,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
+            // ── B. Rider profile row ─────────────────────────────────────────
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = currentName.ifBlank { "Rider" },
+                        color = Color.White,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = if (currentMotorcycle.isNotBlank()) "🏍️ $currentMotorcycle" else "Motorcycle model not set",
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
                 }
 
-                // Inline Edit Profile Input Fields
-                AnimatedVisibility(visible = isEditingProfile) {
-                    Column(
-                        modifier = Modifier
-                            .padding(top = 12.dp)
-                            .fillMaxWidth()
-                            .background(SurfaceCard, RoundedCornerShape(12.dp))
-                            .padding(14.dp)
+                Surface(
+                    color = SlateDark800,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { isEditingProfile = !isEditingProfile }
+                        .testTag("edit_profile_button")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("RIDER NAME", color = AmberPrimary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        OutlinedTextField(
-                            value = nameInput,
-                            onValueChange = {
-                                nameInput = it
-                                onNameChange(it)
-                            },
-                            leadingIcon = { Icon(imageVector = Icons.Default.Person, contentDescription = null, tint = AmberLight) },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = AmberPrimary,
-                                unfocusedBorderColor = SlateDark700,
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White
-                            ),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth().testTag("rider_name_input"),
-                            shape = RoundedCornerShape(10.dp)
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "Edit Profile",
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(13.dp)
                         )
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        Text("MOTORCYCLE MODEL (OPTIONAL)", color = Color(0xFF90A4AE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        OutlinedTextField(
-                            value = bikeInput,
-                            onValueChange = {
-                                bikeInput = it
-                                onMotorcycleChange(it)
-                            },
-                            leadingIcon = { Icon(imageVector = Icons.Default.TwoWheeler, contentDescription = null, tint = AmberLight) },
-                            placeholder = { Text("e.g. Triumph Tiger 900", color = Color(0xFF78909C)) },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = AmberPrimary,
-                                unfocusedBorderColor = SlateDark700,
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White
-                            ),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth().testTag("motorcycle_model_input"),
-                            shape = RoundedCornerShape(10.dp)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (isEditingProfile) "Done" else "Edit",
+                            color = AmberPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
                         )
                     }
                 }
             }
 
-            // C. Primary Actions (Prominent Orange Button & Outlined Secondary)
+            // Inline profile edit fields
+            AnimatedVisibility(visible = isEditingProfile) {
+                Column(
+                    modifier = Modifier
+                        .padding(top = 10.dp)
+                        .fillMaxWidth()
+                        .background(SurfaceCard, RoundedCornerShape(12.dp))
+                        .padding(14.dp)
+                ) {
+                    Text("RIDER NAME", color = AmberPrimary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = nameInput,
+                        onValueChange = { nameInput = it; onNameChange(it) },
+                        leadingIcon = {
+                            Icon(imageVector = Icons.Default.Person, contentDescription = null, tint = AmberLight)
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = SlateDark700,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("rider_name_input"),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Text(
+                        "MOTORCYCLE MODEL (OPTIONAL)",
+                        color = TextSecondary,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = bikeInput,
+                        onValueChange = { bikeInput = it; onMotorcycleChange(it) },
+                        leadingIcon = {
+                            Icon(imageVector = Icons.Default.TwoWheeler, contentDescription = null, tint = AmberLight)
+                        },
+                        placeholder = { Text("e.g. Triumph Tiger 900", color = TextTertiary) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = SlateDark700,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("motorcycle_model_input"),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // ── C. Primary actions ───────────────────────────────────────────
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -284,13 +304,13 @@ fun WelcomeScreen(
                     onClick = onCreateRideClick,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(52.dp)
+                        .height(54.dp)
                         .testTag("create_ride_button"),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = AmberPrimary,
                         contentColor = SlateDark900
                     ),
-                    shape = RoundedCornerShape(12.dp)
+                    shape = RoundedCornerShape(14.dp)
                 ) {
                     Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
                     Spacer(modifier = Modifier.width(8.dp))
@@ -305,15 +325,18 @@ fun WelcomeScreen(
                     onClick = onJoinRideClick,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(52.dp)
+                        .height(54.dp)
                         .testTag("join_ride_button"),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = Color.White
-                    ),
-                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                    shape = RoundedCornerShape(14.dp),
                     border = androidx.compose.foundation.BorderStroke(1.dp, SlateDark700)
                 ) {
-                    Icon(imageVector = Icons.Default.GroupAdd, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                    Icon(
+                        imageVector = Icons.Default.GroupAdd,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "Join Ride with Code",
@@ -323,76 +346,52 @@ fun WelcomeScreen(
                 }
             }
 
-            HorizontalDivider(color = DividerColor)
+            Spacer(modifier = Modifier.height(20.dp))
 
-            // D. Active Rides Section
-            val hasActiveRide = activeRide != null && activeRide.status != RideStatus.COMPLETED && activeRide.status != RideStatus.CANCELLED
-
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+            // ── D. Active / Rejoin ride card ─────────────────────────────────
+            if (hasActiveRide) {
+                val ride = activeRide!!
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("active_ride_card"),
+                    color = SurfaceCardElevated,
+                    shape = RoundedCornerShape(16.dp),
+                    tonalElevation = 4.dp
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "Active Rides",
-                            color = Color.White,
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        if (hasActiveRide) {
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Box(
-                                modifier = Modifier
-                                    .size(20.dp)
-                                    .clip(CircleShape)
-                                    .background(AmberPrimary),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "1",
-                                    color = SlateDark900,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Black
-                                )
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                if (hasActiveRide) {
-                    val ride = activeRide!!
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            modifier = Modifier.weight(1f),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("📍", fontSize = 18.sp)
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                Text(
-                                    text = ride.name,
-                                    color = Color.White,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "● Active · $activeRiderCount rider(s)",
-                                    color = StatusRidingGreen,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
+                        // Live indicator dot
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(StatusRidingGreen)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = ride.name,
+                                color = Color.White,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "Live · $activeRiderCount rider${if (activeRiderCount != 1) "s" else ""}",
+                                color = StatusRidingGreen,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
                         }
+
+                        Spacer(modifier = Modifier.width(12.dp))
 
                         Button(
                             onClick = onRejoinRideClick,
@@ -402,145 +401,147 @@ fun WelcomeScreen(
                             ),
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier
-                                .height(40.dp)
+                                .height(42.dp)
                                 .testTag("rejoin_ride_button")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Refresh,
+                                imageVector = if (isCurrentUserInActiveRide) Icons.Default.PlayArrow else Icons.Default.Refresh,
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = if (isCurrentUserInActiveRide) "Resume Ride" else "Rejoin Ride",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                } else {
-                    Text(
-                        text = "No active rides.",
-                        color = Color(0xFF78909C),
-                        fontSize = 13.sp,
-                        modifier = Modifier.padding(vertical = 4.dp)
-                    )
-                }
-            }
-
-            HorizontalDivider(color = DividerColor)
-
-            // E. Recent Rides Section
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Recent Rides",
-                        color = Color.White,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    if (pastRides.isNotEmpty()) {
-                        Row(
-                            modifier = Modifier
-                                .clickable { showHistorySheet = true }
-                                .padding(4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "View all",
-                                color = AmberPrimary,
+                                text = if (isCurrentUserInActiveRide) "Resume" else "Rejoin",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold
                             )
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                contentDescription = "View all",
-                                tint = AmberPrimary,
-                                modifier = Modifier.size(16.dp)
-                            )
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(20.dp))
+            }
 
-                if (pastRides.isEmpty()) {
-                    Text(
-                        text = "Your completed rides will appear here.",
-                        color = Color(0xFF78909C),
-                        fontSize = 13.sp,
-                        modifier = Modifier.padding(vertical = 4.dp)
-                    )
-                } else {
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+            // ── E. Recent Rides ──────────────────────────────────────────────
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Recent Rides",
+                    color = Color.White,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                if (pastRides.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .clickable { showHistorySheet = true }
+                            .padding(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        pastRides.take(3).forEachIndexed { index, item ->
-                            if (index > 0) {
-                                HorizontalDivider(color = DividerColor)
-                            }
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { selectedHistoryRideForDetails = item }
-                                    .padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Row(
-                                    modifier = Modifier.weight(1f),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text("📍", fontSize = 16.sp)
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Column {
-                                        Text(
-                                            text = item.rideName,
-                                            color = Color.White,
-                                            fontSize = 14.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        val dateText = formatRelativeDate(item.completedAtMs)
-                                        Text(
-                                            text = "$dateText · ${item.formattedDistance}",
-                                            color = Color(0xFF90A4AE),
-                                            fontSize = 12.sp
-                                        )
-                                    }
-                                }
-
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = "Details",
-                                    tint = Color(0xFF78909C),
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                        }
+                        Text(
+                            text = "See all",
+                            color = AmberPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = "View all rides",
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(16.dp)
+                        )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.weight(1f))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // F. Minimal Account Status Footer
+            if (pastRides.isEmpty()) {
+                // Empty state — concise, actionable
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = SurfaceCard,
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(text = "🏍️", fontSize = 36.sp)
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "No recent rides yet",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Create a ride or join your friends to start exploring together.",
+                            color = TextSecondary,
+                            fontSize = 13.sp,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                        if (!hasActiveRide) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Button(
+                                    onClick = onCreateRideClick,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = AmberPrimary,
+                                        contentColor = SlateDark900
+                                    ),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.height(42.dp)
+                                ) {
+                                    Text("Create Ride", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                }
+                                OutlinedButton(
+                                    onClick = onJoinRideClick,
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.height(42.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, SlateDark700)
+                                ) {
+                                    Text("Join Ride", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Recent ride cards
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    pastRides.take(3).forEach { item ->
+                        RecentRideCard(
+                            ride = item,
+                            onClick = { selectedHistoryRideForDetails = item }
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // ── F. Account status footer ─────────────────────────────────────
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 12.dp, bottom = 8.dp),
+                    .padding(bottom = 10.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         imageVector = Icons.Default.CheckCircle,
-                        contentDescription = "Sync",
+                        contentDescription = null,
                         tint = StatusRidingGreen,
                         modifier = Modifier.size(13.dp)
                     )
@@ -552,18 +553,17 @@ fun WelcomeScreen(
                         fontWeight = FontWeight.Medium
                     )
                 }
-
                 if (isSignedIn) {
                     Text(
                         text = userEmail ?: currentName,
-                        color = Color(0xFF78909C),
+                        color = TextTertiary,
                         fontSize = 11.sp
                     )
                 }
             }
         }
 
-        // Dialogs & Sheets
+        // Dialogs & sheets
         if (selectedHistoryRideForDetails != null) {
             RideDetailsDialog(
                 ride = selectedHistoryRideForDetails!!,
@@ -580,6 +580,93 @@ fun WelcomeScreen(
     }
 }
 
+/**
+ * Individual recent ride card — shows route, date, distance and duration.
+ */
+@Composable
+private fun RecentRideCard(
+    ride: CompletedRideEntity,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .clickable { onClick() }
+            .testTag("recent_ride_card_${ride.id}"),
+        color = SurfaceCard,
+        shape = RoundedCornerShape(14.dp),
+        tonalElevation = 2.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Route icon accent
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(AmberPrimary.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Navigation,
+                    contentDescription = null,
+                    tint = AmberPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            // Route name and date/stats
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "${ride.startLocationName} → ${ride.destinationName}",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(3.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = formatRelativeDate(ride.completedAtMs),
+                        color = TextTertiary,
+                        fontSize = 12.sp
+                    )
+                    Text(
+                        text = " · ${ride.formattedDistance}",
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    if (ride.formattedDuration.isNotBlank() && ride.formattedDuration != "--") {
+                        Text(
+                            text = " · ${ride.formattedDuration}",
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = "View details",
+                tint = TextTertiary,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
 private fun formatRelativeDate(completedAtMs: Long): String {
     val now = System.currentTimeMillis()
     val diffDays = (now - completedAtMs) / (1000 * 60 * 60 * 24)
@@ -590,5 +677,3 @@ private fun formatRelativeDate(completedAtMs: Long): String {
         else -> SimpleDateFormat("d MMM", Locale.getDefault()).format(Date(completedAtMs))
     }
 }
-
-

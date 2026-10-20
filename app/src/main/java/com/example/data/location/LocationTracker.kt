@@ -28,7 +28,14 @@ import kotlin.coroutines.resume
 data class LocationUpdate(
     val latLng: LatLng,
     val speedKmh: Double,
-    val headingDeg: Float,
+
+    /**
+     * Qualified heading (0..360) when available: GPS bearing, else course over
+     * ground derived from the preceding fix. Null means "no reliable heading" —
+     * consumers must preserve their previous heading, never substitute 0°.
+     */
+    val headingDeg: Float?,
+
     val accuracyMeters: Float,
     val timestampMs: Long = System.currentTimeMillis()
 )
@@ -59,6 +66,10 @@ class LocationTracker(private val context: Context) {
     private val _isGpsAvailable = MutableStateFlow(true)
     val isGpsAvailable: StateFlow<Boolean> = _isGpsAvailable.asStateFlow()
 
+    // Last completed fix retained for course-over-ground derivation (Qualified Bearing).
+    private var lastFixForCourse: Location? = null
+    private var lastFixWallClockMs: Long = 0L
+
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             val loc: Location = result.lastLocation ?: run {
@@ -68,7 +79,35 @@ class LocationTracker(private val context: Context) {
             _isGpsAvailable.value = true
             // Convert m/s to km/h (1 m/s = 3.6 km/h)
             val speedKmh = if (loc.hasSpeed()) (loc.speed * 3.6).coerceAtLeast(0.0) else 0.0
-            val heading = if (loc.hasBearing()) loc.bearing else 0f
+
+            // Qualified Bearing: GPS bearing first; otherwise derive course over
+            // ground from the preceding fix — never substitute 0° when missing.
+            val prev = lastFixForCourse
+            val prevTime = lastFixWallClockMs
+            val nowMs = System.currentTimeMillis()
+            val derivedHeading: Float? = if (prev == null) {
+                null
+            } else {
+                val displacedEnough = prev.distanceTo(loc) >= CourseOverGround.MIN_DERIVATION_DISTANCE_METERS
+                val elapsedEnough = (nowMs - prevTime) >= CourseOverGround.MIN_DERIVATION_INTERVAL_MS
+                if (displacedEnough && elapsedEnough) {
+                    CourseOverGround.derive(
+                        prev = LatLng(prev.latitude, prev.longitude),
+                        prevTimestampMs = prevTime,
+                        current = LatLng(loc.latitude, loc.longitude),
+                        currentTimestampMs = nowMs
+                    )
+                } else {
+                    null
+                }
+            }
+            val heading: Float? = when {
+                loc.hasBearing() -> ((loc.bearing % 360f) + 360f) % 360f
+                derivedHeading != null -> derivedHeading
+                else -> null
+            }
+            lastFixForCourse = loc
+            lastFixWallClockMs = nowMs
 
             _currentLocation.value = LocationUpdate(
                 latLng = LatLng(loc.latitude, loc.longitude),
@@ -78,6 +117,10 @@ class LocationTracker(private val context: Context) {
                 timestampMs = loc.time
             )
         }
+    }
+
+    fun updateLocationForTesting(loc: LocationUpdate) {
+        _currentLocation.value = loc
     }
 
     @SuppressLint("MissingPermission")
@@ -170,7 +213,7 @@ class LocationTracker(private val context: Context) {
                             val update = LocationUpdate(
                                 latLng = LatLng(location.latitude, location.longitude),
                                 speedKmh = if (location.hasSpeed()) (location.speed * 3.6).coerceAtLeast(0.0) else 0.0,
-                                headingDeg = if (location.hasBearing()) location.bearing else 0f,
+                                headingDeg = if (location.hasBearing()) ((location.bearing % 360f) + 360f) % 360f else null,
                                 accuracyMeters = if (location.hasAccuracy()) location.accuracy else 10f,
                                 timestampMs = location.time
                             )
@@ -192,7 +235,7 @@ class LocationTracker(private val context: Context) {
                                         val up = LocationUpdate(
                                             latLng = LatLng(loc.latitude, loc.longitude),
                                             speedKmh = if (loc.hasSpeed()) (loc.speed * 3.6).coerceAtLeast(0.0) else 0.0,
-                                            headingDeg = if (loc.hasBearing()) loc.bearing else 0f,
+                                            headingDeg = if (loc.hasBearing()) ((loc.bearing % 360f) + 360f) % 360f else null,
                                             accuracyMeters = if (loc.hasAccuracy()) loc.accuracy else 10f,
                                             timestampMs = loc.time
                                         )

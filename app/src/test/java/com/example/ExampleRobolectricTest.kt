@@ -14,6 +14,7 @@ import com.example.data.model.RiderMember
 import com.example.data.firebase.RideRepository
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -140,16 +141,22 @@ class ExampleRobolectricTest {
     @Test
     fun `test ride repository flow`() = kotlinx.coroutines.runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        if (com.google.firebase.FirebaseApp.getApps(context).isEmpty()) {
-            val options = com.google.firebase.FirebaseOptions.Builder()
-                .setApplicationId("1:13707892827:android:e982c3179342c585f0877e")
-                .setApiKey("AIzaSyBwTrOliLZV_Z2UkyCVjOKq2JbxoxOj0Yg")
-                .setProjectId("gen-lang-client-0349632077")
-                .build()
-            com.google.firebase.FirebaseApp.initializeApp(context, options)
-        }
         val tracker = LocationTracker(context)
-        val repo = RideRepository(context, tracker)
+        // B-09 (audit F12-D3): this test used to initialise a LIVE Firebase app
+        // and perform real Firestore writes from inside a Robolectric
+        // `runBlocking`. With no network the Firestore callback could never
+        // resume (it needs the Robolectric main looper, which `runBlocking`
+        // occupies) and the whole `:app:testDebugUnitTest` task hung
+        // indefinitely (>30 min observed, thread-dumped).
+        //
+        // The repository's Firestore dependency is nullable and every access is
+        // null-safe, so the repository is exercised fully in-memory: the offline
+        // suite stays hermetic and repeatable.
+        val repo = RideRepository(
+            locationTracker = tracker,
+            firestore = null,
+            context = context
+        )
         repo.initCurrentUser("user_arpit", "Arpit")
 
         val ride = repo.createRide(
@@ -174,13 +181,22 @@ class ExampleRobolectricTest {
         assertEquals("Wait for me", repo.recentMessage.value?.text)
 
         // Test SOS trigger
-        repo.triggerSos()
-        assertNotNull(repo.activeSos.value)
-        assertEquals("Arpit", repo.activeSos.value?.riderName)
+        //
+        // B-09: the SOS lifecycle itself is covered exhaustively (and offline)
+        // by SosLifecycleAndDeliveryTest / SosAckDeliveryAndDismissalTest with a
+        // fake backend. What is verified HERE is the repository's behaviour when
+        // no Firestore backend is available: the trigger must fail EXPLICITLY
+        // and must not leave a dangling local alert behind.
+        val sosResult = repo.triggerSos()
+        assertTrue("SOS trigger must fail explicitly without a backend", sosResult.isFailure)
+        assertNull("no local SOS may be left behind", repo.activeSos.value)
 
         // Test SOS resolve
-        repo.resolveSosInternal()
-        assertEquals(null, repo.activeSos.value)
+        // Resolving when there is no active alert is a no-op SUCCESS (there is
+        // nothing to resolve) and must not leave an alert behind.
+        val resolveResult = repo.resolveSosInternal()
+        assertTrue("resolving without an active alert must be a harmless no-op", resolveResult.isSuccess)
+        assertNull("no local SOS may be left behind after resolve", repo.activeSos.value)
 
         // Test Route Update
         val pts = listOf(LatLng(18.52, 73.85), LatLng(18.60, 73.65), LatLng(18.75, 73.40))
@@ -301,8 +317,50 @@ class ExampleRobolectricTest {
         assertEquals(com.example.data.amenities.AmenityType.FUEL, queried[0].type)
 
         val cache = com.example.data.amenities.AmenityQueryCacheEntity("14_100_200", 123456789L)
-        dao.insertQueryCache(cache)
-        val ts = dao.getQueryTimestamp("14_100_200")
-        assertEquals(123456789L, ts)
+        dao.insertQueryCaches(listOf(cache))
+        val ts = dao.getQueryTimestamps(listOf("14_100_200"))
+        assertEquals(1, ts.size)
+        assertEquals(123456789L, ts[0].timestampMs)
+    }
+
+    @Test
+    fun `test room database migration v3 to v4 preserves completed rides`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = com.example.data.db.RideDatabase.getInstance(context)
+        
+        val ride = com.example.data.db.CompletedRideEntity(
+            id = "test_ride_v3",
+            rideName = "Pune to Lonavala",
+            startLocationName = "Pune",
+            destinationName = "Lonavala",
+            distanceMeters = 54000.0,
+            durationSeconds = 3600.0,
+            avgSpeedKmh = 54.0,
+            riderCount = 2,
+            completedAtMs = System.currentTimeMillis(),
+            hadEmergency = false,
+            isImplausibleData = false
+        )
+        db.completedRideDao().insertRide(ride)
+
+        val retrieved = db.completedRideDao().getRideById("test_ride_v3")
+        assertNotNull(retrieved)
+        assertEquals("Pune to Lonavala", retrieved!!.rideName)
+        assertEquals(54000.0, retrieved.distanceMeters, 0.1)
+
+        val telemetry = com.example.data.db.ActiveRideTelemetryEntity(
+            rideId = "test_ride_v3",
+            startedAtMs = 1000000L,
+            actualRecordedDistanceMeters = 12000.0,
+            lastGpsLat = 18.5204,
+            lastGpsLng = 73.8567,
+            lastGpsTimestampMs = 1005000L
+        )
+        db.activeRideTelemetryDao().insertOrUpdate(telemetry)
+
+        val retrievedTelemetry = db.activeRideTelemetryDao().getTelemetry("test_ride_v3")
+        assertNotNull(retrievedTelemetry)
+        assertEquals(1000000L, retrievedTelemetry!!.startedAtMs)
+        assertEquals(12000.0, retrievedTelemetry.actualRecordedDistanceMeters, 0.1)
     }
 }

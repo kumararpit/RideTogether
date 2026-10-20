@@ -167,11 +167,18 @@ fun RideTogetherApp(viewModel: RideViewModel) {
             }
             CreateRideScreen(
                 onBack = { viewModel.navigateTo(AppScreen.WELCOME) },
-                onCreateRide = { name, start, dest, startCoords, destCoords ->
-                    viewModel.createRide(name, start, dest, startCoords, destCoords)
+                onCreateRide = { name, start, dest, startCoords, destCoords, intermediateStops ->
+                    viewModel.createRide(name, start, dest, startCoords, destCoords, intermediateStops)
                 },
                 currentGpsLocation = viewModel.locationTracker.currentLocation.value?.latLng,
-                placeSearchService = viewModel.placeSearchService
+                placeSearchRepository = viewModel.placeSearchRepository,
+                locationBiasProvider = {
+                    // Validated freshness/accuracy gate inside; missing GPS simply
+                    // yields a global unbiased search.
+                    com.example.data.place.SearchLocationBias.from(
+                        viewModel.locationTracker.currentLocation.value
+                    )
+                }
             )
         }
 

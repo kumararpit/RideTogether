@@ -2,14 +2,28 @@ package com.example
 
 import android.app.Application
 import android.util.Log
+import coil.ImageLoader
+import coil.ImageLoaderFactory
+import coil.memory.MemoryCache
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
 
-class RideTogetherApplication : Application() {
+class RideTogetherApplication : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
         initFirebase()
+    }
+
+    override fun newImageLoader(): ImageLoader {
+        return ImageLoader.Builder(this)
+            .memoryCache {
+                MemoryCache.Builder(this)
+                    .maxSizeBytes(30 * 1024 * 1024) // 30 MB strict memory budget for map tiles & bitmaps
+                    .build()
+            }
+            .respectCacheHeaders(false)
+            .build()
     }
 
     private fun initFirebase() {

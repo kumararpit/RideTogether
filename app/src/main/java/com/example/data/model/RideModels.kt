@@ -57,7 +57,13 @@ data class RiderMember(
     val connectionStatus: ConnectionStatus = ConnectionStatus.CONNECTED,
     val location: LatLng,
     val speedKmh: Double = 0.0,
-    val headingDeg: Float = 0f,
+    /**
+     * Qualified heading in degrees (0..360, compass convention), or null when the
+     * fix provided no bearing and course-over-ground estimation was unavailable.
+     * Null must never be rendered as "north" (0°) — that is the Qualified Bearing
+     * contract shared by the camera, the marker animator, and Firestore sync.
+     */
+    val headingDeg: Float? = null,
     val accuracyMeters: Float = 10f,
     val sequenceNumber: Long = 0L,
     val lastUpdatedMs: Long = System.currentTimeMillis(),
@@ -131,12 +137,70 @@ data class NavigationStep(
         }
 }
 
+/**
+ * Role of a stop in an ordered route plan (multi-waypoint navigation).
+ * The origin and final destination are tracked explicitly so they can never
+ * appear duplicated inside the intermediate-stop collection.
+ */
+enum class RouteStopRole {
+    ORIGIN,
+    INTERMEDIATE,
+    DESTINATION
+}
+
+/**
+ * One ordered stop in a route plan. Stable [id] survives reordering (drag/drop),
+ * edits, leader re-publication, and Firestore round-trips; a stop's identity is
+ * never inferred from its position.
+ */
+data class RouteStop(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String,
+    val address: String? = null,
+    val latitude: Double,
+    val longitude: Double,
+    val role: RouteStopRole = RouteStopRole.INTERMEDIATE
+) {
+    val latLng: LatLng get() = LatLng(latitude, longitude)
+
+    /** Structural validity used before any routing request is assembled. */
+    fun isValidCoordinate(): Boolean =
+        latitude.isFinite() && longitude.isFinite() &&
+            latitude in -90.0..90.0 && longitude in -180.0..180.0
+}
+
+/**
+ * One OSRM route leg: the road path between two consecutive waypoints.
+ * [startVertexIndex] locates the leg inside the overall [RouteResult.coordinates]
+ * polyline (the overview geometry is one continuous set of vertices), so the map
+ * renderer keeps drawing a single road-following line - no synthetic straight
+ * connection between leg endpoints is ever introduced.
+ */
+data class RouteLeg(
+    val startVertexIndex: Int,
+    val distanceMeters: Double,
+    val durationSeconds: Double,
+    val steps: List<NavigationStep> = emptyList()
+)
+
 data class RouteResult(
     val coordinates: List<LatLng>,
     val totalDistanceMeters: Double,
     val totalDurationSeconds: Double,
     val steps: List<NavigationStep>,
-    val isFallback: Boolean = false
+    val isFallback: Boolean = false,
+    /**
+     * Ordered request waypoints (origin, intermediates, destination) as they were
+     * submitted to OSRM. Empty for legacy single-destination routes; once set it
+     * never silently diverges from the rendered geometry.
+     */
+    val waypoints: List<LatLng> = emptyList(),
+    /** Ordered structured stops for [waypoints] (>=2 entries when non-empty). */
+    val stops: List<RouteStop> = emptyList(),
+    /** Per-leg OSRM data aligned 1:1 with (waypoints.size - 1) intersections. */
+    val legs: List<RouteLeg> = emptyList(),
+    /** Monotonic route-plan identity; guards against stale overwrite in sync. */
+    val planVersion: Long = 0L
 ) {
     val formattedDistance: String
         get() = if (totalDistanceMeters >= 1000) {
@@ -170,10 +234,40 @@ data class Ride(
     val status: RideStatus = RideStatus.LOBBY,
     val members: List<RiderMember> = emptyList(),
     val routePoints: List<LatLng> = emptyList(),
+    val initialPlannedDistanceMeters: Double = 0.0,
     val totalDistanceMeters: Double = 0.0,
     val totalDurationSeconds: Double = 0.0,
     val navigationSteps: List<NavigationStep> = emptyList(),
+    /**
+     * Leader-authoritative ordered route plan (origin, intermediates, destination).
+     * Empty for every legacy ride; members never write it - only the leader's
+     * route publication does (see RideRepository.updateRoute).
+     */
+    val routeStops: List<RouteStop> = emptyList(),
+    /** Monotonic plan version; stale (older) snapshots never overwrite newer. */
+    val routePlanVersion: Long = 0L,
     val actualRecordedDistanceMeters: Double = 0.0,
     val elapsedDurationSeconds: Double = 0.0,
+    val startedAtMs: Long = 0L,
     val createdAtMs: Long = System.currentTimeMillis()
-)
+) {
+    /**
+     * Best-effort trip distance for the ride summary.
+     *
+     * The GPS odometer is trusted only when it is plausible: it must have recorded a
+     * meaningful distance (>= 50 m) AND at least 15% of the planned route distance.
+     * This prevents glitched GPS sessions (e.g., a 7.5 km ride where GPS dropped out
+     * and only 100 m got recorded) from overwriting the planned distance in Recent Rides.
+     */
+    val finalSummaryDistanceMeters: Double
+        get() {
+            val planned = if (initialPlannedDistanceMeters > 0.0) initialPlannedDistanceMeters else totalDistanceMeters
+            return when {
+                // If actual GPS odometer recorded meaningful distance (at least 50m and at least 15% of planned route)
+                actualRecordedDistanceMeters >= 50.0 && (planned <= 0.0 || actualRecordedDistanceMeters >= planned * 0.15) ->
+                    actualRecordedDistanceMeters
+                planned > 0.0 -> planned
+                else -> actualRecordedDistanceMeters
+            }
+        }
+}

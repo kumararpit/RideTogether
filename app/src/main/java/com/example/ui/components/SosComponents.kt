@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -174,6 +175,10 @@ fun SosConfirmDialog(
 
 /**
  * Top alert banner when ANOTHER rider in the pack triggers SOS.
+ *
+ * [onDismiss] gives the member a per-device option to remove the popup (it stops
+ * rendering the banner and suppresses stale replays locally; it never touches the
+ * sender's emergency or the shared Firestore state).
  */
 @Composable
 fun SosAlertBanner(
@@ -181,6 +186,7 @@ fun SosAlertBanner(
     onViewLocation: (SosEvent) -> Unit,
     onAcknowledge: (() -> Unit)? = null,
     isAcknowledged: Boolean = false,
+    onDismiss: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -348,6 +354,37 @@ fun SosAlertBanner(
                     )
                 }
 
+                if (onDismiss != null) {
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    // Per-device popup removal: this member no longer sees the alert on
+                    // their screen. The sender's emergency is untouched.
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color.Transparent,
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .height(38.dp)
+                            .testTag("dismiss_sos_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Remove SOS popup",
+                            tint = Color.White,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Clear",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+
                 Spacer(modifier = Modifier.width(6.dp))
 
                 Button(
@@ -397,6 +434,7 @@ fun SosAlertBanner(
 fun ActiveSosBar(
     onResolve: () -> Unit,
     acknowledgedCount: Int = 0,
+    acknowledgedNames: List<String> = emptyList(),
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -429,7 +467,13 @@ fun ActiveSosBar(
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Black
                     )
-                    val ackText = if (acknowledgedCount > 0) {
+                    val ackText = if (acknowledgedNames.isNotEmpty()) {
+                        // Explicit ack visibility for the sender: WHO acknowledged.
+                        val names = acknowledgedNames.joinToString(", ").let {
+                            if (it.length > 60) it.take(57) + "…" else it
+                        }
+                        "Acknowledged by $acknowledgedCount member(s): $names"
+                    } else if (acknowledgedCount > 0) {
                         "$acknowledgedCount pack member(s) acknowledged"
                     } else {
                         "Broadcasting location to pack in real-time"

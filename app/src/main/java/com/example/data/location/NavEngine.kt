@@ -19,13 +19,38 @@ data class NavigationProgress(
     val routeVersion: Int = 1,
     val isArrived: Boolean = false,
     val isStaleGps: Boolean = false,
-    val emaSpeedKmh: Double = 0.0
+    val emaSpeedKmh: Double = 0.0,
+    /**
+     * Multi-waypoint progression: index of the leg the rider is currently on
+     * (0 = origin→first stop). 0 for legacy single-destination routes, and
+     * capped so no-stop navigation stays regression-free.
+     */
+    val currentLegIndex: Int = 0,
+    /** Total number of legs on the active route (1 for legacy routes). */
+    val legCount: Int = 1
 )
 
 class NavEngine {
 
     private var activeRoute: RouteResult? = null
     private var routeVersion = 1
+
+    /**
+     * Session latched arrival flag. Once the rider reaches the destination this stays true
+     * for the whole ride, so GPS overshoot around the finish pin can never re-trigger
+     * off-route recalculation loops. Cleared only on [reset] (new ride session).
+     */
+    private var hasArrivedAtDestination = false
+
+    /**
+     * Tracks how many intermediate legs have been completed (rider confirmed at
+     * a stop with an accurate fix). Two invariants:
+     *  - advancement happens at most ONE leg per [processLocation] call, so a
+     *    single stale/jumpy fix can never skip over closely spaced stops;
+     *  - advancement requires accuracy-reliable fixes AND the rider still being
+     *    on-route (off-route fixes return early).
+     */
+    private var completedLegs = 0
 
     private var stepVertexIndices: List<Int> = emptyList()
     private var emaSpeedMps: Double = 0.0
@@ -37,13 +62,15 @@ class NavEngine {
     val lastAnnouncedManeuverIndex: StateFlow<Int> = _lastAnnouncedManeuverIndex.asStateFlow()
 
     fun setRoute(route: RouteResult) {
-        activeRoute = route
+        val realisticDurationSec = calculateRealisticPlannedDuration(route.totalDistanceMeters, route.totalDurationSeconds)
+        val adjustedRoute = route.copy(totalDurationSeconds = realisticDurationSec)
+        activeRoute = adjustedRoute
         routeVersion++
         _lastAnnouncedManeuverIndex.value = -1
         emaSpeedMps = 0.0
 
-        val points = route.coordinates
-        val steps = route.steps
+        val points = adjustedRoute.coordinates
+        val steps = adjustedRoute.steps
 
         // Map each navigation step to its corresponding vertex index in coordinates
         stepVertexIndices = computeStepVertexIndices(points, steps)
@@ -52,21 +79,24 @@ class NavEngine {
             val nextVertex = stepVertexIndices.getOrElse(1) { points.size - 1 }
             RouteGeometry.remainingDistanceMeters(0, points.take(nextVertex + 1))
         } else {
-            route.totalDistanceMeters
+            adjustedRoute.totalDistanceMeters
         }
 
         _progress.value = NavigationProgress(
             currentSegmentIndex = 0,
             currentManeuverIndex = 0,
             distanceToNextManeuverMeters = initialNextStepDist,
-            remainingRouteDistanceMeters = route.totalDistanceMeters,
-            remainingDurationSeconds = route.totalDurationSeconds,
+            remainingRouteDistanceMeters = adjustedRoute.totalDistanceMeters,
+            remainingDurationSeconds = adjustedRoute.totalDurationSeconds,
             isOffRoute = false,
             routeVersion = routeVersion,
             isArrived = false,
             isStaleGps = false,
-            emaSpeedKmh = 0.0
+            emaSpeedKmh = 0.0,
+            currentLegIndex = 0,
+            legCount = max(1, adjustedRoute.legs.size)
         )
+        completedLegs = 0
     }
 
     fun processLocation(location: LocationUpdate): NavigationProgress {
@@ -77,6 +107,32 @@ class NavEngine {
         val userLoc = location.latLng
         val prevProgress = _progress.value
         val isAccuracyReliable = location.accuracyMeters <= 30f
+
+        // 0. Arrival latch check — within 35 m of the final destination coordinate or
+        //    with <= 25 m of route remaining, permanently latch arrival.
+        val destination = points.last()
+        val distToDestinationMeters = userLoc.distanceTo(destination) * 1000.0
+        if (!hasArrivedAtDestination &&
+            (distToDestinationMeters <= 35.0 || prevProgress.remainingRouteDistanceMeters in 0.0..25.0)
+        ) {
+            hasArrivedAtDestination = true
+        }
+
+        if (hasArrivedAtDestination) {
+            // Hard latch: force terminal arrival state, suppress any off-route detection,
+            // and zero out all remaining distance/duration readouts.
+            val arrivedProgress = prevProgress.copy(
+                isArrived = true,
+                isOffRoute = false,
+                remainingRouteDistanceMeters = 0.0,
+                remainingDurationSeconds = 0.0,
+                distanceToNextManeuverMeters = 0.0,
+                isStaleGps = !isAccuracyReliable,
+                routeVersion = routeVersion
+            )
+            _progress.value = arrivedProgress
+            return arrivedProgress
+        }
 
         // 1. Off-route detection
         val distToPolylineM = RouteGeometry.distanceToPolylineMeters(userLoc, points)
@@ -119,6 +175,33 @@ class NavEngine {
         }
 
         val remDistMeters = RouteGeometry.remainingDistanceMeters(closestIdx, points)
+
+        // 2b. Intermediate-stop leg advancement (multi-waypoint routes).
+        // At most ONE leg per fix: a single stale or jumpy fix (even a big GPS
+        // overshoot merged into the on-route search window) can never skip over
+        // two closely spaced waypoints in one call, because the next one is only
+        // evaluated from the NEXT fix. Arrival at a stop mirrors the documented
+        // final-arrival rules (35 m radius, accuracy-gated, not off-route —
+        // off-route fixes returned above). Passing credit uses a crossing test
+        // (closer to the next vertex than to the stop vertex), so sparse
+        // vertex spacing can never prematurely complete a leg. Remaining
+        // distance/ETA need no special transition handling: the merged
+        // waypoint-to-waypoint polyline means remDistMeters already counts
+        // through all future legs.
+        val routeLegs = route.legs
+        if (routeLegs.size >= 2 && completedLegs < routeLegs.size - 1 && isAccuracyReliable) {
+            val nextStopVertex = routeLegs[completedLegs + 1].startVertexIndex
+                .coerceIn(0, points.size - 1)
+            val stopPoint = points[nextStopVertex]
+            val distToStop = userLoc.distanceTo(stopPoint) * 1000.0
+            val nextVertexAfterStop = (nextStopVertex + 1).coerceAtMost(points.size - 1)
+            val distToNextVertex = userLoc.distanceTo(points[nextVertexAfterStop]) * 1000.0
+            val crossedStop = closestIdx > nextStopVertex ||
+                (closestIdx == nextStopVertex && nextVertexAfterStop != nextStopVertex && distToNextVertex < distToStop)
+            if (distToStop <= 35.0 || crossedStop) {
+                completedLegs++
+            }
+        }
 
         // 3. Maneuver Advancement & Dynamic Distance to Next Maneuver
         val steps = route.steps
@@ -164,13 +247,31 @@ class NavEngine {
         }
 
         val effectiveSpeedMps = if (emaSpeedMps >= 3.0) {
-            emaSpeedMps
+            emaSpeedMps.coerceIn(3.0, 25.0)
         } else {
             routeAvgSpeedMps
         }
 
-        val remDurationSec = if (effectiveSpeedMps > 0) remDistMeters / effectiveSpeedMps else route.totalDurationSeconds
+        var remDurationSec = if (remDistMeters <= 10.0) {
+            0.0
+        } else if (effectiveSpeedMps > 0) {
+            remDistMeters / effectiveSpeedMps
+        } else {
+            route.totalDurationSeconds
+        }
+
         val isArrived = remDistMeters <= 30.0 || (closestIdx >= points.size - 2 && remDistMeters <= 40.0)
+        if (isArrived) {
+            hasArrivedAtDestination = true
+            remDurationSec = 0.0
+        }
+
+        // Precise ETA Monotonicity Constraint:
+        // Apply monotonicity only while rider is confirmed stationary (speedKmh < 3.0),
+        // not arrived, and active route version is unchanged.
+        if (!isArrived && location.speedKmh < 3.0 && routeVersion == prevProgress.routeVersion && prevProgress.remainingDurationSeconds > 0.0) {
+            remDurationSec = maxOf(remDurationSec, prevProgress.remainingDurationSeconds)
+        }
 
         val newProgress = NavigationProgress(
             currentSegmentIndex = closestIdx,
@@ -182,7 +283,9 @@ class NavEngine {
             routeVersion = routeVersion,
             isArrived = isArrived,
             isStaleGps = !isAccuracyReliable,
-            emaSpeedKmh = (emaSpeedMps * 3600.0) / 1000.0
+            emaSpeedKmh = (emaSpeedMps * 3600.0) / 1000.0,
+            currentLegIndex = completedLegs.coerceIn(0, max(0, route.legs.size - 1)),
+            legCount = max(1, route.legs.size)
         )
 
         _progress.value = newProgress
@@ -226,6 +329,21 @@ class NavEngine {
         return if (idx in steps.indices) steps[idx] else null
     }
 
+    /**
+     * Next required stop on the active route (origin→…→destination ordering):
+     * the stop the rider must reach after completing [NavigationProgress.currentLegIndex]
+     * legs. Null once the rider is on the final leg (guidance is arrival-bound).
+     */
+    fun getNextStop(): com.example.data.model.RouteStop? {
+        val route = activeRoute ?: return null
+        val nextIdx = _progress.value.currentLegIndex + 1
+        return if (nextIdx <= route.stops.lastIndex && route.legs.size >= 2) {
+            route.stops[nextIdx]
+        } else {
+            null
+        }
+    }
+
     fun getNextStep(): NavigationStep? {
         val steps = activeRoute?.steps ?: return null
         val idx = _progress.value.currentManeuverIndex + 1
@@ -242,8 +360,26 @@ class NavEngine {
         activeRoute = null
         routeVersion++
         emaSpeedMps = 0.0
+        hasArrivedAtDestination = false
+        completedLegs = 0
         stepVertexIndices = emptyList()
         _lastAnnouncedManeuverIndex.value = -1
         _progress.value = NavigationProgress()
+    }
+
+    companion object {
+        /**
+         * Calculates a realistic motorcycle touring planned duration for a route.
+         * Raw OSRM car routing assumes ideal highway conditions (80-100 km/h) without traffic/intersections.
+         * For motorcycle touring on mixed urban/rural roads, realistic average speeds range 42--48 km/h (~11.6--13.3 m/s).
+         */
+        fun calculateRealisticPlannedDuration(distanceMeters: Double, rawDurationSeconds: Double): Double {
+            if (distanceMeters <= 0.0) return 0.0
+            val rawAvgSpeedMps = if (rawDurationSeconds > 0) distanceMeters / rawDurationSeconds else 12.5
+            // Clamp baseline motorcycle speed profile between 30 km/h (8.33 m/s) and 48 km/h (13.33 m/s)
+            val realisticSpeedMps = rawAvgSpeedMps.coerceIn(8.33, 13.33)
+            val calculatedSec = distanceMeters / realisticSpeedMps
+            return maxOf(rawDurationSeconds, calculatedSec)
+        }
     }
 }
