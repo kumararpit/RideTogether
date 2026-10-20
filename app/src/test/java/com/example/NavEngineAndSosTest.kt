@@ -158,7 +158,12 @@ class NavEngineAndSosTest {
     fun `test SOS fresh location validation and idempotency`() = kotlinx.coroutines.runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val tracker = LocationTracker(context)
-        val repo = RideRepository(context, tracker)
+        val repo = RideRepository(
+            locationTracker = tracker,
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("rider_sos_user", "Arpit Test")
 
         val ride = repo.createRide("Test SOS Convoy", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))

@@ -61,6 +61,8 @@ import com.example.data.model.RideRole
 import com.example.data.model.RiderMember
 import com.example.ui.components.RideMapCanvas
 import com.example.ui.components.RiderStatusBadge
+import com.example.ui.components.RouteItineraryCard
+import com.example.ui.components.RouteOptionSelector
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.CustomIcons
 import com.example.ui.theme.SlateDark800
@@ -81,6 +83,9 @@ fun RideLobbyScreen(
     ride: Ride,
     members: List<RiderMember>,
     routePoints: List<LatLng> = emptyList(),
+    routeResult: com.example.data.model.RouteResult? = null,
+    routeOptions: List<com.example.data.model.RouteOptionSummary> = emptyList(),
+    onSelectRouteOption: (Int) -> Unit = {},
     onStartRide: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
@@ -227,7 +232,47 @@ fun RideLobbyScreen(
                     }
                 }
 
-                // 3. Invite Code & Sharing Card
+                // 3. Route options + stop itinerary (the plan the group rides)
+                if (routeOptions.isNotEmpty() || (routeResult != null && routeResult.legs.size > 1)) {
+                    item {
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("route_plan_card"),
+                            color = CardSurface,
+                            shape = RoundedCornerShape(18.dp),
+                            border = BorderStroke(1.dp, CardBorderColor)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                if (routeOptions.size > 1) {
+                                    Text(
+                                        text = if (isLeader) {
+                                            "CHOOSE THE ROUTE FOR THE GROUP"
+                                        } else {
+                                            "ROUTE CHOSEN BY THE LEADER"
+                                        },
+                                        color = TextTertiary,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    RouteOptionSelector(
+                                        options = routeOptions,
+                                        selectedIndex = ride.selectedRouteIndex,
+                                        onSelect = onSelectRouteOption,
+                                        enabled = isLeader,
+                                        showHeader = false
+                                    )
+                                }
+                                if (routeResult != null && routeResult.legs.size > 1) {
+                                    RouteItineraryCard(route = routeResult)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 4. Invite Code & Sharing Card
                 item {
                     Surface(
                         modifier = Modifier.fillMaxWidth(),

@@ -16,6 +16,8 @@ import com.example.data.model.RideLifecyclePolicy
 import com.example.data.model.RideRole
 import com.example.data.model.RideStatus
 import com.example.data.model.RiderMember
+import com.example.data.model.RouteOptionSummary
+import com.example.data.model.RoutePlanCodec
 import com.example.data.model.RouteStop
 import com.example.data.model.RouteStopCodec
 import com.example.data.model.SosEvent
@@ -50,7 +52,17 @@ class RideRepository(
         stopSpeedThresholdKmh = 5.0,
         resumeSpeedThresholdKmh = 8.0,
         stopDurationThresholdSec = 120L
-    )
+    ),
+    /**
+     * Delivery backend for SOS events.
+     *
+     * Production leaves this null: events are written to Firestore and the
+     * trigger only reports success once that write completed. Tests inject a
+     * local backend so the SOS lifecycle (state machine, idempotency,
+     * acknowledgment, resolution) can be exercised offline - the offline suite
+     * must never depend on a live backend or on network state.
+     */
+    val sosBackend: SosDeliveryBackend? = null
 ) {
     // Secondary constructor for convenience resolving default database
     constructor(context: Context, locationTracker: LocationTracker) : this(
@@ -293,6 +305,10 @@ class RideRepository(
                         activeDoc.get("routeStops") as? List<*>
                     ),
                     routePlanVersion = activeDoc.getLong("routePlanVersion") ?: 0L,
+                    selectedRouteIndex = (activeDoc.get("selectedRouteIndex") as? Number)?.toInt() ?: 0,
+                    routeOptions = RoutePlanCodec.optionsFromFirestore(
+                        activeDoc.get("routeOptions") as? List<*>
+                    ),
                     actualRecordedDistanceMeters = restoredActualDist,
                     startedAtMs = restoredStartAt
                 )
@@ -450,7 +466,9 @@ class RideRepository(
         destName: String,
         startLoc: LatLng,
         destLoc: LatLng,
-        routeStops: List<RouteStop> = emptyList()
+        routeStops: List<RouteStop> = emptyList(),
+        selectedRouteIndex: Int = 0,
+        routeOptions: List<RouteOptionSummary> = emptyList()
     ): Ride {
         val uid = auth?.currentUser?.uid
             ?: currentUserId.takeIf { it.isNotBlank() }
@@ -476,7 +494,9 @@ class RideRepository(
             initialPlannedDistanceMeters = initialApproxMeters,
             totalDistanceMeters = initialApproxMeters,
             routeStops = routeStops,
-            routePlanVersion = planVersion
+            routePlanVersion = planVersion,
+            selectedRouteIndex = selectedRouteIndex.coerceAtLeast(0),
+            routeOptions = routeOptions
         )
 
         val leaderMember = RiderMember(
@@ -519,6 +539,11 @@ class RideRepository(
             // legacy ride readers treat a missing/empty field as no-waypoint ride.
             "routeStops" to RouteStopCodec.toFirestore(routeStops),
             "routePlanVersion" to planVersion,
+            // The leader's chosen candidate route and the candidate list it was
+            // chosen from. Members re-fetch the geometry for the selected
+            // candidate, so only the summaries travel on the ride document.
+            "selectedRouteIndex" to selectedRouteIndex.coerceAtLeast(0),
+            "routeOptions" to RoutePlanCodec.optionsToFirestore(routeOptions),
             "createdAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp()
         )
@@ -815,13 +840,28 @@ class RideRepository(
                 val incomingStops = RouteStopCodec.fromFirestore(
                     snapshot.get("routeStops") as? List<*>
                 )
-                val (mergedPlanVersion, mergedRouteStops, _planAdopted) =
-                    RouteStopCodec.mergeRoutePlan(
-                        localVersion = existingRide?.routePlanVersion ?: 0L,
-                        localStops = existingRide?.routeStops ?: emptyList(),
-                        incomingVersion = incomingPlanVersion,
-                        incomingStops = incomingStops
-                    )
+                val incomingSelectedRouteIndex =
+                    (snapshot.get("selectedRouteIndex") as? Number)?.toInt() ?: 0
+                val incomingRouteOptions = RoutePlanCodec.optionsFromFirestore(
+                    snapshot.get("routeOptions") as? List<*>
+                )
+                // The stops, the candidate list and the leader's selection are
+                // one plan: they travel together through the version guard, so a
+                // stale snapshot can never pair new stops with an old selection.
+                val mergedPlan = RoutePlanCodec.merge(
+                    localVersion = existingRide?.routePlanVersion ?: 0L,
+                    localStops = existingRide?.routeStops ?: emptyList(),
+                    localSelectedRouteIndex = existingRide?.selectedRouteIndex ?: 0,
+                    localOptions = existingRide?.routeOptions ?: emptyList(),
+                    incomingVersion = incomingPlanVersion,
+                    incomingStops = incomingStops,
+                    incomingSelectedRouteIndex = incomingSelectedRouteIndex,
+                    incomingOptions = incomingRouteOptions
+                )
+                val mergedPlanVersion = mergedPlan.version
+                val mergedRouteStops = mergedPlan.stops
+                val mergedSelectedRouteIndex = mergedPlan.selectedRouteIndex
+                val mergedRouteOptions = mergedPlan.options
 
                 val baseRide = existingRide ?: Ride(
                     id = rideId,
@@ -838,6 +878,8 @@ class RideRepository(
                     totalDurationSeconds = totalDur,
                     routeStops = mergedRouteStops,
                     routePlanVersion = mergedPlanVersion,
+                    selectedRouteIndex = mergedSelectedRouteIndex,
+                    routeOptions = mergedRouteOptions,
                     actualRecordedDistanceMeters = preservedActualDist,
                     elapsedDurationSeconds = preservedElapsedSec,
                     startedAtMs = restoredStartedAt
@@ -851,6 +893,8 @@ class RideRepository(
                     totalDurationSeconds = if (totalDur > 0.0) totalDur else baseRide.totalDurationSeconds,
                     routeStops = mergedRouteStops,
                     routePlanVersion = mergedPlanVersion,
+                    selectedRouteIndex = mergedSelectedRouteIndex,
+                    routeOptions = mergedRouteOptions,
                     actualRecordedDistanceMeters = preservedActualDist,
                     elapsedDurationSeconds = preservedElapsedSec,
                     startedAtMs = restoredStartedAt
@@ -1123,6 +1167,46 @@ class RideRepository(
                     )?.await()
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.UPDATE, "rides/${current.id}/route")
+            }
+        }
+    }
+
+    /**
+     * Publishes the leader's route plan: the ordered stops, the monotonic plan
+     * version, the candidate routes and the leader's selected candidate.
+     *
+     * The caller owns the version counter and increments it on every plan
+     * change, so a stale publication can never overwrite a newer plan - the
+     * receiving side applies the same guard (see [RoutePlanCodec.merge]).
+     */
+    fun updateRoutePlan(
+        routeStops: List<RouteStop>,
+        planVersion: Long,
+        selectedRouteIndex: Int,
+        routeOptions: List<RouteOptionSummary>
+    ) {
+        val current = _currentRide.value ?: return
+        val safeIndex = selectedRouteIndex.coerceAtLeast(0)
+        _currentRide.value = current.copy(
+            routeStops = routeStops,
+            routePlanVersion = planVersion,
+            selectedRouteIndex = safeIndex,
+            routeOptions = routeOptions
+        )
+        repositoryScope.launch {
+            try {
+                firestore?.collection("rides")?.document(current.id)
+                    ?.update(
+                        mapOf(
+                            "routeStops" to RouteStopCodec.toFirestore(routeStops),
+                            "routePlanVersion" to planVersion,
+                            "selectedRouteIndex" to safeIndex,
+                            "routeOptions" to RoutePlanCodec.optionsToFirestore(routeOptions),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )?.await()
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.UPDATE, "rides/${current.id}")
             }
         }
     }
@@ -1591,8 +1675,9 @@ class RideRepository(
             locationSource = source
         )
 
+        val backend = sosBackend
         val fs = firestore
-        if (fs == null) {
+        if (backend == null && fs == null) {
             Log.w("RideRepository", "Firestore is null, failing triggerSos explicitly")
             return Result.failure(IllegalStateException("Firestore unavailable for SOS trigger"))
         }
@@ -1614,10 +1699,17 @@ class RideRepository(
                 "timestampMs" to nowMs,
                 "createdAt" to FieldValue.serverTimestamp()
             )
-            fs.collection("rides").document(activeRideId)
-                .collection("sos").document(sosId)
-                .set(doc)
-                .await()
+            if (backend != null) {
+                // Injected delivery backend (offline tests): the event is
+                // handed to the backend and success is reported once it
+                // completed.
+                backend.deliver(activeRideId, sosId, doc)
+            } else {
+                fs!!.collection("rides").document(activeRideId)
+                    .collection("sos").document(sosId)
+                    .set(doc)
+                    .await()
+            }
             Result.success(event)
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, "rides/$activeRideId/sos/$sosId")
@@ -1706,8 +1798,9 @@ class RideRepository(
             return Result.failure(SecurityException("Only SOS sender or ride leader can resolve SOS alert"))
         }
 
+        val backend = sosBackend
         val fs = firestore
-        if (fs == null) {
+        if (backend == null && fs == null) {
             return Result.failure(IllegalStateException("Firestore unavailable"))
         }
 
@@ -1719,7 +1812,29 @@ class RideRepository(
         // snapshot of the event on this device.
         suppressedSosIds.suppress(targetEvent.id)
 
-        val sosRef = fs.collection("rides").document(activeRideId).collection("sos").document(targetEvent.id)
+        if (backend != null) {
+            // Injected delivery backend (offline tests).
+            return try {
+                backend.resolve(
+                    activeRideId,
+                    targetEvent.id,
+                    mapOf(
+                        "isResolved" to true,
+                        "resolvedAtMs" to System.currentTimeMillis()
+                    )
+                )
+                Result.success(Unit)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/sos/${targetEvent.id}")
+                // The local resolution stays authoritative for the session (see the
+                // comment on the Firestore path below).
+                Result.failure(e)
+            }
+        }
+
+        val sosRef = fs!!.collection("rides").document(activeRideId).collection("sos").document(targetEvent.id)
         var lastError: Exception? = null
         for (attempt in 1..SosRetryPolicy.MAX_ATTEMPTS) {
             val backoff = SosRetryPolicy.delayBeforeAttemptMs(attempt)
