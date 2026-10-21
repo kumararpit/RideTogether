@@ -1,6 +1,10 @@
 package com.example.data.firebase
 
+import com.example.data.model.LaneArrow
+import com.example.data.model.LaneGuidance
+import com.example.data.model.LaneMark
 import com.example.data.model.LatLng
+import com.example.data.model.ManeuverType
 import com.example.data.model.NavigationStep
 import java.util.Locale
 
@@ -47,7 +51,18 @@ object RouteGeometryCodec {
                     "distanceMeters" to it.distanceMeters,
                     "durationSeconds" to it.durationSeconds,
                     "maneuverType" to it.maneuverType,
-                    "modifier" to it.modifier
+                    "modifier" to it.modifier,
+                    // Richer maneuver model (additive: older documents simply
+                    // lack these fields and decode to the defaults).
+                    "maneuver" to it.maneuver.name,
+                    "exitNumber" to it.exitNumber,
+                    "turnAngleDegrees" to it.turnAngleDegrees,
+                    "lanes" to it.lanes?.lanes?.map { lane ->
+                        mapOf(
+                            "arrows" to lane.arrows.map { a -> a.name },
+                            "recommended" to lane.recommended
+                        )
+                    }
                 )
             },
             "totalDistanceMeters" to totalDistanceMeters,
@@ -95,7 +110,11 @@ object RouteGeometryCodec {
                 distanceMeters = (step["distanceMeters"] as? Number)?.toDouble() ?: 0.0,
                 durationSeconds = (step["durationSeconds"] as? Number)?.toDouble() ?: 0.0,
                 maneuverType = step["maneuverType"] as? String ?: "turn",
-                modifier = step["modifier"] as? String ?: "straight"
+                modifier = step["modifier"] as? String ?: "straight",
+                maneuver = decodeManeuver(step["maneuver"] as? String),
+                exitNumber = (step["exitNumber"] as? Number)?.toInt(),
+                turnAngleDegrees = (step["turnAngleDegrees"] as? Number)?.toInt(),
+                lanes = decodeLanes(step["lanes"])
             )
         }
 
@@ -105,6 +124,43 @@ object RouteGeometryCodec {
             totalDistanceMeters = totalDistanceMeters,
             totalDurationSeconds = totalDurationSeconds
         )
+    }
+
+    /**
+     * Decodes the maneuver name. Unknown names fall back to the raw
+     * `(type, modifier)` pair, so a document written by a newer build still
+     * decodes to a sensible maneuver.
+     */
+    private fun decodeManeuver(name: String?): ManeuverType {
+        if (name.isNullOrBlank()) return ManeuverType.UNKNOWN
+        return ManeuverType.values().firstOrNull { it.name == name } ?: ManeuverType.UNKNOWN
+    }
+
+    /**
+     * Decodes the persisted lane guidance.
+     *
+     * A lane without any modelled arrow is dropped, and a guidance without a
+     * usable lane is dropped as a whole — the same "never show a lane that
+     * was not there" rule the parser applies to live responses.
+     */
+    private fun decodeLanes(raw: Any?): LaneGuidance? {
+        @Suppress("UNCHECKED_CAST")
+        val list = raw as? List<Any?> ?: return null
+        val marks = list.mapNotNull { entry ->
+            @Suppress("UNCHECKED_CAST")
+            val map = entry as? Map<String, Any?> ?: return@mapNotNull null
+            @Suppress("UNCHECKED_CAST")
+            val arrowNames = map["arrows"] as? List<Any?> ?: return@mapNotNull null
+            val arrows = arrowNames.mapNotNull { a ->
+                val key = a as? String ?: return@mapNotNull null
+                LaneArrow.values().firstOrNull { it.name == key }
+            }.toSet()
+            if (arrows.isEmpty()) return@mapNotNull null
+            LaneMark(arrows = arrows, recommended = map["recommended"] as? Boolean ?: false)
+        }
+        if (marks.isEmpty()) return null
+        val guidance = LaneGuidance(marks)
+        return if (guidance.hasRecommendedLane) guidance else null
     }
 
     /** Compact, human-readable summary used in logs. */

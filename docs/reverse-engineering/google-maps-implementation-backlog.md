@@ -356,3 +356,72 @@ All in the enhancement worktree. Two new pure cores: `ui/map/FrameBudget.kt` (re
   1. the device's **display went to sleep** and could not be woken programmatically (`mWakefulness=Asleep`; `screencap` returns an empty file even after `keyevent 26` + `wm dismiss-keyguard`);
   2. the **on-device OSRM estimate request stopped completing** (the create-ride flow stayed on "Calculating…" for minutes while the **host's** OSRM answered `http=200` in 0.57 s) — so the flow that reaches the live map was blocked.
 - Consequently the amenity clustering, the palette, the count badge and the frame-statistics line are **unit-verified only** and are **not** claimed as device-observed.
+
+---
+
+## Implementation record, batch 6 (approved 2026-10-21): B-19 and B-28
+
+Evidence and design: `docs/reverse-engineering/feature-13-lane-guidance.md`.
+
+### B-19 · Maneuver taxonomy upgrade — **DONE (closed)**
+
+**Change.** New `data/model/ManeuverType.kt`: a RideTogether-original, closed
+24-value vocabulary (`DEPART`, `ARRIVE`, `TURN_{LEFT,SLIGHT_LEFT,SHARP_LEFT,…}`,
+`KEEP_{LEFT,RIGHT}`, `CONTINUE`, `NEW_NAME`, `ON_RAMP`, `OFF_RAMP`,
+`FORK_{LEFT,RIGHT}`, `MERGE_{LEFT,RIGHT}`, `ROUNDABOUT_{ENTER,EXIT}`,
+`END_OF_ROAD`, `U_TURN`, `FERRY`, `UNKNOWN`) mapped from the engine's
+`(type, modifier)` pair, plus the instruction builder and the icon mapping.
+The vocabulary is deliberately smaller than the reference's 48 types: the
+extra reference types are combinations the engine never produces, and the
+split that matters is the one the raw pair cannot express — `turn/slight
+left` (a bear left) versus `continue/slight left` (a keep left).
+
+**Verification.** `ManeuverVocabularyTest` (11 tests).
+
+### B-28 · Lane guidance — **DONE**
+
+> The backlog previously listed lane guidance as **not implementable with the
+> current data** (B-26). That judgement was **wrong**: the lane data *is* in
+> the route response. It is simply **absent on roads that are not mapped with
+> `turn:lanes`**, which is why the implementation must be honest about
+> absence instead of being impossible.
+
+**Change.**
+- `data/model/LaneGuidance.kt` — the lane model: one lane = a set of arrows +
+  the engine's `valid` flag; a guidance = the lanes of one manoeuvre.
+- `data/location/OsrmStepParser.kt` — parses the manoeuvre, the exit number,
+  the signed turn angle and the lane guidance out of one engine step. The
+  lanes are looked up **by manoeuvre location**, so the lanes of the next
+  junction can never be shown with this manoeuvre.
+- `ui/map/LaneArrowGeometry.kt` — RideTogether-original arrow geometry;
+  left/right pairs are exact mirrors of one another.
+- `ui/components/LaneGuidanceStrip.kt` — the strip: fits the available width,
+  centred, usable lanes in white over dimmed ones, accessibility description.
+- `NavigationHud.kt` — the strip is rendered at the top of the turn card's
+  instruction column (the reference's `step_instruction_lane_guidance_top`
+  placement).
+- `RouteGeometryCodec.kt` — the maneuver, exit number, turn angle and lane
+  guidance are persisted (additive; old documents decode to the defaults).
+
+**The no-invention rules** (unit-tested):
+1. no engine lane data for the manoeuvre ⇒ no guidance and nothing drawn;
+2. the lanes of a later intersection are never shown with this manoeuvre;
+3. lane data that cannot carry the manoeuvre is dropped instead of displayed;
+4. the engine's `valid` flag is copied verbatim — RideTogether never decides
+   which lane is usable;
+5. unknown lane indications are dropped, and `"none"` is no marking, not an
+   arrow.
+
+**Verification.** `LaneGuidanceParsingTest` (11 tests, fixtures are trimmed
+copies of real engine responses) and `LaneArrowGeometryTest` (5 tests). Full
+offline suite: 57 classes / 485 tests / 0 failures / 0 errors / 0 skipped.
+
+**Not device-verified** — the device was not connected during this pass.
+
+### Still open
+
+B-08 (blocked by D7), B-10, B-20 … B-27, plus the new items:
+- **B-29** — use the parsed signed turn angle to refine the icon when the
+  engine's modifier is coarse;
+- **B-30** — show the lane strip in the stop-by-stop itinerary card as well as
+  in the live turn card.

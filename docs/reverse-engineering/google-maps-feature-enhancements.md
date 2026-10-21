@@ -348,3 +348,80 @@ platform commit and no SOS code was changed by the reconciliation.
 
 **Diagnostics.** The `RT-D7` instrumentation stays in place; the open coordinate item is
 still open.
+
+---
+
+# 17. Phase B implementation, batch 6 (approved 2026-10-21) — B-19 + B-28 (lane guidance and richer turn instructions)
+
+**Full evidence and design:** `docs/reverse-engineering/feature-13-lane-guidance.md`.
+
+## 17.1 What the evidence showed (reference side)
+
+The reference draws a **lane strip** in the turn card: the lanes of the
+carriageway the rider is on, with the route's lanes highlighted. It is a
+custom `View`
+(`com.google.android.libraries.geo.navcore.turncard.views.TurnCardLaneGuidanceListView`,
+evidence `ev_ff392141989a8d0171e63bd8e9237df1c9e1412ac3ad1bc7921238f8ca8697c3`)
+whose decompiled `onDraw` proves three behaviours:
+
+* **two passes, recommended last** — usable lanes are drawn after the dimmed
+  ones with a second `ColorFilter`, so a highlight can never be overdrawn;
+* **the strip shrinks to fit** and is centred — the glyph size is
+  `max(min, min(max, (width − 60dp) / laneCount))`;
+* **the left/right arrows are one glyph mirrored** (`canvas.scale(-1, 1)`),
+  so the reference needs one base drawing per shape family.
+
+The reference's own public model (`androidx.car.app.navigation.model`) is a
+**48-type maneuver vocabulary** with a roundabout exit number and exit angle
+(`ev_0dd6c033089f6aa0a9a104f3b46c65e22f0e111d9a82945acbbbb0353ae87bc7`), and
+a lane model of **10 arrow shapes with a recommended flag**
+(`ev_b20f9a73ebf7b5f2cabe80edb44d348dc237bc44524613f1620633d251874067`).
+The lane-aware route line itself is **native**
+(`NativeLaneAwarePolylineInterpolator.nativeInterpolateBeziersJni`) and was
+not reproduced.
+
+Two negative findings that shaped the implementation: the reference has **no
+lane announcements** (the lane strip is visual only), and its own help text
+states that offline directions have **no lane guidance** — lane data is a
+property of the *route response*, not of the map.
+
+## 17.2 What the routing engine actually provides (probe)
+
+A live probe of the OSRM endpoint the app uses returned:
+
+* `maneuver.type` / `maneuver.modifier` / `maneuver.exit` /
+  `bearing_before` / `bearing_after` on every step;
+* `intersections[].lanes[] = { "valid": bool, "indications": [ … ] }` — but
+  **only on roads mapped with `turn:lanes`**. The app's own test route
+  (Pune→Lonavala) returns **no** lane data at all; a European route returns
+  2–4 lane sets.
+
+Empirically verified over four routes: a manoeuvre's lanes are the ones
+attached to the **manoeuvre's own node** (`maneuver.location ==
+intersections[0].location`); the lanes of the later intersections of the same
+step belong to the *next* manoeuvre.
+
+## 17.3 What was implemented
+
+| Item | Change |
+|---|---|
+| **B-19** maneuver taxonomy | New `data/model/ManeuverType.kt` — a RideTogether-original, closed 24-value vocabulary mapped from the engine's `(type, modifier)` pair. It separates the cases the raw pair cannot: `turn/slight left` (bear left) vs `continue/slight left` (keep left), fork vs merge vs ramp, and it adds roundabout exits, exit numbers, U-turns, end-of-road and ferries. The icon mapping now reads the vocabulary instead of `String.contains`; the instruction text is built from it (`"Take the 3rd exit onto NH-48"`, `"Keep right at the fork onto B"`). |
+| **B-28** lane guidance | New `data/model/LaneGuidance.kt` + `data/location/OsrmStepParser.kt` + `ui/map/LaneArrowGeometry.kt` + `ui/components/LaneGuidanceStrip.kt`. The strip is drawn from **RideTogether-original** arrow geometry (left/right pairs are exact mirrors), shrinks to fit, is centred, and draws the usable lanes in white over the dimmed ones. |
+| The no-invention rule | Lane guidance is attached to a manoeuvre **only** when the engine supplied lane data for that manoeuvre's own node, and only when the data can carry the manoeuvre. No data ⇒ no strip; contradictory data ⇒ dropped. The engine's `valid` flag is copied verbatim — RideTogether never decides which lane is usable. |
+| Persistence | `RouteGeometryCodec` round-trips the maneuver, exit number, turn angle and the lane guidance (additive; old documents decode to the defaults). |
+
+**B-19 is closed** (the taxonomy backlog item) and **B-28 is new** (lane
+guidance was previously listed as "not implementable with the current data" —
+see §13, B-26; that judgement was **wrong**: the data exists in the route
+response, it is simply absent on roads without `turn:lanes` mapping).
+
+## 17.4 Verification
+
+`ManeuverVocabularyTest` (11), `LaneGuidanceParsingTest` (11) and
+`LaneArrowGeometryTest` (5) are new; the fixtures are trimmed copies of real
+engine responses. Full offline suite: **57 classes / 485 tests / 0 failures / 0 errors / 0 skipped**.
+
+**Not device-verified**: the device was not connected during this pass, so the
+strip has not been observed on the rider's screen. The geometry, colour
+split, fit-to-width behaviour and the parser are unit-tested; the on-device
+appearance is not claimed.

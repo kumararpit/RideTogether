@@ -20,11 +20,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AltRoute
+import androidx.compose.material.icons.filled.CallMade
 import androidx.compose.material.icons.filled.ChangeCircle
 import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.ForkLeft
+import androidx.compose.material.icons.filled.ForkRight
 import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.GpsNotFixed
+import androidx.compose.material.icons.filled.Merge
 import androidx.compose.material.icons.filled.Navigation
+import androidx.compose.material.icons.filled.RampRight
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Timer
@@ -50,6 +55,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.ManeuverType
 import com.example.data.model.NavigationStep
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.SlateDark800
@@ -64,6 +70,10 @@ private val AccentCyan = Color(0xFF38BDF8)
 
 /**
  * Returns a suitable Material Icon for the given maneuver type and modifier.
+ *
+ * This is the legacy entry point that works on the routing engine's raw
+ * `(type, modifier)` pair. It is kept for steps that predate the richer
+ * vocabulary; new steps use [getManeuverIcon] with the [ManeuverType].
  */
 fun getManeuverIcon(maneuverType: String, modifier: String): ImageVector {
     val mod = modifier.lowercase()
@@ -80,6 +90,38 @@ fun getManeuverIcon(maneuverType: String, modifier: String): ImageVector {
         mod.contains("u-turn") || mod.contains("uturn") -> Icons.Default.AltRoute
         else -> Icons.Default.Navigation
     }
+}
+
+/**
+ * The maneuver icon for RideTogether's own maneuver vocabulary.
+ *
+ * The vocabulary separates the manoeuvres the raw `(type, modifier)` pair
+ * cannot: a bear-left is not a keep-left, a fork is not a merge, a ramp is
+ * not a turn, and a roundabout exit is not a plain turn. Every icon used
+ * here is a stock Material icon.
+ */
+fun getManeuverIcon(maneuver: ManeuverType): ImageVector = when (maneuver) {
+    ManeuverType.DEPART -> Icons.Default.Navigation
+    ManeuverType.ARRIVE -> Icons.Default.Flag
+    ManeuverType.TURN_LEFT -> Icons.Default.TurnLeft
+    ManeuverType.TURN_SLIGHT_LEFT -> Icons.Default.TurnSlightLeft
+    ManeuverType.TURN_SHARP_LEFT -> Icons.Default.TurnLeft
+    ManeuverType.TURN_RIGHT -> Icons.Default.TurnRight
+    ManeuverType.TURN_SLIGHT_RIGHT -> Icons.Default.TurnSlightRight
+    ManeuverType.TURN_SHARP_RIGHT -> Icons.Default.TurnRight
+    ManeuverType.KEEP_LEFT -> Icons.Default.TurnSlightLeft
+    ManeuverType.KEEP_RIGHT -> Icons.Default.TurnSlightRight
+    ManeuverType.CONTINUE, ManeuverType.NEW_NAME -> Icons.Default.Navigation
+    ManeuverType.ON_RAMP -> Icons.Default.RampRight
+    ManeuverType.OFF_RAMP -> Icons.Default.RampRight
+    ManeuverType.FORK_LEFT -> Icons.Default.ForkLeft
+    ManeuverType.FORK_RIGHT -> Icons.Default.ForkRight
+    ManeuverType.MERGE_LEFT, ManeuverType.MERGE_RIGHT -> Icons.Default.Merge
+    ManeuverType.ROUNDABOUT_ENTER, ManeuverType.ROUNDABOUT_EXIT -> Icons.Default.ChangeCircle
+    ManeuverType.END_OF_ROAD -> Icons.Default.Route
+    ManeuverType.U_TURN -> Icons.Default.AltRoute
+    ManeuverType.FERRY -> Icons.Default.CallMade
+    ManeuverType.UNKNOWN -> Icons.Default.Navigation
 }
 
 /**
@@ -149,8 +191,7 @@ fun TurnByTurnNavHeader(
                     )
                     else -> {
                         val icon = getManeuverIcon(
-                            currentStep?.maneuverType ?: "turn",
-                            currentStep?.modifier ?: "straight"
+                            currentStep?.maneuver ?: ManeuverType.UNKNOWN
                         )
                         Icon(
                             imageVector = icon,
@@ -183,6 +224,14 @@ fun TurnByTurnNavHeader(
                         )
                     }
                     currentStep != null -> {
+                        // Lane guidance — only present when the routing engine
+                        // supplied lane data for this maneuver. Never invented.
+                        currentStep.lanes?.takeIf { !it.isEmpty }?.let { lanes ->
+                            LaneGuidanceStrip(
+                                guidance = lanes,
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            )
+                        }
                         val formattedDist = if (distanceToNextManeuverMeters >= 1000) {
                             String.format(
                                 java.util.Locale.US,
