@@ -154,7 +154,7 @@ object RouteGeometryCodec {
             val arrows = arrowNames.mapNotNull { a ->
                 val key = a as? String ?: return@mapNotNull null
                 LaneArrow.values().firstOrNull { it.name == key }
-            }.toSet()
+            }
             if (arrows.isEmpty()) return@mapNotNull null
             LaneMark(arrows = arrows, recommended = map["recommended"] as? Boolean ?: false)
         }

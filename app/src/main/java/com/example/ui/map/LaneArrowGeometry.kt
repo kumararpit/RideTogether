@@ -84,6 +84,18 @@ object LaneArrowGeometry {
         GlyphStroke(listOf(GlyphPoint(13f, 9f), GlyphPoint(16f, 11f), GlyphPoint(13f, 13f)))
     )
 
+    /** The branch of a lane that may also be used to go right. */
+    val BRANCH_RIGHT: GlyphStroke = GlyphStroke(listOf(GlyphPoint(12f, 17f), GlyphPoint(19f, 11f)))
+
+    /** The branch of a lane that may also be used to go left. */
+    val BRANCH_LEFT: GlyphStroke = GlyphStroke(listOf(GlyphPoint(12f, 17f), GlyphPoint(5f, 11f)))
+
+    /** The straight branch of a lane whose main movement is a right turn. */
+    val BRANCH_STRAIGHT_RIGHT: GlyphStroke = GlyphStroke(listOf(GlyphPoint(19f, 19f), GlyphPoint(19f, 11f)))
+
+    /** The straight branch of a lane whose main movement is a left turn. */
+    val BRANCH_STRAIGHT_LEFT: GlyphStroke = GlyphStroke(listOf(GlyphPoint(5f, 19f), GlyphPoint(5f, 11f)))
+
     /** The strokes of an arrow, in glyph space. */
     fun strokesFor(arrow: LaneArrow): List<GlyphStroke> = when (arrow) {
         LaneArrow.NONE -> emptyList()
@@ -95,6 +107,41 @@ object LaneArrowGeometry {
         LaneArrow.SLIGHT_LEFT -> mirror(SLIGHT_RIGHT)
         LaneArrow.SHARP_RIGHT -> SHARP_RIGHT
         LaneArrow.SHARP_LEFT -> mirror(SHARP_RIGHT)
+    }
+
+    /**
+     * The strokes of a whole **lane**: its main arrow plus a branch for every
+     * further indication it carries.
+     *
+     * A lane marked "straight or right" is one lane that may be used for
+     * either movement, so it is drawn as one arrow with a branch — never as
+     * two arrows, which would read as two lanes.
+     */
+    fun strokesForLane(arrows: List<LaneArrow>): List<GlyphStroke> {
+        val ordered = LaneArrow.canonicalOrder().filter { it in arrows }
+        val primary = ordered.firstOrNull() ?: return emptyList()
+        val result = strokesFor(primary).toMutableList()
+        ordered.drop(1).forEach { secondary ->
+            result.addAll(branchFor(primary, secondary))
+        }
+        return result
+    }
+
+    /**
+     * The branch of a secondary indication.
+     *
+     * The branch is drawn off the main arrow's shaft, so the main movement
+     * stays the one the eye lands on.
+     */
+    private fun branchFor(primary: LaneArrow, secondary: LaneArrow): List<GlyphStroke> = when (secondary) {
+        LaneArrow.RIGHT, LaneArrow.SLIGHT_RIGHT, LaneArrow.SHARP_RIGHT -> listOf(BRANCH_RIGHT)
+        LaneArrow.LEFT, LaneArrow.SLIGHT_LEFT, LaneArrow.SHARP_LEFT -> listOf(BRANCH_LEFT)
+        LaneArrow.STRAIGHT -> when {
+            primary.isRight -> listOf(BRANCH_STRAIGHT_RIGHT)
+            primary.isLeft -> listOf(BRANCH_STRAIGHT_LEFT)
+            else -> emptyList()
+        }
+        else -> emptyList()
     }
 
     /** True when the arrow draws nothing (an unmarked lane). */

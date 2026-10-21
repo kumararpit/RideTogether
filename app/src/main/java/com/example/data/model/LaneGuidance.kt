@@ -87,18 +87,25 @@ enum class LaneArrow {
  * One lane of the carriageway the rider is on, with the arrow(s) it carries
  * and whether the route may use it.
  *
- * @param arrows every indication the engine reported for this lane. Empty
- *   means the lane carries no modelled marking.
+ * @param arrows every indication the engine reported for this lane, **in
+ *   order**. The order is the order the engine reported, except that for a
+ *   lane the route may use, the indication that carries the route comes
+ *   first: the rider must be able to see at a glance which movement of the
+ *   lane the route takes. An empty list means the lane carries no modelled
+ *   marking.
  * @param recommended the engine's own verdict that the route may use this
  *   lane. It is copied verbatim — RideTogether never decides this itself.
  */
 data class LaneMark(
-    val arrows: Set<LaneArrow> = emptySet(),
+    val arrows: List<LaneArrow> = emptyList(),
     val recommended: Boolean = false
 ) {
-    /** The arrow drawn for this lane (deterministic, see [LaneArrow]). */
+    /** The arrow drawn for this lane (the first indication). */
     val primaryArrow: LaneArrow
-        get() = LaneArrow.canonicalOrder().firstOrNull { it in arrows } ?: LaneArrow.NONE
+        get() = arrows.firstOrNull() ?: LaneArrow.NONE
+
+    /** Every indication of this lane, as a set. */
+    val arrowSet: Set<LaneArrow> get() = arrows.toSet()
 
     /** True when the lane carries no modelled marking at all. */
     val isUnmarked: Boolean get() = arrows.isEmpty()

@@ -417,13 +417,39 @@ response, it is simply absent on roads without `turn:lanes` mapping).
 
 ## 17.4 Verification
 
-`ManeuverVocabularyTest` (11), `LaneGuidanceParsingTest` (11),
-`LaneArrowGeometryTest` (5) and `OsrmLaneGuidanceIntegrationTest` (5) are new;
+`ManeuverVocabularyTest` (11), `LaneGuidanceParsingTest` (12),
+`LaneArrowGeometryTest` (7) and `OsrmLaneGuidanceIntegrationTest` (5) are new;
 the fixtures are trimmed copies of real engine responses, and the
 integration test runs the **whole** service path over a verbatim live
-capture. Full offline suite: **58 classes / 490 tests / 0 failures / 0 errors / 0 skipped**.
+capture. Full offline suite: **58 classes / 493 tests / 0 failures / 0 errors / 0 skipped**.
 
-**Not device-verified**: the device was not connected during this pass, so the
-strip has not been observed on the rider's screen. The geometry, colour
-split, fit-to-width behaviour and the parser are unit-tested; the on-device
-appearance is not claimed.
+**On-device (RMX3360, 1080×2400, 3.0×):** the instrumented
+`LaneGuidanceDeviceRenderTest` renders the real turn card and the real strip
+on the device (3 tests, green; captures written to the device and pulled):
+
+* the route's lane is drawn **bright**, the other lanes **dimmed**;
+* a lane that may be used for two movements is drawn as **one arrow with a
+  branch**, not as two arrows;
+* the strip sits at the top of the turn card's instruction column, in the
+  reference's placement;
+* with no lane data the card is unchanged.
+
+**Live app run (real route, real device):** the live ride screen re-armed a
+live OSRM route (Pune → Lonavala, 49.8 km). The turn card shows
+**"82 m / Turn right"** with the vocabulary icon, and the secondary line
+shows **"Then: Turn at the end of the road…"** — the new `END_OF_ROAD`
+instruction, which the old text builder could not produce. The voice log
+confirms the announcement (`Spoke maneuver [1]: Turn right`). **No lane strip
+is shown, correctly** — the engine has no lane data for that road.
+
+**The data limit, measured:** 13 Indian routes were probed against the live
+engine — **0 lane-bearing intersections in total**. Lane data exists only
+where OpenStreetMap is mapped with `turn:lanes`, which in India it very
+largely is not.
+
+**Not verified:** a *live in-app* lane strip. The rider's real position is in
+Pune (no lane data) and a mock position could not be injected — the device
+refuses the shell `MOCK_LOCATION` appop and blocks `pm grant`. The strip is
+verified as rendering (instrumented, real UI, real device) and as data (live
+engine response through the whole service path), but it has not been observed
+inside a live ride.

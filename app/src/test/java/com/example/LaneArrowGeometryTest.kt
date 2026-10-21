@@ -52,6 +52,30 @@ class LaneArrowGeometryTest {
     }
 
     @Test
+    fun `a lane with two indications is drawn as one arrow with a branch`() {
+        // "straight or right" is ONE lane, so it must never be drawn as two
+        // arrows - that would read as two lanes.
+        val straight = LaneArrowGeometry.strokesFor(LaneArrow.STRAIGHT)
+        val lane = LaneArrowGeometry.strokesForLane(listOf(LaneArrow.STRAIGHT, LaneArrow.RIGHT))
+        assertTrue(lane.size > straight.size)
+        // The branch is drawn on the side of the secondary movement.
+        assertEquals(
+            listOf(LaneArrowGeometry.BRANCH_RIGHT),
+            lane.drop(straight.size)
+        )
+    }
+
+    @Test
+    fun `a lane with two indications in the other direction is mirrored`() {
+        val straight = LaneArrowGeometry.strokesFor(LaneArrow.STRAIGHT)
+        val lane = LaneArrowGeometry.strokesForLane(listOf(LaneArrow.STRAIGHT, LaneArrow.LEFT))
+        assertEquals(
+            listOf(LaneArrowGeometry.BRANCH_LEFT),
+            lane.drop(straight.size)
+        )
+    }
+
+    @Test
     fun `an unmarked lane draws nothing`() {
         assertTrue(LaneArrowGeometry.strokesFor(LaneArrow.NONE).isEmpty())
         assertTrue(LaneArrowGeometry.isBlank(LaneArrow.NONE))

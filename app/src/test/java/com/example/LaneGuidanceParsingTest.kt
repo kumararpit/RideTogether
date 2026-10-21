@@ -121,11 +121,29 @@ class LaneGuidanceParsingTest {
         val lanes = parsed.lanes
         assertNotNull(lanes)
         assertEquals(2, lanes!!.laneCount)
-        assertEquals(setOf(LaneArrow.STRAIGHT, LaneArrow.RIGHT), lanes.lanes[0].arrows)
+        assertEquals(listOf(LaneArrow.STRAIGHT, LaneArrow.RIGHT), lanes.lanes[0].arrows)
         assertTrue(lanes.lanes[0].recommended)
         // The drawn arrow is deterministic: the sharpest turn in the canonical
         // order wins, so the same lane always renders the same way.
         assertEquals(LaneArrow.STRAIGHT, lanes.lanes[0].primaryArrow)
+    }
+
+    @Test
+    fun `a usable lane puts the movement of the route first`() {
+        // The engine reports the lane as "straight or right"; the route turns
+        // right there, so the movement the rider must take has to be the one
+        // that is drawn first.
+        val parsed = OsrmStepParser.parse(
+            step(
+                type = "turn",
+                modifier = "right",
+                lanesAtManeuver = """[{"valid":true,"indications":["straight","right"]}]"""
+            )
+        )
+        val lanes = parsed.lanes
+        assertNotNull(lanes)
+        assertEquals(listOf(LaneArrow.RIGHT, LaneArrow.STRAIGHT), lanes!!.lanes[0].arrows)
+        assertEquals(LaneArrow.RIGHT, lanes.lanes[0].primaryArrow)
     }
 
     @Test
@@ -139,7 +157,7 @@ class LaneGuidanceParsingTest {
         )
         val lanes = parsed.lanes
         assertNotNull(lanes)
-        assertEquals(setOf(LaneArrow.LEFT), lanes!!.lanes[0].arrows)
+        assertEquals(listOf(LaneArrow.LEFT), lanes!!.lanes[0].arrows)
         assertTrue(lanes.lanes[1].isUnmarked)
     }
 

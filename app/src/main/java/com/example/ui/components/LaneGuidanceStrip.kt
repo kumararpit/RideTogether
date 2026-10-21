@@ -79,7 +79,7 @@ fun LaneGuidanceStrip(
             guidance.lanes.forEachIndexed { index, mark ->
                 val color = if (mark.recommended) recommendedColor else dimmedColor
                 val originX = startX + index * drawnCell
-                val strokes = LaneArrowGeometry.strokesFor(mark.primaryArrow)
+                val strokes = LaneArrowGeometry.strokesForLane(mark.arrows)
                 strokes.forEach { glyphStroke ->
                     val path = androidx.compose.ui.graphics.Path().apply {
                         glyphStroke.points.forEachIndexed { i, point ->

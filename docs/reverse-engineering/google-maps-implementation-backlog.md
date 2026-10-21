@@ -412,13 +412,29 @@ left` (a bear left) versus `continue/slight left` (a keep left).
 5. unknown lane indications are dropped, and `"none"` is no marking, not an
    arrow.
 
-**Verification.** `LaneGuidanceParsingTest` (11 tests, fixtures are trimmed
-copies of real engine responses), `LaneArrowGeometryTest` (5 tests) and
+**Verification.** `LaneGuidanceParsingTest` (12 tests, fixtures are trimmed
+copies of real engine responses), `LaneArrowGeometryTest` (7 tests) and
 `OsrmLaneGuidanceIntegrationTest` (5 tests, the whole service path over a
-verbatim live engine capture). Full offline suite: 58 classes / 490 tests /
+verbatim live engine capture). Full offline suite: 58 classes / 493 tests /
 0 failures / 0 errors / 0 skipped.
 
-**Not device-verified** — the device was not connected during this pass.
+**On-device (RMX3360):** the instrumented `LaneGuidanceDeviceRenderTest`
+renders the real turn card and the real strip on the device (3 tests, green,
+captures pulled and inspected): the route's lane is bright, the others dimmed,
+a two-movement lane is one arrow with a branch, the strip sits at the top of
+the instruction column, and a step without lane data leaves the card
+unchanged.
+
+**Live app run:** the live ride screen re-armed a live OSRM route
+(Pune → Lonavala) and the turn card showed **"82 m / Turn right"** with the
+vocabulary icon and **"Then: Turn at the end of the road…"** — the new
+`END_OF_ROAD` instruction, announced by the voice as well. **No lane strip
+was shown, correctly**: the engine has no lane data for that road (13 probed
+Indian routes → **0** lane-bearing intersections; lane data exists only where
+OpenStreetMap is mapped with `turn:lanes`).
+
+**Not verified:** a *live in-app* lane strip — the rider is physically in
+Pune (no lane data) and the device blocks mock locations from the shell.
 
 ### Still open
 

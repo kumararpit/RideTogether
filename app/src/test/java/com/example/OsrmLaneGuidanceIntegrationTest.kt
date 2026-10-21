@@ -850,7 +850,7 @@ class OsrmLaneGuidanceIntegrationTest {
         val lanes = parsed().steps[3].lanes
         assertNotNull(lanes)
         assertEquals(3, lanes!!.laneCount)
-        assertEquals(setOf(LaneArrow.STRAIGHT, LaneArrow.LEFT), lanes.lanes[0].arrows)
+        assertEquals(listOf(LaneArrow.STRAIGHT, LaneArrow.LEFT), lanes.lanes[0].arrows)
         assertTrue(lanes.lanes[0].recommended)
         assertTrue(lanes.lanes[1].recommended)
         assertTrue(!lanes.lanes[2].recommended)

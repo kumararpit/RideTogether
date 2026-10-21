@@ -108,17 +108,27 @@ object OsrmStepParser {
         for (i in 0 until rawLanes.length()) {
             val lane = rawLanes.optJSONObject(i) ?: continue
             val indications = lane.optJSONArray("indications")
-            val arrows = LinkedHashSet<LaneArrow>()
+            val arrows = mutableListOf<LaneArrow>()
             if (indications != null) {
                 for (j in 0 until indications.length()) {
                     val arrow = LaneArrow.parse(indications.optString(j))
                     // "none" means the lane carries no usable marking; it is
                     // modelled as an absent arrow, not as an arrow.
-                    if (arrow != null && arrow != LaneArrow.NONE) arrows.add(arrow)
+                    if (arrow != null && arrow != LaneArrow.NONE && arrow !in arrows) arrows.add(arrow)
                 }
             }
             val valid = lane.optBoolean("valid", false)
-            marks.add(LaneMark(arrows = arrows, recommended = valid))
+            // For a lane the route may use, the movement the route takes is
+            // put first, so the rider sees at a glance which way to go. The
+            // other lanes keep the engine's own order.
+            val ordered = if (valid) {
+                val permitted = arrows.filter { it in maneuver.permittedLaneArrows }
+                val rest = arrows.filter { it !in maneuver.permittedLaneArrows }
+                permitted + rest
+            } else {
+                arrows
+            }
+            marks.add(LaneMark(arrows = ordered, recommended = valid))
         }
         if (marks.isEmpty()) return null
 
