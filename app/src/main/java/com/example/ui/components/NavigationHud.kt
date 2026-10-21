@@ -69,30 +69,6 @@ private val PrimaryBlue = Color(0xFF2563EB)
 private val AccentCyan = Color(0xFF38BDF8)
 
 /**
- * Returns a suitable Material Icon for the given maneuver type and modifier.
- *
- * This is the legacy entry point that works on the routing engine's raw
- * `(type, modifier)` pair. It is kept for steps that predate the richer
- * vocabulary; new steps use [getManeuverIcon] with the [ManeuverType].
- */
-fun getManeuverIcon(maneuverType: String, modifier: String): ImageVector {
-    val mod = modifier.lowercase()
-    val type = maneuverType.lowercase()
-
-    return when {
-        type.contains("arrive") -> Icons.Default.Flag
-        type.contains("roundabout") || type.contains("rotary") -> Icons.Default.ChangeCircle
-        type.contains("fork") -> Icons.Default.AltRoute
-        mod.contains("slight left") -> Icons.Default.TurnSlightLeft
-        mod.contains("slight right") -> Icons.Default.TurnSlightRight
-        mod.contains("sharp left") || mod == "left" -> Icons.Default.TurnLeft
-        mod.contains("sharp right") || mod == "right" -> Icons.Default.TurnRight
-        mod.contains("u-turn") || mod.contains("uturn") -> Icons.Default.AltRoute
-        else -> Icons.Default.Navigation
-    }
-}
-
-/**
  * The maneuver icon for RideTogether's own maneuver vocabulary.
  *
  * The vocabulary separates the manoeuvres the raw `(type, modifier)` pair
