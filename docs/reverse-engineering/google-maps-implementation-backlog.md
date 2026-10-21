@@ -413,8 +413,10 @@ left` (a bear left) versus `continue/slight left` (a keep left).
    arrow.
 
 **Verification.** `LaneGuidanceParsingTest` (11 tests, fixtures are trimmed
-copies of real engine responses) and `LaneArrowGeometryTest` (5 tests). Full
-offline suite: 57 classes / 485 tests / 0 failures / 0 errors / 0 skipped.
+copies of real engine responses), `LaneArrowGeometryTest` (5 tests) and
+`OsrmLaneGuidanceIntegrationTest` (5 tests, the whole service path over a
+verbatim live engine capture). Full offline suite: 58 classes / 490 tests /
+0 failures / 0 errors / 0 skipped.
 
 **Not device-verified** — the device was not connected during this pass.
 

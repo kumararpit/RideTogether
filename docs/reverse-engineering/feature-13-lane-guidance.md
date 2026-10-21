@@ -329,7 +329,8 @@ no lane guidance rather than to a wrong one.
 | `ManeuverVocabularyTest` | 11 tests — vocabulary mapping, instruction text, exit ordinals, unknown handling |
 | `LaneGuidanceParsingTest` | 11 tests — real engine fixtures: manoeuvre-node matching, no-data ⇒ no guidance, contradiction ⇒ dropped, multi-indication lanes, unknown indications |
 | `LaneArrowGeometryTest` | 5 tests — glyph bounds, exact mirroring, blank lane, u-turn distinctness |
-| Full offline suite | 57 classes / 485 tests / 0 failures / 0 errors / 0 skipped |
+| `OsrmLaneGuidanceIntegrationTest` | 5 tests — the **whole** service path over a verbatim live engine capture: the richer maneuver reaches the steps, the lanes of a later intersection are not shown with this manoeuvre, a multi-indication lane keeps all of them, the engine's `valid` flag decides the highlight, and a step without lane data carries no guidance |
+| Full offline suite | 58 classes / 490 tests / 0 failures / 0 errors / 0 skipped |
 | Live engine | Pune→Lonavala (the app's own route) yields **no** lane data — the feature correctly shows nothing; a European route yields strips |
 
 **Not verified on a device.** The device was not connected during this pass,

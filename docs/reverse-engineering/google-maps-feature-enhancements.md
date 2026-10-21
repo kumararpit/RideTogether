@@ -417,9 +417,11 @@ response, it is simply absent on roads without `turn:lanes` mapping).
 
 ## 17.4 Verification
 
-`ManeuverVocabularyTest` (11), `LaneGuidanceParsingTest` (11) and
-`LaneArrowGeometryTest` (5) are new; the fixtures are trimmed copies of real
-engine responses. Full offline suite: **57 classes / 485 tests / 0 failures / 0 errors / 0 skipped**.
+`ManeuverVocabularyTest` (11), `LaneGuidanceParsingTest` (11),
+`LaneArrowGeometryTest` (5) and `OsrmLaneGuidanceIntegrationTest` (5) are new;
+the fixtures are trimmed copies of real engine responses, and the
+integration test runs the **whole** service path over a verbatim live
+capture. Full offline suite: **58 classes / 490 tests / 0 failures / 0 errors / 0 skipped**.
 
 **Not device-verified**: the device was not connected during this pass, so the
 strip has not been observed on the rider's screen. The geometry, colour
