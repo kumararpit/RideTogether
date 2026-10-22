@@ -508,3 +508,45 @@ B-30 (lane strip in the itinerary card), plus the new items:
   type that does not exist yet);
 - **B-34** — relevance weighting for amenities (backlog S5-1): the detour
   gives a cost signal, a fuel-before-a-long-leg signal is still missing.
+
+---
+
+## Implementation record, batch 8 (approved 2026-10-22): the place card, the symbols and the add-stop workflow
+
+Evidence and design: `docs/reverse-engineering/feature-14-amenity-selection.md` §7.
+
+### The place card — **DONE**
+
+New `data/amenities/PlaceCard.kt` (model + the conservative opening-hours
+reader + the tag reader) and `ui/components/PlaceCard.kt` (the layout). The
+card shows the place's photo (or the category symbol), the name, the
+category, the rating and review count **when the data has them**, the opening
+status **when the hours can be read**, the distance and the contact details.
+Nothing is invented: unreadable hours produce no badge at all.
+
+### The category symbols — **DONE** (closes the icon half of S5-2)
+
+Stock Material icons (Apache License 2.0) — no reference artwork is copied or
+traced. Corrected where the old symbol was wrong: motorcycle repair → a
+motorcycle, rest stop → a seat (was a parking sign), convenience store → a
+shop front (was a trolley), viewpoint → a landscape (was a camera). The
+symbols are distinct per category.
+
+### The add-stop workflow — **DONE**
+
+The contextual action is "**Add stop**" and it carries the **price** of the
+stop ("Add stop · +3 min detour") as soon as a reliable estimate exists. The
+price is drawn as a badge on the place's **marker** as well, so the rider sees
+it on the map before committing. A **candidate list** ("Add a stop") shows
+the places on the map with their category, distance and price; the entry
+point is a button on the live map. The other actions are "**Directions**"
+(the place becomes the destination of the ride, in-app), "**Save place**"
+(the rider's own shortlist, in Room) and "**Show on map**" (the camera
+centres on the place).
+
+### Verification
+
+`OpeningHoursTest` (11), `PlaceCardTest` (11) and an extended
+`AmenityIconConfigTest` (7). Full offline suite: **62 classes / 533 tests / 0
+failures / 0 errors / 0 skipped**. **Not device-verified in this pass** — the
+phone was not connected.

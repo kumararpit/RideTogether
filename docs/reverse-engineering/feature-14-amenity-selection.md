@@ -157,3 +157,106 @@ away from RideTogether.
 | Member suggestion | a member cannot change the plan; a "suggest this stop to the leader" action would need a message type that does not exist yet. |
 | Relevance weighting | the detour now gives the rider a *cost* signal; a *relevance* signal (a fuel stop before a long leg) is still open (backlog S5-1). |
 | Selection across layers | a selected place and a selected rider currently exclude each other; the reference keeps both selectable. |
+
+---
+
+## 7. The place card, the category symbols and the add-stop workflow
+
+*(Added 2026-10-22, second pass — the four requirements of the feature brief.)*
+
+### 7.1 The place card
+
+The reference's place card carries a clear hierarchy: **large name, category,
+rating + review count, distance, open status, photo, and clear actions**
+(`gm_04_poi.png`, `gm_07_added.png`). RideTogether's card now carries the
+same hierarchy, in its own visual identity (`ui/components/PlaceCard.kt`):
+
+| Row | Shown when | Source |
+|---|---|---|
+| Photo | the place's own photo URL is in the data | `image` / `contact:photo` (an https URL — anything else is ignored) |
+| Name | the place has one | `name` |
+| Category | always | the amenity category |
+| Rating | the data carries one | `stars` / `rating` (0 < r ≤ 5) |
+| Review count | the data carries one | `review_count` |
+| Open status | the hours can be **read** | `opening_hours` (see below) |
+| Distance | the rider's position is known | the rider's fix |
+| Address / phone / website | the data carries them | `addr:*`, `phone`, `website` |
+
+When the place has no photo, the **category symbol** takes its place — never a
+broken image, never an empty box.
+
+**The opening-hours reader** (`data/amenities/PlaceCard.kt`) is deliberately
+conservative: it reads `24/7`, `Mo-Su 09:00-21:00`, `Mo-Fr 08:00-20:00`,
+`Sa,Su 10:00-18:00`, several ranges in a day
+(`Mo-Su 08:00-12:00,16:00-20:00`), several rules in a value
+(`Mo-Fr 08:00-20:00; Sa 09:00-18:00`) and `closed`. **Anything it cannot read
+produces no status at all** — a wrong "Open" is worse than no badge. It says
+when the place closes ("Open · until 21:00"), when it opens
+("Closed · opens tomorrow 8:00"), and it never guesses.
+
+### 7.2 The category symbols
+
+| Category | Symbol | Why |
+|---|---|---|
+| Fuel station | fuel pump | the universal fuel symbol |
+| Cafe | coffee cup | |
+| Restaurant | fork and knife | |
+| Motorcycle repair | **motorcycle** | the old mapping used a wrench — a car garage symbol is wrong for a bike workshop |
+| Rest stop | **seat** | the old mapping used a **parking sign** — a roadside rest stop is not a car park |
+| Convenience store | shop front | the old mapping used a shopping trolley |
+| Hotel | bed | |
+| Restroom | WC | |
+| Scenic viewpoint | landscape | the old mapping used a camera |
+
+**Provenance:** every symbol is a **stock Material icon** (Apache License
+2.0, the set that ships with `androidx.compose.material.icons`). Nothing is
+extracted from, traced out of, or copied from the reference application's POI
+artwork — that artwork is proprietary and is not reproduced anywhere in
+RideTogether. The colours are RideTogether's own palette (`AmenityPalette`),
+chosen against the measured day and night raster tones with a contrast check
+per category.
+
+### 7.3 The add-stop workflow
+
+| Element | Reference | RideTogether |
+|---|---|---|
+| The action on the place sheet | "**Add stop**" (in add-stop mode) | "**Add stop**" — the primary action of the place sheet |
+| The price of the stop | "+2 min" on the candidate cards **and** on the map markers, **before** the rider commits | "**Add stop · +3 min detour**" on the place sheet and the same badge on the place's **marker** — the estimate is computed when the place is selected, so the rider sees the cost before committing |
+| The candidate list | "Add stops to your route": a search field, category chips and candidate cards | "**Add a stop**": the places that are on the map, each with its category, its distance and its price when known (a **bounded** number of places are priced — every price is a route request) |
+| The entry point | "Add stops" in the route sheet | an "**Add a stop**" button on the live map |
+| The other actions | Directions / Save / Share | "**Directions**" (the place becomes the destination of the ride, in-app), "**Save place**" (the rider's own shortlist, stored locally in Room), "**Show on map**" (the map centres on the place) |
+
+**The estimate is a preview, the commit is exact.** The preview is the detour
+of a route planned *through* the place, compared with the ride that is left
+now; the commit re-plans the ride and reports the real detour. Both are
+measured the same way (the old remaining distance is converted with the new
+route's average speed), so a stopped rider cannot produce a phantom detour.
+
+### 7.4 The wording
+
+RideTogether's own concise labels: **"Add stop"**, **"Add a stop"**,
+**"Directions"**, **"Save place"** / **"Saved"**, **"Show on map"**, and the
+distance chip reads "407 m / away". These are ordinary functional phrases;
+no distinctive branded wording, artwork or content is copied.
+
+### 7.5 What was added
+
+| File | Purpose |
+|---|---|
+| `data/amenities/PlaceCard.kt` | the place-card model, the opening-hours reader, the tag reader |
+| `ui/components/PlaceCard.kt` | the card layout (photo or symbol, name, category, rating, status, address) |
+| `ui/components/AmenityDetailsSheet.kt` | the sheet: the card + the contextual actions + the price |
+| `ui/components/AddStopCandidatesSheet.kt` | the candidate list with the detour badges |
+| `ui/components/AmenityIconConfig.kt` | the category symbols and the palette |
+| `data/db/SavedPlaceEntity.kt` | the rider's saved places (Room table, migration 5 → 6) |
+| `data/map/MapCameraController.kt` | `centerOn()` — the camera centres on a place ("Show on map") |
+| `ui/components/RideMapCanvas.kt` | the detour badge on the selected place's marker |
+| `ui/viewmodel/RideViewModel.kt` | the detour estimate, the saved places, "route to the place" |
+
+### 7.6 Verification of this pass
+
+`OpeningHoursTest` (11), `PlaceCardTest` (11) and an extended
+`AmenityIconConfigTest` (7) are new — the opening-hours reader, the place
+card (what it shows and what it refuses to show), the add-stop label, and the
+distinctness of the category symbols. Full offline suite: **62 classes / 533
+tests / 0 failures / 0 errors / 0 skipped**.

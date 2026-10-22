@@ -7,6 +7,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddLocationAlt
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Flag
@@ -34,6 +36,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import com.example.data.model.LatLng
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -127,6 +130,15 @@ fun LiveRideScreen(
     // markers until the rider zooms or the selection is cleared.
     var expandedAmenityIds by remember { mutableStateOf(setOf<Long>()) }
     val amenityStopMessage by viewModel.amenityStopMessage.collectAsState()
+    val amenityDetourSeconds by viewModel.amenityDetourSeconds.collectAsState()
+    val isEstimatingAmenityDetour by viewModel.isEstimatingAmenityDetour.collectAsState()
+    val savedAmenityIds by viewModel.savedAmenityIds.collectAsState()
+    // The place the rider asked to see ("Show on map").
+    var centerOnPlace by remember { mutableStateOf<LatLng?>(null) }
+    // The list of places the ride can pass through ("Add a stop").
+    var showAddStopSheet by remember { mutableStateOf(false) }
+    val candidateDetours by viewModel.amenityCandidateDetours.collectAsState()
+    LaunchedEffect(Unit) { viewModel.loadSavedAmenities() }
     LaunchedEffect(amenityStopMessage) {
         if (amenityStopMessage != null) {
             delay(4000)
@@ -175,6 +187,11 @@ fun LiveRideScreen(
             onExpandAmenityCluster = { memberIds ->
                 expandedAmenityIds = expandedAmenityIds + memberIds
             },
+            // The price of the selected place as a stop, shown on its marker.
+            selectedAmenityDetourSeconds = amenityDetourSeconds,
+            // "Show on map": the camera centres on the place the rider asked
+            // to see.
+            centerOnPlace = centerOnPlace,
             onViewportChanged = { minLat, maxLat, minLon, maxLon ->
                 viewModel.onViewportChanged(minLat, maxLat, minLon, maxLon)
             },
@@ -702,11 +719,80 @@ fun LiveRideScreen(
             )
         }
 
+        // The list of places the ride can pass through.
+        if (showAddStopSheet) {
+            val candidates = remember(visibleAmenities, currentUser?.location) {
+                visibleAmenities.sortedBy { amenity ->
+                    val r = currentUser?.location ?: return@sortedBy Double.MAX_VALUE
+                    val results = FloatArray(1)
+                    android.location.Location.distanceBetween(
+                        r.latitude, r.longitude, amenity.lat, amenity.lon, results
+                    )
+                    results[0].toDouble()
+                }
+            }
+            LaunchedEffect(showAddStopSheet) {
+                viewModel.estimateCandidateDetours(candidates)
+            }
+            com.example.ui.components.AddStopCandidatesSheet(
+                candidates = candidates,
+                riderLocation = currentUser?.location,
+                detourSecondsById = candidateDetours,
+                onSelect = { amenity ->
+                    showAddStopSheet = false
+                    viewModel.selectAmenity(amenity)
+                },
+                onDismiss = { showAddStopSheet = false }
+            )
+        }
+
+        // The entry point of the add-stop flow: the places on the map that the
+        // ride can pass through.
+        Surface(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 16.dp, bottom = 312.dp)
+                .clickable {
+                    showAddStopSheet = true
+                }
+                .testTag("add_stop_button"),
+            color = Color(0xFF101318),
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, CardBorderColor)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = androidx.compose.material.icons.Icons.Default.AddLocationAlt,
+                    contentDescription = null,
+                    tint = AmberPrimary,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Add a stop",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+
         if (selectedAmenity != null) {
             com.example.ui.components.AmenityDetailsSheet(
                 amenity = selectedAmenity!!,
                 riderLocation = currentUser?.location,
                 onAddAsStop = { viewModel.addSelectedAmenityAsStop() },
+                onDirections = { viewModel.routeToSelectedAmenity() },
+                onToggleSave = { viewModel.toggleSavedAmenity(selectedAmenity!!) },
+                onShowOnMap = {
+                    centerOnPlace = LatLng(selectedAmenity!!.lat, selectedAmenity!!.lon)
+                },
+                detourSeconds = amenityDetourSeconds,
+                isEstimatingDetour = isEstimatingAmenityDetour,
+                isSaved = selectedAmenity!!.osmId in savedAmenityIds,
                 onDismiss = {
                     viewModel.selectAmenity(null)
                     if (isBottomActionBarVisible) scheduleAutoHide()

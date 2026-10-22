@@ -198,6 +198,24 @@ class MapCameraController {
         )
     }
 
+    /**
+     * Centres the camera on a point the rider asked to see (a place they
+     * tapped and want to look at).
+     *
+     * The camera leaves the follow mode: the rider is looking at a place,
+     * not at the road ahead, so the follow camera must not pull the view
+     * back to the rider.
+     */
+    fun centerOn(point: LatLng, zoom: Float = 16f) {
+        isUserZoomOverride = true
+        _state.value = _state.value.copy(
+            center = point,
+            zoom = zoom.coerceIn(3f, 18f),
+            mode = MapCameraMode.FREE_EXPLORE,
+            bounds = null
+        )
+    }
+
     fun setZoom(newZoom: Float) {
         val clampedZoom = newZoom.coerceIn(3f, 18f)
         isUserZoomOverride = true

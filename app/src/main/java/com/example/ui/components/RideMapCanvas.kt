@@ -152,6 +152,15 @@ fun RideMapCanvas(
     expandedAmenityIds: Set<Long> = emptySet(),
     /** Called when the rider taps a cluster: the cluster's members are expanded. */
     onExpandAmenityCluster: (List<Long>) -> Unit = {},
+    /**
+     * The estimated price of adding the selected place as a stop, in seconds.
+     *
+     * It is drawn as a badge on the place's marker, so the rider sees what
+     * the stop costs while looking at the map - not only inside the sheet.
+     */
+    selectedAmenityDetourSeconds: Double? = null,
+    /** A place the rider asked to see: the camera centres on it. */
+    centerOnPlace: LatLng? = null,
     onViewportChanged: (minLat: Double, maxLat: Double, minLon: Double, maxLon: Double) -> Unit = { _, _, _, _ -> },
     initialStartLocation: LatLng? = null,
     onMapTapped: (() -> Unit)? = null,
@@ -215,6 +224,11 @@ fun RideMapCanvas(
 
     val cameraController = remember { com.example.data.map.MapCameraController() }
     val cameraState by cameraController.state.collectAsState()
+
+    // "Show on map": the camera centres on the place the rider asked to see.
+    LaunchedEffect(centerOnPlace) {
+        centerOnPlace?.let { cameraController.centerOn(it) }
+    }
 
     var displayCenterLat by remember { mutableFloatStateOf(initialCenter.latitude.toFloat()) }
     var displayCenterLng by remember { mutableFloatStateOf(initialCenter.longitude.toFloat()) }
@@ -1264,6 +1278,42 @@ fun RideMapCanvas(
                             cy - pinRadiusPx * 0.72f - badgeLayout.size.height / 2f
                         )
                     )
+                }
+
+                // The price of the place as a stop, drawn as a badge on the
+                // marker. The rider sees what the stop costs on the map, not
+                // only inside the sheet.
+                if (isSelected && selectedAmenityDetourSeconds != null) {
+                    val detourLabel = com.example.data.model.AmenityStopPlan
+                        .detourLabel(selectedAmenityDetourSeconds)
+                    if (detourLabel != null) {
+                        val badgeLayout = textMeasurer.measure(
+                            text = detourLabel,
+                            style = TextStyle(
+                                color = Color.Black,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Black
+                            )
+                        )
+                        val padH = 6.dp.toPx()
+                        val padV = 3.dp.toPx()
+                        val badgeW = badgeLayout.size.width + padH * 2
+                        val badgeH = badgeLayout.size.height + padV * 2
+                        // The badge sits beside the pin, on the side that is
+                        // free of the pin body.
+                        val badgeX = cx + pinRadiusPx * 0.9f
+                        val badgeY = cy - pinRadiusPx - badgeH / 2f
+                        drawRoundRect(
+                            color = AmberPrimary,
+                            topLeft = Offset(badgeX, badgeY),
+                            size = androidx.compose.ui.geometry.Size(badgeW, badgeH),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(badgeH / 2f)
+                        )
+                        drawText(
+                            textLayoutResult = badgeLayout,
+                            topLeft = Offset(badgeX + padH, badgeY + padV)
+                        )
+                    }
                 }
 
                 // Label anchor (screen-space) just below the pin tip for Part B labels.

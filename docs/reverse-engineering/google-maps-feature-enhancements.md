@@ -512,3 +512,55 @@ window — the Overpass endpoint is not answering (a 40 s POST to
 live map has no places to select. The selection and the stop insertion are
 therefore verified on the device with a synthetic amenity set and against the
 live route engine, not against a live Overpass response.
+
+---
+
+# 19. Phase B implementation, batch 8 (approved 2026-10-22) — the place card, the category symbols and the add-stop workflow
+
+**Full evidence and design:** `docs/reverse-engineering/feature-14-amenity-selection.md` §7.
+
+## 19.1 The place card
+
+The reference's place card carries a clear hierarchy — large name, category,
+rating + review count, distance, open status, photo, clear actions. The
+RideTogether card now carries the same hierarchy in its own visual identity
+(`ui/components/PlaceCard.kt`): the place's own photo (or the category symbol
+when it has none), the name, the category, the rating and review count **when
+the data carries them**, the opening status **when the hours can be read**,
+the distance from the rider, and the address/phone/website when they are
+there.
+
+The opening-hours reader is deliberately conservative: `24/7`, day ranges,
+several ranges in a day and several rules in a value are read; **anything it
+cannot read produces no status at all** — a wrong "Open" is worse than no
+badge.
+
+## 19.2 The category symbols
+
+Stock **Material icons** (Apache License 2.0) — nothing is extracted from or
+copied out of the reference's proprietary POI artwork. The mapping was
+corrected where the old symbol was semantically wrong: a motorcycle repair
+shop is a **motorcycle**, a roadside rest stop is a **seat** (it was a
+parking sign), a convenience store is a **shop front** (it was a shopping
+trolley) and a viewpoint is a **landscape** (it was a camera). The symbols
+are distinct per category, which the tests pin.
+
+## 19.3 The add-stop workflow
+
+| Element | Implementation |
+|---|---|
+| The contextual action | "**Add stop**" on the place sheet, with the price of the stop attached: "Add stop · +3 min detour" |
+| The price before the commitment | the estimate is computed when the place is selected (a route planned through it, compared with the ride that is left) and is drawn as a **badge on the place's marker** on the map |
+| The candidate list | "**Add a stop**": the places on the map, with their category, their distance and their price when known; a bounded number of places are priced, because every price is a route request |
+| The entry point | an "Add a stop" button on the live map |
+| The other actions | "**Directions**" (the place becomes the destination of the ride, in-app), "**Save place**" (the rider's own shortlist, in Room — migration 5 → 6), "**Show on map**" (the camera centres on the place) |
+| The wording | "Add stop", "Add a stop", "Directions", "Save place", "Show on map" — concise functional phrases, no branded wording or artwork |
+
+## 19.4 Verification
+
+`OpeningHoursTest` (11), `PlaceCardTest` (11) and an extended
+`AmenityIconConfigTest` (7) are new. Full offline suite: **62 classes / 533 tests /
+0 failures / 0 errors / 0 skipped**.
+**Not device-verified in this pass** — the phone was not connected when this
+batch was written, so the new card, the symbols, the candidate list and the
+detour badge are covered by the unit tests and the code, not by a capture.
