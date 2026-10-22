@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddLocationAlt
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
@@ -27,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -39,11 +42,25 @@ import com.example.ui.theme.SurfaceCard
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.TextTertiary
 
+/**
+ * The sheet that opens when the rider taps a place on the map.
+ *
+ * The reference implementation opens a place sheet whose primary action is
+ * "Directions", and — once a route is on screen — "Add stop", which turns
+ * the place into a waypoint of the route. This sheet is the RideTogether
+ * equivalent: the place can be added as a **stop of the ride**, and the ride
+ * is re-planned through it.
+ *
+ * There is deliberately **no hand-off to another navigation app**: the ride,
+ * the route and the group stay inside RideTogether (the independent-stack
+ * invariant).
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AmenityDetailsSheet(
     amenity: AmenityEntity,
     riderLocation: LatLng?,
+    onAddAsStop: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -73,6 +90,7 @@ fun AmenityDetailsSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .testTag("amenity_details_sheet")
                 .padding(horizontal = 20.dp, vertical = 4.dp)
         ) {
             // Header row: category icon + name + distance chip
@@ -140,35 +158,70 @@ fun AmenityDetailsSheet(
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            // Navigate button
-            Button(
-                onClick = {
-                    val gmmUri = android.net.Uri.parse(
-                        "google.navigation:q=${amenity.lat},${amenity.lon}"
+            // The primary action: the place becomes a stop of THIS ride and
+            // the route is re-planned through it. There is no hand-off to
+            // another navigation app — the group, the route and the plan stay
+            // in RideTogether.
+            if (onAddAsStop != null) {
+                Button(
+                    onClick = {
+                        onAddAsStop()
+                        onDismiss()
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .testTag("amenity_add_as_stop"),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AmberPrimary,
+                        contentColor = Color.Black
+                    ),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AddLocationAlt,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
                     )
-                    val mapIntent = android.content.Intent(
-                        android.content.Intent.ACTION_VIEW,
-                        gmmUri
-                    ).apply { setPackage("com.google.android.apps.maps") }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Add as a stop",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Text(
+                    text = "The route is re-planned through this place and the group follows.",
+                    color = TextTertiary,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            // Secondary action: open the place in the map, centred on it.
+            OutlinedButton(
+                onClick = {
+                    val uri = android.net.Uri.parse(
+                        "geo:${amenity.lat},${amenity.lon}?q=${amenity.lat},${amenity.lon}" +
+                            "(${amenity.name?.trim().orEmpty()})"
+                    )
                     try {
-                        context.startActivity(mapIntent)
-                    } catch (_: Exception) {
-                        val webUri = android.net.Uri.parse(
-                            "https://www.google.com/maps/dir/?api=1&destination=${amenity.lat},${amenity.lon}"
-                        )
                         context.startActivity(
-                            android.content.Intent(android.content.Intent.ACTION_VIEW, webUri)
+                            android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
+                                .apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) }
                         )
+                    } catch (_: Exception) {
+                        // A device without a map app simply keeps the sheet open.
                     }
                     onDismiss()
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = AmberPrimary,
-                    contentColor = Color.Black
-                ),
+                    .height(48.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary),
                 shape = RoundedCornerShape(14.dp)
             ) {
                 Icon(
@@ -178,9 +231,9 @@ fun AmenityDetailsSheet(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Navigate Here",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold
+                    text = "Show on map",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
                 )
             }
 

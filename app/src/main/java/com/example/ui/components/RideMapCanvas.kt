@@ -96,6 +96,7 @@ import com.example.ui.theme.StatusEmergencyRed
 import com.example.ui.theme.StatusRidingGreen
 import com.example.ui.map.AmenityClustering
 import com.example.ui.map.AmenityPalette
+import com.example.ui.map.AmenitySelection
 import com.example.ui.map.MapChromeInsets
 import com.example.ui.map.MapLabelTheme
 import com.example.ui.map.MapOverlayContract
@@ -143,6 +144,14 @@ fun RideMapCanvas(
     amenities: List<com.example.data.amenities.AmenityEntity> = emptyList(),
     selectedAmenity: com.example.data.amenities.AmenityEntity? = null,
     onSelectAmenity: (com.example.data.amenities.AmenityEntity?) -> Unit = {},
+    /**
+     * The amenities the rider has expanded out of a cluster. They are drawn as
+     * single markers and are never merged again, so a tapped cluster stays
+     * open while the rider looks at it.
+     */
+    expandedAmenityIds: Set<Long> = emptySet(),
+    /** Called when the rider taps a cluster: the cluster's members are expanded. */
+    onExpandAmenityCluster: (List<Long>) -> Unit = {},
     onViewportChanged: (minLat: Double, maxLat: Double, minLon: Double, maxLon: Double) -> Unit = { _, _, _, _ -> },
     initialStartLocation: LatLng? = null,
     onMapTapped: (() -> Unit)? = null,
@@ -387,6 +396,14 @@ fun RideMapCanvas(
 
     val riderScreenPositions = remember { mutableMapOf<String, Offset>() }
     val amenityScreenPositions = remember { mutableMapOf<Long, Offset>() }
+    /**
+     * The visible amenity markers in draw order (bottom first).
+     *
+     * The tap handler resolves against this list instead of the amenity list,
+     * so the marker the rider sees on top is the one that answers the tap, and
+     * a cluster is tappable at all.
+     */
+    val amenityDrawnMarkers = remember { mutableListOf<AmenitySelection.Marker>() }
     // Painted footprint (screen-space bounds) of each drawn pin, recorded during draw
     // with the exact same geometry used to paint it, for icon-avoiding label placement.
     val amenityPaintedBounds = remember { mutableMapOf<Long, AmenityLabelPlanner.IconRect>() }
@@ -964,29 +981,32 @@ fun RideMapCanvas(
                             onSelectRider(clickedRider)
                             onSelectAmenity(null)
                         } else {
-                            var clickedAmenity: com.example.data.amenities.AmenityEntity? = null
                             val tapTargetRadius = with(density) { 24.dp.toPx() } // Minimum 48dp tap target
-                            // Phase B (B-14): the selected amenity is tested first, so a
-                            // selected pin that is covered by a cluster badge stays
-                            // selectable.
-                            val amenitiesForHit = if (selectedAmenity != null) {
-                                listOf(selectedAmenity) + amenities.filter { it.osmId != selectedAmenity.osmId }
-                            } else {
-                                amenities
-                            }
-                            for (amenity in amenitiesForHit) {
-                                val pos = amenityScreenPositions[amenity.osmId] ?: continue
-                                val distance = (tapOffset - pos).getDistance()
-                                if (distance < tapTargetRadius) {
-                                    clickedAmenity = amenity
-                                    break
+                            // The tap resolves to the **topmost** marker under it
+                            // (the one the rider actually sees), not to the first
+                            // one in the data list: a marker that is drawn under
+                            // another must not steal the tap. A cluster answers
+                            // with an expansion, a single marker with a
+                            // selection.
+                            val outcome = AmenitySelection.resolveTap(
+                                tapX = tapOffset.x,
+                                tapY = tapOffset.y,
+                                markers = amenityDrawnMarkers.toList(),
+                                radiusPx = tapTargetRadius
+                            )
+                            when (outcome) {
+                                is AmenitySelection.TapOutcome.Picked -> {
+                                    val picked = amenities.firstOrNull { it.osmId == outcome.amenityId }
+                                    onSelectAmenity(picked)
+                                    if (picked != null) onSelectRider(null)
                                 }
-                            }
-                            onSelectAmenity(clickedAmenity)
-                            if (clickedAmenity != null) {
-                                onSelectRider(null)
-                            } else {
-                                onMapTapped?.invoke()
+                                is AmenitySelection.TapOutcome.Expanded -> {
+                                    onExpandAmenityCluster(outcome.memberIds)
+                                }
+                                is AmenitySelection.TapOutcome.Nothing -> {
+                                    onSelectAmenity(null)
+                                    onMapTapped?.invoke()
+                                }
                             }
                         }
                     }
@@ -1066,10 +1086,14 @@ fun RideMapCanvas(
             amenityScreenPositions.clear()
             amenityLabelAnchors.clear()
             amenityPaintedBounds.clear()
+            amenityDrawnMarkers.clear()
             // Phase B (backlog B-14): dense amenities are CLUSTERED — one marker
             // is drawn per group (with a count badge), which keeps a dense area
             // readable instead of turning into a pin field. The clustering is
             // deterministic and order independent (see AmenityClustering).
+            //
+            // A cluster the rider has tapped stays open: its members are
+            // excluded from the grouping and are drawn as single markers.
             val visibleAmenityPositions = ArrayList<Pair<Long, Pair<Float, Float>>>()
             for (amenity in amenities) {
                 val pos = latLngToRotatedScreen(LatLng(amenity.lat, amenity.lon))
@@ -1080,7 +1104,11 @@ fun RideMapCanvas(
                 }
                 visibleAmenityPositions.add(amenity.osmId to (pos.x to pos.y))
             }
-            val amenityClusters = AmenityClustering.cluster(visibleAmenityPositions, maxDistancePx = 30f)
+            val amenityClusters = AmenityClustering.cluster(
+                points = visibleAmenityPositions,
+                maxDistancePx = 30f,
+                expandedIds = expandedAmenityIds
+            )
             val amenitiesById = amenities.associateBy { it.osmId }
             // The selected amenity always gets its own marker (never hidden in a
             // cluster) and is drawn last, on top of everything else.
@@ -1096,6 +1124,7 @@ fun RideMapCanvas(
                 .toMutableList()
             if (selectedCluster != null) drawOrder.add(selectedCluster)
 
+            var amenityDrawIndex = 0
             for (cluster in drawOrder) {
                 val drawnId = if (selectedCluster != null && cluster.representativeId == selectedCluster.representativeId) {
                     selectedAmenity?.osmId ?: cluster.representativeId
@@ -1108,6 +1137,13 @@ fun RideMapCanvas(
                 val screenPos = latLngToRotatedScreen(LatLng(amenity.lat, amenity.lon))
 
                 val isSelected = amenity.osmId == selectedAmenity?.osmId
+                // When a place is selected, the other markers are dimmed: the
+                // selection has to read at a glance, and the rider must still
+                // see what else is around it.
+                val markerAlpha = AmenitySelection.markerAlpha(
+                    isSelected = isSelected,
+                    hasSelection = selectedAmenity != null
+                )
                 val basePinSizeDp = when {
                     displayZoom >= 17f -> 32.dp
                     displayZoom >= 15f -> 28.dp
@@ -1135,6 +1171,21 @@ fun RideMapCanvas(
 
                 // Save visible pin head center for hit-testing alignment
                 amenityScreenPositions[amenity.osmId] = Offset(cx, cy)
+
+                // The marker as the rider sees it: the tap handler resolves
+                // against these, so a cluster is tappable and the topmost
+                // marker is the one that answers a tap.
+                amenityDrawnMarkers.add(
+                    AmenitySelection.Marker(
+                        id = amenity.osmId,
+                        x = cx,
+                        y = cy,
+                        isCluster = groupCount > 1,
+                        memberIds = cluster.memberIds,
+                        drawIndex = amenityDrawIndex
+                    )
+                )
+                amenityDrawIndex++
 
                 // 1. Selected Focus Halo / Glow Ring
                 if (isSelected) {
@@ -1172,11 +1223,11 @@ fun RideMapCanvas(
                     close()
                 }
 
-                drawPath(path = pinPath, color = categoryColor)
+                drawPath(path = pinPath, color = categoryColor.copy(alpha = markerAlpha))
                 // Dual outline: dark rim first (separates the marker from pale daytime
                 // imagery where a white border alone is invisible), then bright inner rim.
-                drawPath(path = pinPath, color = Color(0x66101828), style = Stroke(width = 4.6.dp.toPx()))
-                drawPath(path = pinPath, color = Color.White, style = Stroke(width = 2.1.dp.toPx()))
+                drawPath(path = pinPath, color = Color(0x66101828).copy(alpha = markerAlpha), style = Stroke(width = 4.6.dp.toPx()))
+                drawPath(path = pinPath, color = Color.White.copy(alpha = markerAlpha), style = Stroke(width = 2.1.dp.toPx()))
 
                 // 4. White Category Icon Glyph
                 val painter = categoryPainters[amenity.type] ?: categoryPainters[com.example.data.amenities.AmenityType.UNKNOWN]!!
@@ -1186,7 +1237,7 @@ fun RideMapCanvas(
                     with(painter) {
                         draw(
                             size = androidx.compose.ui.geometry.Size(glyphSize, glyphSize),
-                            colorFilter = ColorFilter.tint(Color.White)
+                            colorFilter = ColorFilter.tint(Color.White.copy(alpha = markerAlpha))
                         )
                     }
                 } finally {

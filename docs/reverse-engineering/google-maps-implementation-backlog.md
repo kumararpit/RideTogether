@@ -443,3 +443,66 @@ B-08 (blocked by D7), B-10, B-20 … B-27, plus the new items:
   engine's modifier is coarse;
 - **B-30** — show the lane strip in the stop-by-stop itinerary card as well as
   in the live turn card.
+
+---
+
+## Implementation record, batch 7 (approved 2026-10-22): B-29 and B-31
+
+Evidence and design: `docs/reverse-engineering/feature-14-amenity-selection.md`.
+
+### B-29 · Selection semantics — **DONE** (closes S5-4 of Feature 05)
+
+**Change.** New `ui/map/AmenitySelection.kt`:
+
+- the tap resolves to the **topmost drawn marker**, not to the first one in
+  the amenity list — a marker drawn under another can no longer steal the tap
+  (F5-D4 / F14-D1);
+- a **cluster expands** instead of selecting, and an expanded cluster **stays
+  open**: its members are excluded from the grouping and drawn as single
+  markers (F14-D2, F14-D3);
+- a selection **dims** the other markers to 40 %, so the selection reads at a
+  glance and the surroundings stay visible (F14-D4).
+
+**Verification.** `AmenitySelectionTest` (7 tests).
+
+### B-31 · A selected place becomes a stop of the ride — **DONE**
+
+**Change.** New `data/model/AmenityStopPlan.kt` and
+`RideViewModel.addSelectedAmenityAsStop()`:
+
+- the place is inserted into the plan as the **last intermediate stop**, just
+  before the final destination;
+- the route is **re-planned from the rider's position** through the new stop;
+- the **detour** is derived from the two route results the app already has
+  (the ride that was left vs the ride that is left now) — exact, and no extra
+  service call;
+- the plan is published as **one versioned unit** through the existing
+  leader-owned path, and the announcement suppression of the old route is
+  cleared;
+- a member is told who can change the route instead of silently failing.
+
+The sheet's primary action is now the in-app **"Add as a stop"**; the
+**"Navigate Here" hand-off to Google Maps is gone** (independent-stack
+invariant).
+
+**Verification.** `AmenityStopPlanTest` (6 tests), and on the device:
+`AmenitySelectionSheetDeviceRenderTest` (the sheet renders with the in-app
+action) and `AmenityTapSelectionDeviceTest` (a tap on a marker selects it, a
+tap on a cluster expands it). Full offline suite: 60 classes / 507 tests /
+0 failures / 0 errors / 0 skipped.
+
+**Blocked:** the live ride could not be driven with real places in this
+window — the Overpass endpoint is not answering, so the live map has no
+places to select.
+
+### Still open
+
+B-08 (blocked by D7), B-10, B-20 … B-27, B-29 (turn-angle icon refinement),
+B-30 (lane strip in the itinerary card), plus the new items:
+- **B-32** — show the **detour before** the stop is taken (the reference shows
+  it on the candidate cards and on the markers); RideTogether can only derive
+  it after the re-plan, so this needs a second route request per candidate;
+- **B-33** — a member can **suggest** a stop to the leader (needs a message
+  type that does not exist yet);
+- **B-34** — relevance weighting for amenities (backlog S5-1): the detour
+  gives a cost signal, a fuel-before-a-long-leg signal is still missing.

@@ -34,6 +34,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -60,6 +61,7 @@ import com.example.ui.components.SosAlertBanner
 import com.example.ui.components.SosConfirmDialog
 import com.example.ui.components.TurnByTurnNavHeader
 import com.example.ui.theme.AmberPrimary
+import com.example.ui.theme.SlateDark900
 import com.example.ui.theme.StatusRidingGreen
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.TextTertiary
@@ -121,6 +123,17 @@ fun LiveRideScreen(
         amenities.filter { it.type in visibleCategories }
     }
 
+    // A cluster the rider tapped stays open: its members are drawn as single
+    // markers until the rider zooms or the selection is cleared.
+    var expandedAmenityIds by remember { mutableStateOf(setOf<Long>()) }
+    val amenityStopMessage by viewModel.amenityStopMessage.collectAsState()
+    LaunchedEffect(amenityStopMessage) {
+        if (amenityStopMessage != null) {
+            delay(4000)
+            viewModel.clearAmenityStopMessage()
+        }
+    }
+
     // Bottom action bar (Control | Chat | SOS) is permanently docked during an active
     // ride so one-tap SOS/Chat is always reachable with riding gloves.
     var isBottomActionBarVisible by remember { mutableStateOf(true) }
@@ -157,6 +170,10 @@ fun LiveRideScreen(
             onSelectAmenity = {
                 viewModel.selectAmenity(it)
                 if (it != null && isBottomActionBarVisible) scheduleAutoHide()
+            },
+            expandedAmenityIds = expandedAmenityIds,
+            onExpandAmenityCluster = { memberIds ->
+                expandedAmenityIds = expandedAmenityIds + memberIds
             },
             onViewportChanged = { minLat, maxLat, minLon, maxLon ->
                 viewModel.onViewportChanged(minLat, maxLat, minLon, maxLon)
@@ -689,11 +706,33 @@ fun LiveRideScreen(
             com.example.ui.components.AmenityDetailsSheet(
                 amenity = selectedAmenity!!,
                 riderLocation = currentUser?.location,
+                onAddAsStop = { viewModel.addSelectedAmenityAsStop() },
                 onDismiss = {
                     viewModel.selectAmenity(null)
                     if (isBottomActionBarVisible) scheduleAutoHide()
                 }
             )
+        }
+
+        // The outcome of "add this place as a stop" — shown over the map.
+        amenityStopMessage?.let { message ->
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 132.dp, start = 16.dp, end = 16.dp)
+                    .testTag("amenity_stop_message"),
+                color = SlateDark900,
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, Color(0xFF253248))
+            ) {
+                Text(
+                    text = message,
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                )
+            }
         }
 
         if (showQuickMessageSheet) {

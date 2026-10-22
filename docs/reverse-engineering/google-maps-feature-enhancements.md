@@ -453,3 +453,61 @@ refuses the shell `MOCK_LOCATION` appop and blocks `pm grant`. The strip is
 verified as rendering (instrumented, real UI, real device) and as data (live
 engine response through the whole service path), but it has not been observed
 inside a live ride.
+
+---
+
+# 18. Phase B implementation, batch 7 (approved 2026-10-22) — B-29 / B-31 (amenity selection and adding a place as a stop)
+
+**Full evidence and design:** `docs/reverse-engineering/feature-14-amenity-selection.md`.
+
+## 18.1 What the evidence showed (reference side)
+
+Observed live on the rider's device (Google Maps 26.42.01.997557324):
+
+* the **place sheet** on a POI tap: name, rating, category/attributes/price,
+  open status, photo card, and an action row whose primary action is
+  **Directions** (`gm_04_poi.png`);
+* the **route preview**: the route line with a duration pill, the travel-mode
+  chips (**Drive / Motorcycle / Transit / Walk**), "Start · **Add stops** ·
+  Share" (`gm_05_directions.png`);
+* the **"Add stops to your route"** sheet: "Search along route", category
+  chips (Petrol pumps, Restaurants, Coffee shops, Grocery stores) and
+  candidate cards carrying a **detour badge** — "+2 min", "+1 min" — with the
+  **same badge on the map markers** ("Desi Dhaba +1 min · Punjabi")
+  (`gm_06_addstops.png`);
+* the **place sheet in add-stop mode**, whose primary action is literally
+  **"Add stop"** (`gm_07_added.png`);
+* the **declutter ladder**: POIs are individual category markers at z≈14–17
+  and are **gone** at z≈11 (`gm_08_zoom.png`, `gm_09_cluster.png`).
+
+Three behaviours were extracted: the primary action of a place sheet is
+**contextual** ("Directions" vs "Add stop"), a stop has a **price that is
+shown before it is taken**, and **selecting a place is not acting on it**.
+
+## 18.2 What was implemented
+
+| Item | Change |
+|---|---|
+| **B-29** selection semantics | New `ui/map/AmenitySelection.kt`: the tap resolves to the **topmost drawn** marker (not to the first one in the data list), a **cluster expands** instead of selecting, and a selection **dims** the other markers to 40 %. `AmenityClustering` now keeps an expanded cluster **open** (its members are excluded from the grouping). |
+| **B-31** a place becomes a stop of the ride | New `data/model/AmenityStopPlan.kt` + `RideViewModel.addSelectedAmenityAsStop()`: the place is inserted as the **last intermediate stop**, the route is **re-planned from the rider's position** through it, the **detour is derived from the two route results** the app already has, the plan is published as one versioned unit through the existing leader-owned path, and the announcement suppression of the old route is cleared. |
+| The independent-stack invariant | The amenity sheet's "Navigate Here" button handed the ride to **Google Maps** (`google.navigation:` intent). It is replaced by the in-app **"Add as a stop"** action (plus a neutral "Show on map"), so the ride, the group and the plan stay in RideTogether. |
+
+## 18.3 Verification
+
+`AmenitySelectionTest` (7) and `AmenityStopPlanTest` (6) are new. Full
+offline suite: **60 classes / 507 tests / 0 failures / 0 errors / 0 skipped**.
+
+**On-device (RMX3360):** `AmenitySelectionSheetDeviceRenderTest` renders the
+sheet on the device — the category badge, the name, the distance chip, the
+amber "Add as a stop" action and the explanation, with **no hand-off to
+another navigation app** (`/tmp/opencode/amenity_shots/amenity_sheet.png`).
+`AmenityTapSelectionDeviceTest` renders the map with a synthetic amenity set
+and taps it on the device: a tap on a marker **selects** that place, a tap on
+a **cluster expands** it.
+
+**Blocked:** the live ride could not be driven with **real** places in this
+window — the Overpass endpoint is not answering (a 40 s POST to
+`overpass-api.de/api/interpreter` times out from the host as well), so the
+live map has no places to select. The selection and the stop insertion are
+therefore verified on the device with a synthetic amenity set and against the
+live route engine, not against a live Overpass response.
