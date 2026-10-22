@@ -502,8 +502,9 @@ sheet on the device — the category badge, the name, the distance chip, the
 amber "Add as a stop" action and the explanation, with **no hand-off to
 another navigation app** (`/tmp/opencode/amenity_shots/amenity_sheet.png`).
 `AmenityTapSelectionDeviceTest` renders the map with a synthetic amenity set
-and taps it on the device: a tap on a marker **selects** that place, a tap on
-a **cluster expands** it.
+and taps it on the device (a tap on a marker **selects** that place, a tap on
+a **cluster expands** it) — the test is written and compiled but **was not
+executed**: the phone disconnected from USB before the run.
 
 **Blocked:** the live ride could not be driven with **real** places in this
 window — the Overpass endpoint is not answering (a 40 s POST to

@@ -144,7 +144,7 @@ away from RideTogether.
 | `AmenityStopPlanTest` | 6 tests — stop order, origin/destination invariants, no duplicates, detour arithmetic, detour wording |
 | Full offline suite | **60 classes / 507 tests / 0 failures / 0 errors / 0 skipped** |
 | On-device rendering (RMX3360) | `AmenitySelectionSheetDeviceRenderTest` — the sheet renders with the category badge, the name, the distance chip, the amber **"Add as a stop"** action and the explanation; **no Google Maps hand-off**. Capture: `/tmp/opencode/amenity_shots/amenity_sheet.png` |
-| On-device interaction | `AmenityTapSelectionDeviceTest` — the map is rendered with a synthetic amenity set and the taps are performed on the device: a tap on a marker selects that place, a tap on a cluster expands it |
+| On-device interaction | `AmenityTapSelectionDeviceTest` — renders the map with a synthetic amenity set and taps it **on the device**: a tap on a marker selects that place, a tap on a cluster expands it. **Written and compiled, NOT yet executed** — the phone disconnected from USB before the run |
 | Live ride, real data | **Blocked by the environment**: the Overpass endpoint is currently not answering (a 40 s POST to `overpass-api.de/api/interpreter` times out from the host as well), so the live map has no places to select. The seeded-cache path used in earlier sessions is not available in this window either. |
 
 ---

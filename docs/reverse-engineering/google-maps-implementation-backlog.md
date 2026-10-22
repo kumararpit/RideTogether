@@ -487,9 +487,11 @@ invariant).
 
 **Verification.** `AmenityStopPlanTest` (6 tests), and on the device:
 `AmenitySelectionSheetDeviceRenderTest` (the sheet renders with the in-app
-action) and `AmenityTapSelectionDeviceTest` (a tap on a marker selects it, a
-tap on a cluster expands it). Full offline suite: 60 classes / 507 tests /
-0 failures / 0 errors / 0 skipped.
+action — executed, capture pulled) and `AmenityTapSelectionDeviceTest` (a tap
+on a marker selects it, a tap on a cluster expands it — **written and
+compiled, not executed**: the phone disconnected from USB before the run).
+Full offline suite: 60 classes / 507 tests / 0 failures / 0 errors / 0
+skipped.
 
 **Blocked:** the live ride could not be driven with real places in this
 window — the Overpass endpoint is not answering, so the live map has no
