@@ -288,7 +288,25 @@ class RideViewModel(
 
                 // What the stop costs: the ride that is left compared with the
                 // ride that was left before the stop was added.
-                val oldRemainingSeconds = navEngine.progress.value.remainingDurationSeconds
+                //
+                // The two numbers have to be measured the SAME way: the route
+                // engine estimates the new route at the route's average speed,
+                // while the nav engine estimates the remaining ride at the
+                // rider's current speed. Comparing them directly would invent
+                // a detour out of a stopped rider. So the old remaining
+                // DISTANCE is converted with the new route's average speed,
+                // and only then are the two times compared.
+                val oldRemainingMeters = navEngine.progress.value.remainingRouteDistanceMeters
+                val newAverageSpeedMps = if (result.totalDistanceMeters > 0.0) {
+                    result.totalDistanceMeters / maxOf(result.totalDurationSeconds, 1.0)
+                } else {
+                    0.0
+                }
+                val oldRemainingSeconds = if (newAverageSpeedMps > 0.0) {
+                    oldRemainingMeters / newAverageSpeedMps
+                } else {
+                    0.0
+                }
                 val detourSeconds = com.example.data.model.AmenityStopPlan.detourSeconds(
                     newRemainingSeconds = result.totalDurationSeconds,
                     oldRemainingSeconds = oldRemainingSeconds
@@ -996,7 +1014,10 @@ class RideViewModel(
                 durationSeconds = option.durationSeconds
             )
         }
-        if (ride.selectedRouteIndex == selectedIndex && ride.routeOptions == summaries) return
+        if (ride.selectedRouteIndex == selectedIndex &&
+            ride.routeOptions == summaries &&
+            ride.routeStops == _routePlanStops.value
+        ) return
         routePlanVersionCounter += 1
         repository.updateRoutePlan(
             routeStops = _routePlanStops.value,

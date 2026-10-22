@@ -45,8 +45,11 @@ object AmenityStopPlan {
     /**
      * The extra time the stop adds to the ride, in seconds.
      *
-     * A stop that shortens the ride (possible on a loop-shaped route) is
-     * reported as zero: a negative detour is noise, not information.
+     * Both numbers must be measured the same way — see the call site, which
+     * converts the old remaining distance with the new route's average speed
+     * before comparing. A stop that shortens the ride (possible on a
+     * loop-shaped route) is reported as zero: a negative detour is noise, not
+     * information.
      */
     fun detourSeconds(newRemainingSeconds: Double, oldRemainingSeconds: Double): Double =
         (newRemainingSeconds - oldRemainingSeconds).coerceAtLeast(0.0)
