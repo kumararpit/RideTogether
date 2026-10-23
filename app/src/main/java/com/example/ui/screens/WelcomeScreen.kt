@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -8,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -24,59 +27,80 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.GroupAdd
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.TwoWheeler
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.R
 import com.example.data.db.CompletedRideEntity
+import com.example.data.db.SavedPlaceEntity
 import com.example.data.model.Ride
 import com.example.data.model.RideStatus
+import com.example.ui.components.PrimaryButton
+import com.example.ui.components.RTCard
+import com.example.ui.components.RTShapes
+import com.example.ui.components.RTSpacing
 import com.example.ui.components.RideDetailsDialog
 import com.example.ui.components.RideHistorySheet
-import com.example.ui.theme.AmberLight
+import com.example.ui.components.SavedPlacesSheet
+import com.example.ui.components.SecondaryButton
+import com.example.ui.components.SectionHeader
+import com.example.ui.components.StatusChip
 import com.example.ui.theme.AmberPrimary
-import com.example.ui.theme.DividerColor
+import com.example.ui.theme.CustomIcons
+import com.example.ui.theme.SlateDark500
 import com.example.ui.theme.SlateDark700
 import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
 import com.example.ui.theme.StatusRidingGreen
-import com.example.ui.theme.SurfaceCard
-import com.example.ui.theme.SurfaceCardElevated
+import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.TextTertiary
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Screens 1 and 2 of the reference: the splash / sign-in entry, and Home.
+ *
+ * A signed-out rider sees the splash (hero art, wordmark, tagline, "Get
+ * Started" and a guest route). A signed-in rider — or one who chose to carry
+ * on as a guest — sees Home: the upcoming ride, the four quick actions, real
+ * discovery content and the account footer.
+ */
 @Composable
 fun WelcomeScreen(
     currentName: String,
@@ -89,21 +113,33 @@ fun WelcomeScreen(
     onRejoinRideClick: () -> Unit = {},
     onCreateRideClick: () -> Unit,
     onJoinRideClick: () -> Unit,
+    onSignInClick: () -> Unit = {},
     onSignOutClick: (() -> Unit)? = null,
     isSignedIn: Boolean = false,
     userEmail: String? = null,
     pastRides: List<CompletedRideEntity> = emptyList(),
+    savedPlaces: List<SavedPlaceEntity> = emptyList(),
+    onRemoveSavedPlace: (Long) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    var nameInput by remember { mutableStateOf(currentName) }
-    var bikeInput by remember { mutableStateOf(currentMotorcycle) }
-    var isEditingProfile by remember { mutableStateOf(false) }
+    var guestMode by rememberSaveable { mutableStateOf(false) }
+    var showProfileSheet by remember { mutableStateOf(false) }
     var showHistorySheet by remember { mutableStateOf(false) }
+    var showSavedPlacesSheet by remember { mutableStateOf(false) }
     var selectedHistoryRideForDetails by remember { mutableStateOf<CompletedRideEntity?>(null) }
 
     val hasActiveRide = activeRide != null &&
         activeRide.status != RideStatus.COMPLETED &&
         activeRide.status != RideStatus.CANCELLED
+
+    if (!isSignedIn && !guestMode) {
+        SplashContent(
+            onGetStarted = onSignInClick,
+            onContinueAsGuest = { guestMode = true },
+            modifier = modifier
+        )
+        return
+    }
 
     Surface(
         modifier = modifier
@@ -118,423 +154,156 @@ fun WelcomeScreen(
                 .navigationBarsPadding()
                 .imePadding()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp)
+                .padding(horizontal = RTSpacing.page)
         ) {
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(RTSpacing.xs))
 
-            // ── A. App Header ────────────────────────────────────────────────
+            // ── Brand bar ───────────────────────────────────────────────────
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 4.dp, bottom = 4.dp),
+                    .padding(vertical = RTSpacing.xxs),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    LogoMark(size = 32.dp)
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "RideTogether",
+                        color = TextPrimary,
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = (-0.4).sp
+                    )
+                }
+
+                if (isSignedIn) {
                     Box(
                         modifier = Modifier
                             .size(38.dp)
                             .clip(CircleShape)
-                            .background(AmberPrimary),
+                            .background(SlateDark700)
+                            .clickable { showProfileSheet = true }
+                            .testTag("profile_avatar"),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.TwoWheeler,
-                            contentDescription = "RideTogether",
-                            tint = SlateDark900,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column {
                         Text(
-                            text = "RideTogether",
-                            color = Color.White,
-                            fontSize = 19.sp,
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = (-0.5).sp
-                        )
-                        Text(
-                            text = "Ride · Track · Stay Together",
-                            color = TextTertiary,
-                            fontSize = 11.sp
-                        )
-                    }
-                }
-
-                // Profile avatar / edit toggle
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(SlateDark800)
-                        .clickable { isEditingProfile = !isEditingProfile }
-                        .testTag("profile_avatar"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = (currentName.ifBlank { "R" }).take(1).uppercase(),
-                        color = AmberPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            // ── B. Rider profile row ─────────────────────────────────────────
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = currentName.ifBlank { "Rider" },
-                        color = Color.White,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = if (currentMotorcycle.isNotBlank()) "🏍️ $currentMotorcycle" else "Motorcycle model not set",
-                        color = TextSecondary,
-                        fontSize = 12.sp
-                    )
-                }
-
-                Surface(
-                    color = SlateDark800,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { isEditingProfile = !isEditingProfile }
-                        .testTag("edit_profile_button")
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Edit,
-                            contentDescription = "Edit Profile",
-                            tint = AmberPrimary,
-                            modifier = Modifier.size(13.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = if (isEditingProfile) "Done" else "Edit",
+                            text = currentName.ifBlank { "R" }.take(1).uppercase(),
                             color = AmberPrimary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-
-            // Inline profile edit fields
-            AnimatedVisibility(visible = isEditingProfile) {
-                Column(
-                    modifier = Modifier
-                        .padding(top = 10.dp)
-                        .fillMaxWidth()
-                        .background(SurfaceCard, RoundedCornerShape(12.dp))
-                        .padding(14.dp)
-                ) {
-                    Text("RIDER NAME", color = AmberPrimary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    OutlinedTextField(
-                        value = nameInput,
-                        onValueChange = { nameInput = it; onNameChange(it) },
-                        leadingIcon = {
-                            Icon(imageVector = Icons.Default.Person, contentDescription = null, tint = AmberLight)
-                        },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = AmberPrimary,
-                            unfocusedBorderColor = SlateDark700,
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White
-                        ),
-                        singleLine = true,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("rider_name_input"),
-                        shape = RoundedCornerShape(10.dp)
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    Text(
-                        "MOTORCYCLE MODEL (OPTIONAL)",
-                        color = TextSecondary,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    OutlinedTextField(
-                        value = bikeInput,
-                        onValueChange = { bikeInput = it; onMotorcycleChange(it) },
-                        leadingIcon = {
-                            Icon(imageVector = Icons.Default.TwoWheeler, contentDescription = null, tint = AmberLight)
-                        },
-                        placeholder = { Text("e.g. Triumph Tiger 900", color = TextTertiary) },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = AmberPrimary,
-                            unfocusedBorderColor = SlateDark700,
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White
-                        ),
-                        singleLine = true,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("motorcycle_model_input"),
-                        shape = RoundedCornerShape(10.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // ── C. Primary actions ───────────────────────────────────────────
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Button(
-                    onClick = onCreateRideClick,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(54.dp)
-                        .testTag("create_ride_button"),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = AmberPrimary,
-                        contentColor = SlateDark900
-                    ),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Create Group Ride",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                OutlinedButton(
-                    onClick = onJoinRideClick,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(54.dp)
-                        .testTag("join_ride_button"),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
-                    shape = RoundedCornerShape(14.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, SlateDark700)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.GroupAdd,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Join Ride with Code",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // ── D. Active / Rejoin ride card ─────────────────────────────────
-            if (hasActiveRide) {
-                val ride = activeRide!!
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("active_ride_card"),
-                    color = SurfaceCardElevated,
-                    shape = RoundedCornerShape(16.dp),
-                    tonalElevation = 4.dp
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Live indicator dot
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .clip(CircleShape)
-                                .background(StatusRidingGreen)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = ride.name,
-                                color = Color.White,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = "Live · $activeRiderCount rider${if (activeRiderCount != 1) "s" else ""}",
-                                color = StatusRidingGreen,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.width(12.dp))
-
-                        Button(
-                            onClick = onRejoinRideClick,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = AmberPrimary,
-                                contentColor = SlateDark900
-                            ),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier
-                                .height(42.dp)
-                                .testTag("rejoin_ride_button")
-                        ) {
-                            Icon(
-                                imageVector = if (isCurrentUserInActiveRide) Icons.Default.PlayArrow else Icons.Default.Refresh,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = if (isCurrentUserInActiveRide) "Resume" else "Rejoin",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(20.dp))
-            }
-
-            // ── E. Recent Rides ──────────────────────────────────────────────
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Recent Rides",
-                    color = Color.White,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                if (pastRides.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier
-                            .clickable { showHistorySheet = true }
-                            .padding(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "See all",
-                            color = AmberPrimary,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                            contentDescription = "View all rides",
-                            tint = AmberPrimary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            if (pastRides.isEmpty()) {
-                // Empty state — concise, actionable
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = SurfaceCard,
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 20.dp, vertical = 24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(text = "🏍️", fontSize = 36.sp)
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            text = "No recent rides yet",
-                            color = Color.White,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Create a ride or join your friends to start exploring together.",
-                            color = TextSecondary,
-                            fontSize = 13.sp,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                        )
-                        if (!hasActiveRide) {
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Button(
-                                    onClick = onCreateRideClick,
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = AmberPrimary,
-                                        contentColor = SlateDark900
-                                    ),
-                                    shape = RoundedCornerShape(10.dp),
-                                    modifier = Modifier.height(42.dp)
-                                ) {
-                                    Text("Create Ride", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                }
-                                OutlinedButton(
-                                    onClick = onJoinRideClick,
-                                    shape = RoundedCornerShape(10.dp),
-                                    modifier = Modifier.height(42.dp),
-                                    border = androidx.compose.foundation.BorderStroke(1.dp, SlateDark700)
-                                ) {
-                                    Text("Join Ride", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                }
-                            }
-                        }
                     }
-                }
-            } else {
-                // Recent ride cards
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    pastRides.take(3).forEach { item ->
-                        RecentRideCard(
-                            ride = item,
-                            onClick = { selectedHistoryRideForDetails = item }
-                        )
+                } else {
+                    TextButton(onClick = onSignInClick) {
+                        Text("Sign in", color = AmberPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(RTSpacing.lg))
 
-            // ── F. Account status footer ─────────────────────────────────────
+            // ── Upcoming ride ───────────────────────────────────────────────
+            if (hasActiveRide) {
+                ActiveRideCard(
+                    ride = activeRide!!,
+                    riderCount = activeRiderCount,
+                    isCurrentUserInActiveRide = isCurrentUserInActiveRide,
+                    riderName = currentName,
+                    onRejoin = onRejoinRideClick
+                )
+            } else {
+                NoRideCard(onCreateRide = onCreateRideClick)
+            }
+
+            Spacer(modifier = Modifier.height(RTSpacing.xl))
+
+            // ── Quick actions ───────────────────────────────────────────────
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                QuickAction(
+                    label = "Create Ride",
+                    icon = Icons.Default.Add,
+                    accent = AmberPrimary,
+                    onClick = onCreateRideClick,
+                    testTag = "create_ride_button",
+                    modifier = Modifier.weight(1f)
+                )
+                QuickAction(
+                    label = "Join Ride",
+                    icon = Icons.Default.GroupAdd,
+                    accent = StatusRidingGreen,
+                    onClick = onJoinRideClick,
+                    testTag = "join_ride_button",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                QuickAction(
+                    label = "My Rides",
+                    icon = Icons.Default.History,
+                    accent = Color(0xFF6AA9FF),
+                    onClick = { showHistorySheet = true },
+                    testTag = "my_rides_button",
+                    modifier = Modifier.weight(1f)
+                )
+                QuickAction(
+                    label = "Saved Places",
+                    icon = Icons.Default.BookmarkBorder,
+                    accent = Color(0xFFC9A2FF),
+                    onClick = { showSavedPlacesSheet = true },
+                    testTag = "saved_places_button",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(RTSpacing.xl))
+
+            // ── Discover ────────────────────────────────────────────────────
+            SectionHeader(
+                title = "Discover",
+                actionLabel = if (pastRides.isNotEmpty() || savedPlaces.isNotEmpty()) "See all" else null,
+                onAction = {
+                    if (pastRides.isNotEmpty()) showHistorySheet = true else showSavedPlacesSheet = true
+                }
+            )
+            Spacer(modifier = Modifier.height(RTSpacing.sm))
+
+            val latestRide = pastRides.maxByOrNull { it.completedAtMs }
+            val latestPlace = savedPlaces.firstOrNull()
+            when {
+                latestPlace != null -> DiscoverPlaceCard(
+                    place = latestPlace,
+                    onClick = { showSavedPlacesSheet = true }
+                )
+                latestRide != null -> DiscoverRideCard(
+                    ride = latestRide,
+                    onClick = { selectedHistoryRideForDetails = latestRide }
+                )
+                else -> RTCard {
+                    Text(
+                        text = "Nothing here yet",
+                        color = TextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Routes you ride and places you save will appear here.",
+                        color = TextSecondary,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(RTSpacing.xl))
+
+            // ── Account footer ──────────────────────────────────────────────
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 10.dp),
+                    .padding(bottom = RTSpacing.md),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -542,13 +311,13 @@ fun WelcomeScreen(
                     Icon(
                         imageVector = Icons.Default.CheckCircle,
                         contentDescription = null,
-                        tint = StatusRidingGreen,
+                        tint = if (isSignedIn) StatusRidingGreen else TextTertiary,
                         modifier = Modifier.size(13.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (isSignedIn) "Cloud Sync Active" else "Local Mode",
-                        color = StatusRidingGreen,
+                        text = if (isSignedIn) "Cloud sync active" else "Local mode",
+                        color = if (isSignedIn) StatusRidingGreen else TextTertiary,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium
                     )
@@ -557,109 +326,402 @@ fun WelcomeScreen(
                     Text(
                         text = userEmail ?: currentName,
                         color = TextTertiary,
-                        fontSize = 11.sp
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = 12.dp)
                     )
                 }
             }
         }
 
-        // Dialogs & sheets
-        if (selectedHistoryRideForDetails != null) {
-            RideDetailsDialog(
-                ride = selectedHistoryRideForDetails!!,
-                onDismiss = { selectedHistoryRideForDetails = null }
+        if (showProfileSheet) {
+            ProfileSheet(
+                currentName = currentName,
+                currentMotorcycle = currentMotorcycle,
+                onNameChange = onNameChange,
+                onMotorcycleChange = onMotorcycleChange,
+                isSignedIn = isSignedIn,
+                userEmail = userEmail,
+                onSignOut = {
+                    showProfileSheet = false
+                    guestMode = false
+                    onSignOutClick?.invoke()
+                },
+                onDismiss = { showProfileSheet = false }
+            )
+        }
+
+        if (showSavedPlacesSheet) {
+            SavedPlacesSheet(
+                places = savedPlaces,
+                onRemove = onRemoveSavedPlace,
+                onDismiss = { showSavedPlacesSheet = false }
             )
         }
 
         if (showHistorySheet) {
             RideHistorySheet(
                 rides = pastRides,
-                onDismiss = { showHistorySheet = false }
+                onDismiss = { showHistorySheet = false },
+                upcomingRide = if (hasActiveRide) activeRide else null
+            )
+        }
+
+        if (selectedHistoryRideForDetails != null) {
+            RideDetailsDialog(
+                ride = selectedHistoryRideForDetails!!,
+                onDismiss = { selectedHistoryRideForDetails = null }
             )
         }
     }
 }
 
-/**
- * Individual recent ride card — shows route, date, distance and duration.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Splash
+// ─────────────────────────────────────────────────────────────────────────────
+
 @Composable
-private fun RecentRideCard(
-    ride: CompletedRideEntity,
-    onClick: () -> Unit
+private fun SplashContent(
+    onGetStarted: () -> Unit,
+    onContinueAsGuest: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .clickable { onClick() }
-            .testTag("recent_ride_card_${ride.id}"),
-        color = SurfaceCard,
-        shape = RoundedCornerShape(14.dp),
-        tonalElevation = 2.dp
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(SlateDark900)
+            .testTag("splash_screen")
     ) {
-        Row(
+        // Original RideTogether artwork (the app's own scenic vector), faded
+        // into the product background rather than shown as a stock photo.
+        Image(
+            painter = painterResource(id = R.drawable.scenic_mountain_road),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .fillMaxHeight(0.62f)
+                .align(Alignment.TopCenter)
+        )
+
+        // Legibility scrim: dark at the top (status bar) and at the bottom
+        // (where the wordmark and the actions live).
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0f to SlateDark900.copy(alpha = 0.55f),
+                        0.30f to Color.Transparent,
+                        0.55f to SlateDark900.copy(alpha = 0.72f),
+                        0.72f to SlateDark900,
+                        1f to SlateDark900
+                    )
+                )
+        )
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 24.dp)
         ) {
-            // Route icon accent
+            Spacer(modifier = Modifier.weight(1f))
+
+            LogoMark(size = 64.dp)
+            Spacer(modifier = Modifier.height(RTSpacing.md))
+            Text(
+                text = "RideTogether",
+                color = TextPrimary,
+                fontSize = 34.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = (-1).sp
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Ride Together. Go Further.",
+                color = TextSecondary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium
+            )
+
+            Spacer(modifier = Modifier.height(RTSpacing.xxl))
+
+            PrimaryButton(
+                text = "Get Started",
+                onClick = onGetStarted,
+                testTag = "get_started_button"
+            )
+            Spacer(modifier = Modifier.height(RTSpacing.sm))
+            SecondaryButton(
+                text = "Continue as guest",
+                onClick = onContinueAsGuest,
+                testTag = "continue_as_guest_button"
+            )
+
+            Spacer(modifier = Modifier.height(RTSpacing.lg))
+        }
+    }
+}
+
+/** The RideTogether mark: an amber disc with the app's own motorcycle glyph. */
+@Composable
+fun LogoMark(size: androidx.compose.ui.unit.Dp) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(AmberPrimary),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = CustomIcons.MotorcycleLogo,
+            contentDescription = "RideTogether",
+            tint = Color(0xFF1A1205),
+            modifier = Modifier.size(size * 0.62f)
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Home pieces
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun ActiveRideCard(
+    ride: Ride,
+    riderCount: Int,
+    isCurrentUserInActiveRide: Boolean,
+    riderName: String,
+    onRejoin: () -> Unit
+) {
+    RTCard(
+        testTag = "active_ride_card",
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusChip(
+                text = if (ride.status == RideStatus.ACTIVE) "LIVE NOW" else "UPCOMING RIDE",
+                color = if (ride.status == RideStatus.ACTIVE) StatusRidingGreen else AmberPrimary
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            ButtonCircle(
+                icon = Icons.Default.KeyboardArrowRight,
+                onClick = onRejoin,
+                testTag = "rejoin_ride_button",
+                contentDescription = if (isCurrentUserInActiveRide) "Resume ride" else "Rejoin ride"
+            )
+        }
+        Spacer(modifier = Modifier.height(RTSpacing.sm))
+        Text(
+            text = ride.name,
+            color = TextPrimary,
+            fontSize = 19.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            text = formatRideStamp(ride.createdAtMs),
+            color = TextSecondary,
+            fontSize = 12.sp
+        )
+        // The auto-generated ride name is already the route, so the row would
+        // repeat it verbatim on a brand-new ride.
+        val routeLabel = "${ride.startLocationName} → ${ride.destinationName}"
+        if (routeLabel != ride.name) {
+            Spacer(modifier = Modifier.height(RTSpacing.sm))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Navigation,
+                    contentDescription = null,
+                    tint = AmberPrimary,
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = routeLabel,
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(RTSpacing.sm))
+        // Real riders only: the current rider, then a truthful count.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(SlateDark700),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = riderName.ifBlank { "R" }.take(1).uppercase(),
+                    color = AmberPrimary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = when {
+                    riderCount <= 1 -> "You"
+                    isCurrentUserInActiveRide -> "You + ${riderCount - 1} rider${if (riderCount == 2) "" else "s"}"
+                    else -> "$riderCount riders"
+                },
+                color = TextTertiary,
+                fontSize = 12.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun NoRideCard(onCreateRide: () -> Unit) {
+    RTCard(contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusChip(text = "PLAN A RIDE", color = AmberPrimary)
+            Spacer(modifier = Modifier.weight(1f))
+            ButtonCircle(
+                icon = Icons.Default.Add,
+                onClick = onCreateRide,
+                contentDescription = "Create a ride"
+            )
+        }
+        Spacer(modifier = Modifier.height(RTSpacing.sm))
+        Text(
+            text = "No ride planned",
+            color = TextPrimary,
+            fontSize = 19.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = "Pick a destination, invite your friends and ride together.",
+            color = TextSecondary,
+            fontSize = 13.sp
+        )
+    }
+}
+
+/** The circular amber action used on the ride card and in the reference. */
+@Composable
+private fun ButtonCircle(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    contentDescription: String,
+    testTag: String? = null
+) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .background(AmberPrimary)
+            .clickable(onClick = onClick)
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = Color(0xFF1A1205),
+            modifier = Modifier.size(22.dp)
+        )
+    }
+}
+
+@Composable
+private fun QuickAction(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    accent: Color,
+    onClick: () -> Unit,
+    testTag: String,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .height(96.dp)
+            .testTag(testTag)
+            .clip(RTShapes.card)
+            .clickable(onClick = onClick),
+        color = SlateDark800,
+        shape = RTShapes.card,
+        border = BorderStroke(1.dp, SlateDark500)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(accent.copy(alpha = 0.15f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = label,
+                color = TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+@Composable
+private fun DiscoverPlaceCard(place: SavedPlaceEntity, onClick: () -> Unit) {
+    RTCard(onClick = onClick, contentPadding = androidx.compose.foundation.layout.PaddingValues(14.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .background(AmberPrimary.copy(alpha = 0.12f)),
+                    .background(AmberPrimary.copy(alpha = 0.14f)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = Icons.Default.Navigation,
+                    imageVector = Icons.Default.BookmarkBorder,
                     contentDescription = null,
                     tint = AmberPrimary,
                     modifier = Modifier.size(20.dp)
                 )
             }
-
             Spacer(modifier = Modifier.width(12.dp))
-
-            // Route name and date/stats
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "${ride.startLocationName} → ${ride.destinationName}",
-                    color = Color.White,
+                    text = place.name ?: "Saved place",
+                    color = TextPrimary,
                     fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(3.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = formatRelativeDate(ride.completedAtMs),
-                        color = TextTertiary,
-                        fontSize = 12.sp
-                    )
-                    Text(
-                        text = " · ${ride.formattedDistance}",
-                        color = TextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    if (ride.formattedDuration.isNotBlank() && ride.formattedDuration != "--") {
-                        Text(
-                            text = " · ${ride.formattedDuration}",
-                            color = TextSecondary,
-                            fontSize = 12.sp
-                        )
-                    }
-                }
+                Text(
+                    text = "Saved place · ${place.type.lowercase().replace('_', ' ')}",
+                    color = TextTertiary,
+                    fontSize = 12.sp,
+                    maxLines = 1
+                )
             }
-
-            Spacer(modifier = Modifier.width(8.dp))
-
             Icon(
-                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = "View details",
+                imageVector = Icons.Default.KeyboardArrowRight,
+                contentDescription = null,
                 tint = TextTertiary,
                 modifier = Modifier.size(20.dp)
             )
@@ -667,13 +729,184 @@ private fun RecentRideCard(
     }
 }
 
-private fun formatRelativeDate(completedAtMs: Long): String {
-    val now = System.currentTimeMillis()
-    val diffDays = (now - completedAtMs) / (1000 * 60 * 60 * 24)
-    return when {
-        diffDays == 0L -> "Today"
-        diffDays == 1L -> "Yesterday"
-        diffDays < 7L -> "${diffDays}d ago"
-        else -> SimpleDateFormat("d MMM", Locale.getDefault()).format(Date(completedAtMs))
+@Composable
+private fun DiscoverRideCard(ride: CompletedRideEntity, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(132.dp)
+            .clip(RTShapes.card)
+            .clickable(onClick = onClick)
+    ) {
+        Image(
+            painter = painterResource(id = R.drawable.scenic_mountain_road),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize()
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0f to Color.Transparent,
+                        0.45f to SlateDark900.copy(alpha = 0.35f),
+                        1f to SlateDark900.copy(alpha = 0.92f)
+                    )
+                )
+        )
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(14.dp)
+        ) {
+            Text(
+                text = "YOUR RECENT ROUTE",
+                color = AmberPrimary,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.6.sp
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "${ride.startLocationName} → ${ride.destinationName}",
+                color = TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "${ride.formattedDistance} · ${formatRideStamp(ride.completedAtMs)}",
+                color = TextSecondary,
+                fontSize = 12.sp
+            )
+        }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Profile sheet
+// ─────────────────────────────────────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ProfileSheet(
+    currentName: String,
+    currentMotorcycle: String,
+    onNameChange: (String) -> Unit,
+    onMotorcycleChange: (String) -> Unit,
+    isSignedIn: Boolean,
+    userEmail: String?,
+    onSignOut: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var nameInput by remember { mutableStateOf(currentName) }
+    var bikeInput by remember { mutableStateOf(currentMotorcycle) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = SlateDark800) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .navigationBarsPadding()
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(AmberPrimary),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = currentName.ifBlank { "R" }.take(1).uppercase(),
+                        color = Color(0xFF1A1205),
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.width(14.dp))
+                Column {
+                    Text(
+                        text = currentName.ifBlank { "Rider" },
+                        color = TextPrimary,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = if (isSignedIn) (userEmail ?: "Signed in") else "Guest · local mode",
+                        color = TextTertiary,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(RTSpacing.lg))
+            Text("RIDER NAME", color = AmberPrimary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = nameInput,
+                onValueChange = { nameInput = it; onNameChange(it) },
+                leadingIcon = {
+                    Icon(imageVector = Icons.Default.Person, contentDescription = null, tint = AmberPrimary)
+                },
+                singleLine = true,
+                colors = profileFieldColors(),
+                shape = RTShapes.control,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("rider_name_input")
+            )
+
+            Spacer(modifier = Modifier.height(RTSpacing.md))
+            Text("MOTORCYCLE MODEL (OPTIONAL)", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = bikeInput,
+                onValueChange = { bikeInput = it; onMotorcycleChange(it) },
+                leadingIcon = {
+                    Icon(imageVector = Icons.Default.TwoWheeler, contentDescription = null, tint = AmberPrimary)
+                },
+                placeholder = { Text("e.g. Triumph Tiger 900", color = TextTertiary) },
+                singleLine = true,
+                colors = profileFieldColors(),
+                shape = RTShapes.control,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("motorcycle_model_input")
+            )
+
+            Spacer(modifier = Modifier.height(RTSpacing.lg))
+            PrimaryButton(text = "Done", onClick = onDismiss, testTag = "edit_profile_button")
+
+            AnimatedVisibility(visible = isSignedIn) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    TextButton(onClick = onSignOut) {
+                        Text("Sign out", color = com.example.ui.theme.StatusEmergencyRed, fontSize = 13.sp)
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(RTSpacing.lg))
+        }
+    }
+}
+
+@Composable
+private fun profileFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedBorderColor = AmberPrimary,
+    unfocusedBorderColor = SlateDark500,
+    focusedTextColor = TextPrimary,
+    unfocusedTextColor = TextPrimary,
+    cursorColor = AmberPrimary
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Formatting
+// ─────────────────────────────────────────────────────────────────────────────
+
+private fun formatRideStamp(atMs: Long): String =
+    SimpleDateFormat("EEE, d MMM · h:mm a", Locale.getDefault()).format(Date(atMs))

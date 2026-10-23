@@ -2,6 +2,7 @@ package com.example.data.location
 
 import com.example.data.map.TileMath
 import com.example.data.model.LatLng
+import com.example.data.model.ManeuverType
 import com.example.data.model.NavigationStep
 import com.example.data.model.RouteLeg
 import com.example.data.model.RouteOption
@@ -362,30 +363,26 @@ class OsrmRoutingService : RouteProvider {
             if (rawSteps != null) {
                 for (j in 0 until rawSteps.length()) {
                     val stepObj = rawSteps.getJSONObject(j)
-                    val stepDist = stepObj.optDouble("distance", 0.0)
-                    val stepDuration = stepObj.optDouble("duration", 0.0)
-                    val roadName = stepObj.optString("name", "Road")
-                    val maneuverObj = stepObj.optJSONObject("maneuver")
-                    val manType = maneuverObj?.optString("type", "turn") ?: "turn"
-                    val manModifier = maneuverObj?.optString("modifier", "straight") ?: "straight"
-                    val instruction = buildInstruction(manType, manModifier, roadName)
+                    val parsed = OsrmStepParser.parse(stepObj)
                     // Allow the caller to disambiguate "Arrive at destination"
-                    // with the actual stop name for waypooint-leg arrivals.
-                    val finalInstruction = if (manType == "arrive" && k < legsArray.length() - 1) {
+                    // with the actual stop name for waypoint-leg arrivals.
+                    val finalInstruction = if (parsed.maneuver == ManeuverType.ARRIVE && k < legsArray.length() - 1) {
                         buildArrivalInstruction(k + 1, stopNames)
-                    } else if (manType == "arrive") {
-                        "Arrive at destination"
                     } else {
-                        instruction
+                        parsed.instruction
                     }
                     legSteps.add(
                         NavigationStep(
                             instruction = finalInstruction,
-                            roadName = roadName.ifBlank { "Main Road" },
-                            distanceMeters = stepDist,
-                            durationSeconds = stepDuration,
-                            maneuverType = manType,
-                            modifier = manModifier
+                            roadName = parsed.roadName,
+                            distanceMeters = parsed.distanceMeters,
+                            durationSeconds = parsed.durationSeconds,
+                            maneuverType = parsed.engineType,
+                            modifier = parsed.engineModifier,
+                            maneuver = parsed.maneuver,
+                            exitNumber = parsed.exitNumber,
+                            turnAngleDegrees = parsed.turnAngleDegrees,
+                            lanes = parsed.lanes
                         )
                     )
                 }
@@ -435,19 +432,6 @@ class OsrmRoutingService : RouteProvider {
     private fun buildArrivalInstruction(nextStopIndex: Int, stopNames: List<String>): String {
         val name = stopNames.getOrNull(nextStopIndex)
         return if (!name.isNullOrBlank()) "Arrive at stop: $name" else "Arrive at intermediate stop ${nextStopIndex}"
-    }
-
-    private fun buildInstruction(type: String, modifier: String, road: String): String {
-        val roadSuffix = if (road.isNotBlank()) " onto $road" else ""
-        return when (type) {
-            "depart" -> "Head $modifier$roadSuffix"
-            "arrive" -> "Arrive at destination"
-            "turn" -> "Turn $modifier$roadSuffix"
-            "new name" -> "Continue$roadSuffix"
-            "roundabout", "rotary" -> "Take roundabout exit$roadSuffix"
-            "fork" -> "Take $modifier fork$roadSuffix"
-            else -> "Continue $modifier$roadSuffix"
-        }
     }
 
     private fun generateFallbackRoute(start: LatLng, dest: LatLng): RouteResult {

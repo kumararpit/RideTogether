@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -89,52 +90,78 @@ fun RouteOptionSelector(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 8.dp)
-                    .clip(RoundedCornerShape(12.dp))
+                    .clip(RoundedCornerShape(14.dp))
                     .clickable(enabled = enabled) { onSelect(option.index) }
                     .testTag("route_option_${option.index}"),
                 color = if (isSelected) SlateDark800 else SlateDark900,
-                shape = RoundedCornerShape(12.dp),
+                shape = RoundedCornerShape(14.dp),
                 border = BorderStroke(
-                    width = if (isSelected) 2.dp else 1.dp,
+                    width = if (isSelected) 1.5.dp else 1.dp,
                     color = if (isSelected) AmberPrimary else SlateDark800
                 )
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = if (isSelected) Icons.Filled.CheckCircle else Icons.Filled.Route,
-                        contentDescription = null,
-                        tint = if (isSelected) AmberPrimary else TextSecondary,
-                        modifier = Modifier.width(18.dp)
-                    )
-                    Spacer(Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "${option.formattedDistance} • ${option.formattedDuration}",
-                            color = TextPrimary,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        if (isBest) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = "BEST ROUTE",
-                                color = AmberPrimary,
-                                fontSize = 10.sp,
+                                text = option.formattedDuration,
+                                color = TextPrimary,
+                                fontSize = 19.sp,
                                 fontWeight = FontWeight.Bold
                             )
+                            Spacer(Modifier.width(8.dp))
+                            if (isBest) {
+                                StatusChip(
+                                    text = if (options.size > 1) "Fastest" else "Route",
+                                    color = com.example.ui.theme.StatusRidingGreen
+                                )
+                            }
                         }
-                    }
-                    if (isSelected) {
+                        Spacer(Modifier.height(1.dp))
                         Text(
-                            text = "SELECTED",
-                            color = AmberPrimary,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold
+                            text = option.formattedDistance,
+                            color = TextSecondary,
+                            fontSize = 12.sp
                         )
+                    }
+                    // The selection affordance stays visible whether or not the
+                    // card is selected, so the list reads as a choice.
+                    Box(
+                        modifier = Modifier
+                            .width(20.dp)
+                            .height(20.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(if (isSelected) AmberPrimary else SlateDark900)
+                            .then(
+                                if (isSelected) Modifier
+                                else Modifier.background(
+                                    color = SlateDark900,
+                                    shape = RoundedCornerShape(50)
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isSelected) {
+                            Icon(
+                                imageVector = Icons.Filled.CheckCircle,
+                                contentDescription = "Selected",
+                                tint = SlateDark900,
+                                modifier = Modifier.width(20.dp).height(20.dp)
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .width(16.dp)
+                                    .height(16.dp)
+                                    .clip(RoundedCornerShape(50))
+                                    .background(SlateDark900)
+                            )
+                        }
                     }
                 }
             }

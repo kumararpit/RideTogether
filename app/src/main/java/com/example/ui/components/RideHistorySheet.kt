@@ -1,8 +1,9 @@
 package com.example.ui.components
 
-import android.content.Context
 import android.content.Intent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -18,8 +20,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Navigation
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -31,225 +37,319 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.foundation.clickable
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.db.CompletedRideEntity
+import com.example.data.model.Ride
 import com.example.ui.theme.AmberPrimary
+import com.example.ui.theme.SlateDark500
+import com.example.ui.theme.SlateDark700
 import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
-import com.example.ui.theme.StatusEmergencyRed
 import com.example.ui.theme.StatusRidingGreen
-import com.example.ui.theme.SurfaceCard
+import com.example.ui.theme.TextPrimary
+import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.TextTertiary
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-import com.example.ui.theme.CustomIcons
-
+/**
+ * Screen 14 of the reference: My Rides.
+ *
+ * Two truthful tabs. "Completed" is the local ride history; "Upcoming" is the
+ * one ride this device is actually part of, or an empty state when there is
+ * none. No ride is invented to fill the tab.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RideHistorySheet(
     rides: List<CompletedRideEntity>,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    upcomingRide: Ride? = null
 ) {
-    val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var selectedDetailRide by remember { mutableStateOf<CompletedRideEntity?>(null) }
+    var tab by rememberSaveable { mutableIntStateOf(0) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = SlateDark900,
-        dragHandle = {
-            Box(
-                modifier = Modifier
-                    .padding(vertical = 10.dp)
-                    .width(40.dp)
-                    .height(4.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(Color.Gray.copy(alpha = 0.5f))
-            )
-        },
+        containerColor = SlateDark800,
         modifier = Modifier.testTag("ride_history_sheet")
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 8.dp)
+                .padding(horizontal = 20.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.History,
-                        contentDescription = "History",
-                        tint = AmberPrimary,
-                        modifier = Modifier.size(24.dp)
+                Column {
+                    Text(
+                        text = "My Rides",
+                        color = TextPrimary,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold
                     )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column {
-                        Text(
-                            text = "Ride History",
-                            color = Color.White,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        val count = rides.size
-                        Text(
-                            text = if (count == 1) "1 completed ride" else "$count completed rides",
-                            color = Color(0xFF90A4AE),
-                            fontSize = 12.sp
-                        )
-                    }
+                    Text(
+                        text = when (rides.size) {
+                            0 -> "No completed rides yet"
+                            1 -> "1 completed ride"
+                            else -> "${rides.size} completed rides"
+                        },
+                        color = TextTertiary,
+                        fontSize = 12.sp
+                    )
                 }
-
                 IconButton(
                     onClick = onDismiss,
-                    modifier = Modifier.testTag("close_history_sheet")
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("close_history_sheet")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
-                        contentDescription = "Close",
-                        tint = Color.White
+                        contentDescription = "Close ride history",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            if (rides.isEmpty()) {
-                Surface(
-                    color = SurfaceCard,
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
+            // Tabs
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                HistoryTab(
+                    label = "Completed",
+                    selected = tab == 0,
+                    onClick = { tab = 0 },
+                    testTag = "history_tab_completed"
+                )
+                HistoryTab(
+                    label = "Upcoming",
+                    selected = tab == 1,
+                    onClick = { tab = 1 },
+                    testTag = "history_tab_upcoming"
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            if (tab == 0) {
+                if (rides.isEmpty()) {
+                    EmptyState(
+                        title = "No rides yet",
+                        message = "Completed rides are saved here with their distance, duration and group.",
+                        icon = Icons.Default.History
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                } else {
+                    LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                            .heightIn(max = 460.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Icon(
-                            imageVector = CustomIcons.EmptyHistory,
-                            contentDescription = "No rides",
-                            tint = Color(0xFF78909C),
-                            modifier = Modifier.size(64.dp)
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "No Recorded Rides Yet",
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Complete your first group convoy to see recorded metrics and ride summaries here.",
-                            color = Color(0xFF90A4AE),
-                            fontSize = 13.sp,
-                            textAlign = TextAlign.Center
-                        )
+                        items(rides, key = { it.id }) { item ->
+                            RideHistoryCard(
+                                ride = item,
+                                onClick = { selectedDetailRide = item }
+                            )
+                        }
+                        item { Spacer(modifier = Modifier.height(24.dp)) }
                     }
                 }
             } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(380.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    items(rides, key = { it.id }) { item ->
-                        Surface(
-                            color = SurfaceCard,
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .clickable { selectedDetailRide = item }
-                                .testTag("history_item_${item.id}")
-                        ) {
-                            Column(modifier = Modifier.padding(14.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = item.rideName,
-                                        color = Color.White,
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    val dateStr = SimpleDateFormat("MMM d, yyyy", Locale.getDefault())
-                                        .format(Date(item.completedAtMs))
-                                    Text(
-                                        text = dateStr,
-                                        color = Color(0xFF90A4AE),
-                                        fontSize = 11.sp
-                                    )
-                                }
-
-                                Text(
-                                    text = "${item.startLocationName} → ${item.destinationName}",
-                                    color = AmberPrimary,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-
-                                Spacer(modifier = Modifier.height(8.dp))
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "🛣️ ${item.formattedDistance} • ⏱️ ${item.formattedDuration} • ${item.riderCount} rider(s)",
-                                        color = Color(0xFFCFD8DC),
-                                        fontSize = 12.sp
-                                    )
-
-                                    OutlinedButton(
-                                        onClick = { selectedDetailRide = item },
-                                        modifier = Modifier.height(34.dp),
-                                        shape = RoundedCornerShape(8.dp),
-                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberPrimary)
-                                    ) {
-                                        Text(text = "Details", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                    }
-                                }
-                            }
+                if (upcomingRide == null) {
+                    EmptyState(
+                        title = "No upcoming ride",
+                        message = "Create a ride or join one with an invite code and it will wait here.",
+                        icon = Icons.Default.Navigation
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                } else {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = SlateDark800,
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, SlateDark500)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            StatusChip(
+                                text = if (upcomingRide.status == com.example.data.model.RideStatus.ACTIVE) "LIVE NOW" else "UPCOMING",
+                                color = if (upcomingRide.status == com.example.data.model.RideStatus.ACTIVE) StatusRidingGreen else AmberPrimary
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = upcomingRide.name,
+                                color = TextPrimary,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "${upcomingRide.startLocationName} → ${upcomingRide.destinationName}",
+                                color = TextSecondary,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "Invite code ${upcomingRide.inviteCode} · ${upcomingRide.members.size} rider${if (upcomingRide.members.size == 1) "" else "s"}",
+                                color = TextTertiary,
+                                fontSize = 11.sp
+                            )
                         }
                     }
+                    Spacer(modifier = Modifier.height(20.dp))
                 }
             }
-
-            Spacer(modifier = Modifier.height(16.dp))
         }
 
-        if (selectedDetailRide != null) {
+        selectedDetailRide?.let { ride ->
             RideDetailsDialog(
-                ride = selectedDetailRide!!,
+                ride = ride,
                 onDismiss = { selectedDetailRide = null }
             )
         }
+    }
+}
+
+@Composable
+private fun HistoryTab(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    testTag: String
+) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (selected) AmberPrimary else SlateDark700)
+            .clickable(onClick = onClick)
+            .heightIn(min = 36.dp)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            color = if (selected) Color(0xFF1A1205) else TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+@Composable
+private fun RideHistoryCard(
+    ride: CompletedRideEntity,
+    onClick: () -> Unit
+) {
+    val dateStr = SimpleDateFormat("EEE, d MMM · h:mm a", Locale.getDefault())
+        .format(Date(ride.completedAtMs))
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .testTag("history_item_${ride.id}"),
+        color = SlateDark800,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, SlateDark500)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(AmberPrimary.copy(alpha = 0.13f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.History,
+                        contentDescription = null,
+                        tint = AmberPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = ride.rideName,
+                        color = TextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = dateStr,
+                        color = TextTertiary,
+                        fontSize = 11.sp
+                    )
+                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = TextTertiary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "${ride.startLocationName} → ${ride.destinationName}",
+                color = TextSecondary,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                HistoryMetric(Icons.Default.Navigation, ride.formattedDistance)
+                HistoryMetric(Icons.Default.Schedule, ride.formattedDuration)
+                HistoryMetric(Icons.Default.Group, "${ride.riderCount} rider${if (ride.riderCount == 1) "" else "s"}")
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoryMetric(icon: ImageVector, text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = TextTertiary,
+            modifier = Modifier.size(13.dp)
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(text = text, color = TextSecondary, fontSize = 11.sp)
     }
 }
 
@@ -269,13 +369,13 @@ fun RideDetailsDialog(
             Column {
                 Text(
                     text = ride.rideName,
-                    color = Color.White,
+                    color = TextPrimary,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
                     text = dateStr,
-                    color = Color(0xFF90A4AE),
+                    color = TextTertiary,
                     fontSize = 12.sp
                 )
             }
@@ -286,7 +386,7 @@ fun RideDetailsDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Surface(
-                    color = SurfaceCard,
+                    color = SlateDark800,
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -295,7 +395,7 @@ fun RideDetailsDialog(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "${ride.startLocationName} → ${ride.destinationName}",
-                            color = Color.White,
+                            color = TextPrimary,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -306,55 +406,28 @@ fun RideDetailsDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Surface(
-                        color = SurfaceCard,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text("DISTANCE", color = Color(0xFF90A4AE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                            Text(text = ride.formattedDistance, color = AmberPrimary, fontSize = 16.sp, fontWeight = FontWeight.Black)
-                        }
-                    }
-
-                    Surface(
-                        color = SurfaceCard,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text("DURATION", color = Color(0xFF90A4AE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                            Text(text = ride.formattedDuration, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Black)
-                        }
-                    }
+                    DetailCell("DISTANCE", ride.formattedDistance, Modifier.weight(1f), AmberPrimary)
+                    DetailCell("DURATION", ride.formattedDuration, Modifier.weight(1f), TextPrimary)
                 }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Surface(
-                        color = SurfaceCard,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text("AVG SPEED", color = Color(0xFF90A4AE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                            val speedText = if (ride.avgSpeedKmh > 0) String.format(Locale.getDefault(), "%.1f km/h", ride.avgSpeedKmh) else "N/A"
-                            Text(text = speedText, color = StatusRidingGreen, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-
-                    Surface(
-                        color = SurfaceCard,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text("CONVOY SIZE", color = Color(0xFF90A4AE), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                            Text(text = "${ride.riderCount} rider(s)", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
+                    DetailCell(
+                        label = "AVG SPEED",
+                        value = if (ride.avgSpeedKmh > 0) {
+                            String.format(Locale.getDefault(), "%.1f km/h", ride.avgSpeedKmh)
+                        } else "Not measured",
+                        modifier = Modifier.weight(1f),
+                        valueColor = StatusRidingGreen
+                    )
+                    DetailCell(
+                        label = "RIDERS",
+                        value = "${ride.riderCount}",
+                        modifier = Modifier.weight(1f),
+                        valueColor = TextPrimary
+                    )
                 }
             }
         },
@@ -362,18 +435,22 @@ fun RideDetailsDialog(
             Button(
                 onClick = {
                     val shareText = "Motorcycle Ride Summary: ${ride.rideName}\n" +
-                            "Route: ${ride.startLocationName} → ${ride.destinationName}\n" +
-                            "Distance: ${ride.formattedDistance}\n" +
-                            "Duration: ${ride.formattedDuration}\n" +
-                            "Pack: ${ride.riderCount} riders\n" +
-                            "Tracked on RideTogether"
+                        "Route: ${ride.startLocationName} → ${ride.destinationName}\n" +
+                        "Distance: ${ride.formattedDistance}\n" +
+                        "Duration: ${ride.formattedDuration}\n" +
+                        "Pack: ${ride.riderCount} riders\n" +
+                        "Recorded on RideTogether"
                     val intent = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
                         putExtra(Intent.EXTRA_TEXT, shareText)
                     }
-                    context.startActivity(Intent.createChooser(intent, "Share Ride Summary"))
+                    context.startActivity(Intent.createChooser(intent, "Share ride summary"))
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = AmberPrimary, contentColor = Color.Black)
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AmberPrimary,
+                    contentColor = Color(0xFF1A1205)
+                ),
+                shape = RoundedCornerShape(12.dp)
             ) {
                 Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))
@@ -382,8 +459,27 @@ fun RideDetailsDialog(
         },
         dismissButton = {
             OutlinedButton(onClick = onDismiss) {
-                Text("Close", color = Color.White)
+                Text("Close", color = TextPrimary)
             }
         }
     )
+}
+
+@Composable
+private fun DetailCell(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    valueColor: Color
+) {
+    Surface(
+        color = SlateDark800,
+        shape = RoundedCornerShape(12.dp),
+        modifier = modifier
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Text(label, color = TextTertiary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Text(text = value, color = valueColor, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+        }
+    }
 }

@@ -15,9 +15,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         com.example.data.amenities.AmenityEntity::class,
         com.example.data.amenities.AmenityQueryCacheEntity::class,
         ActiveRideTelemetryEntity::class,
-        RecentPlaceEntity::class
+        RecentPlaceEntity::class,
+        SavedPlaceEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 @TypeConverters(com.example.data.amenities.AmenityTypeConverter::class)
@@ -28,6 +29,7 @@ abstract class RideDatabase : RoomDatabase() {
     abstract fun amenityDao(): com.example.data.amenities.AmenityDao
     abstract fun activeRideTelemetryDao(): ActiveRideTelemetryDao
     abstract fun recentPlaceDao(): RecentPlaceDao
+    abstract fun savedPlaceDao(): SavedPlaceDao
 
     companion object {
         @Volatile
@@ -95,6 +97,23 @@ abstract class RideDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Additive migration: the rider's saved places.
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `saved_places` (
+                        `osmId` INTEGER NOT NULL,
+                        `name` TEXT,
+                        `type` TEXT NOT NULL,
+                        `lat` REAL NOT NULL,
+                        `lon` REAL NOT NULL,
+                        `savedAtMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`osmId`)
+                    )
+                """.trimIndent())
+            }
+        }
+
         fun getInstance(context: Context): RideDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -102,7 +121,7 @@ abstract class RideDatabase : RoomDatabase() {
                     RideDatabase::class.java,
                     "ridetogether.db"
                 )
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

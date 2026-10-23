@@ -7,6 +7,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddLocationAlt
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Flag
@@ -34,6 +36,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import com.example.data.model.LatLng
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -49,7 +53,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.amenities.AmenityEntity
 import com.example.ui.components.ActiveSosBar
+import com.example.ui.components.AddStopConfirmSheet
+import com.example.ui.components.EndRideConfirmDialog
+import com.example.ui.components.NavigationMenuSheet
+import com.example.ui.components.NearbyPlacesSheet
+import com.example.ui.components.ReportIssueDialog
+import com.example.ui.components.UpdatedRouteSheet
 import com.example.ui.components.NavigationTripHud
 import com.example.ui.components.QuickMessageSheet
 import com.example.ui.components.RecentMessageToast
@@ -60,6 +71,7 @@ import com.example.ui.components.SosAlertBanner
 import com.example.ui.components.SosConfirmDialog
 import com.example.ui.components.TurnByTurnNavHeader
 import com.example.ui.theme.AmberPrimary
+import com.example.ui.theme.SlateDark900
 import com.example.ui.theme.StatusRidingGreen
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.TextTertiary
@@ -69,7 +81,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
 
-private val CardBorderColor = Color(0xFF253248)
+private val CardBorderColor = com.example.ui.theme.SlateDark500
 
 /** Tabular figures keep live-updating numeric readouts from jittering horizontally. */
 private val TabularNumericStyle = androidx.compose.ui.text.TextStyle(fontFeatureSettings = "tnum")
@@ -88,6 +100,7 @@ fun LiveRideScreen(
     // Navigation & Routing states
     val navProgress by viewModel.navEngine.progress.collectAsState()
     val routeResult by viewModel.routeResult.collectAsState()
+    val routePlanStops by viewModel.routePlanStops.collectAsState()
     val isRerouting by viewModel.isRerouting.collectAsState()
     val isFollowMode by viewModel.isFollowRiderMode.collectAsState()
     val currentStep = viewModel.navEngine.getCurrentStep()
@@ -121,6 +134,42 @@ fun LiveRideScreen(
         amenities.filter { it.type in visibleCategories }
     }
 
+    // A cluster the rider tapped stays open: its members are drawn as single
+    // markers until the rider zooms or the selection is cleared.
+    var expandedAmenityIds by remember { mutableStateOf(setOf<Long>()) }
+    val amenityStopMessage by viewModel.amenityStopMessage.collectAsState()
+    val amenityDetourSeconds by viewModel.amenityDetourSeconds.collectAsState()
+    val isEstimatingAmenityDetour by viewModel.isEstimatingAmenityDetour.collectAsState()
+    val savedAmenityIds by viewModel.savedAmenityIds.collectAsState()
+    // The place the rider asked to see ("Show on map").
+    var centerOnPlace by remember { mutableStateOf<LatLng?>(null) }
+    // The list of places the ride can pass through ("Add a stop").
+    var showAddStopSheet by remember { mutableStateOf(false) }
+    val candidateDetours by viewModel.amenityCandidateDetours.collectAsState()
+    val amenityDetourMeters by viewModel.amenityDetourMeters.collectAsState()
+    val addedStopSummary by viewModel.addedStopSummary.collectAsState()
+    val isAudioMuted by viewModel.navAudioGuidance.isMuted.collectAsState()
+
+    // Screen 7 — the navigation menu, and the sheets it opens.
+    var showNavMenu by remember { mutableStateOf(false) }
+    var showNearbyPlaces by remember { mutableStateOf(false) }
+    var showEndRideConfirm by remember { mutableStateOf(false) }
+    var showReportIssue by remember { mutableStateOf(false) }
+    var overviewRequestId by remember { mutableStateOf(0) }
+
+    // Screens 10 and 11 — the stop confirmation and the updated route.
+    var addStopCandidate by remember { mutableStateOf<AmenityEntity?>(null) }
+    var addStopEstimateSeconds by remember { mutableStateOf<Double?>(null) }
+    var addStopEstimateMeters by remember { mutableStateOf<Double?>(null) }
+
+    LaunchedEffect(Unit) { viewModel.loadSavedAmenities() }
+    LaunchedEffect(amenityStopMessage) {
+        if (amenityStopMessage != null) {
+            delay(4000)
+            viewModel.clearAmenityStopMessage()
+        }
+    }
+
     // Bottom action bar (Control | Chat | SOS) is permanently docked during an active
     // ride so one-tap SOS/Chat is always reachable with riding gloves.
     var isBottomActionBarVisible by remember { mutableStateOf(true) }
@@ -141,6 +190,7 @@ fun LiveRideScreen(
         RideMapCanvas(
             route = viewModel.getRoutePoints(),
             routeLegStartIndices = viewModel.getRouteLegStartIndices(),
+            routeStops = routePlanStops,
             members = members,
             selectedRider = selectedRider,
             onSelectRider = {
@@ -150,19 +200,35 @@ fun LiveRideScreen(
             isFollowRiderMode = isFollowMode,
             onFollowRiderChange = { viewModel.setFollowRiderMode(it) },
             distanceToNextManeuverMeters = navProgress.distanceToNextManeuverMeters,
-            topInsetDp = 116.dp,
-            bottomInsetDp = 180.dp, // full telemetry card + permanently docked action bar
+            topInsetDp = 188.dp, // guidance card (distance + instruction + road + next step) + lane strip
+            bottomInsetDp = 152.dp, // compact trip bar + docked action bar
             amenities = visibleAmenities,
             selectedAmenity = selectedAmenity,
             onSelectAmenity = {
                 viewModel.selectAmenity(it)
                 if (it != null && isBottomActionBarVisible) scheduleAutoHide()
             },
+            expandedAmenityIds = expandedAmenityIds,
+            onExpandAmenityCluster = { memberIds ->
+                expandedAmenityIds = expandedAmenityIds + memberIds
+            },
+            // The price of the selected place as a stop, shown on its marker.
+            selectedAmenityDetourSeconds = amenityDetourSeconds,
+            // "Show on map": the camera centres on the place the rider asked
+            // to see.
+            centerOnPlace = centerOnPlace,
+            // "Route overview" from the navigation menu.
+            overviewRequestId = overviewRequestId,
             onViewportChanged = { minLat, maxLat, minLon, maxLon ->
                 viewModel.onViewportChanged(minLat, maxLat, minLon, maxLon)
             },
             initialStartLocation = currentRide?.startLocation,
             onMapTapped = { toggleActionBar() },
+            // Remaining-route styling: the portion ahead of the rider's current
+            // position is drawn in RouteBlue on a dimmer casing, so the unridden
+            // route reads as "still to go" (reference: TrafficColoringProto /
+            // PolylineColorInterval per-segment coloring + remaining-distance dimming).
+            remainingFromIndex = navProgress.currentSegmentIndex,
             // Task 18 — Automatic day/night map appearance from the single theme owner.
             mapLighting = viewModel.mapLighting.collectAsState().value,
             allowThemeControl = true,
@@ -178,7 +244,6 @@ fun LiveRideScreen(
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
         ) {
-            val isAudioMuted by viewModel.navAudioGuidance.isMuted.collectAsState()
             TurnByTurnNavHeader(
                 currentStep = currentStep,
                 nextStep = nextStep,
@@ -540,6 +605,7 @@ fun LiveRideScreen(
                 totalTripDistanceAndDuration = totalTripStr,
                 isFollowMode = isFollowMode,
                 onToggleFollowMode = { viewModel.toggleFollowRiderMode() },
+                onEndNavigation = { showEndRideConfirm = true },
                 modifier = Modifier
             )
 
@@ -568,28 +634,28 @@ fun LiveRideScreen(
                         // Controls button
                         Button(
                             onClick = {
-                                scheduleAutoHide()
-                                viewModel.openRiderListSheet(true)
+                                showNavMenu = true
                             },
                             modifier = Modifier
-                                .weight(1.1f)
+                                .weight(1f)
                                 .height(52.dp)
-                                .testTag("open_riders_button"),
+                                .testTag("open_nav_menu_button"),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Color(0xFF1F2836),
                                 contentColor = Color.White
                             ),
-                            shape = RoundedCornerShape(16.dp)
+                            shape = RoundedCornerShape(16.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Tune,
-                                contentDescription = "Ride Controls",
+                                contentDescription = "Navigation menu",
                                 tint = Color.White,
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Controls",
+                                text = "Menu",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1
@@ -610,7 +676,8 @@ fun LiveRideScreen(
                                 containerColor = Color(0xFF1F2836),
                                 contentColor = Color.White
                             ),
-                            shape = RoundedCornerShape(16.dp)
+                            shape = RoundedCornerShape(16.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Chat,
@@ -641,7 +708,8 @@ fun LiveRideScreen(
                                 containerColor = Color(0xFFF04452),
                                 contentColor = Color.White
                             ),
-                            shape = RoundedCornerShape(16.dp)
+                            shape = RoundedCornerShape(16.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Warning,
@@ -685,14 +753,238 @@ fun LiveRideScreen(
             )
         }
 
+        // The list of places the ride can pass through.
+        if (showAddStopSheet) {
+            val candidates = remember(visibleAmenities, currentUser?.location) {
+                visibleAmenities.sortedBy { amenity ->
+                    val r = currentUser?.location ?: return@sortedBy Double.MAX_VALUE
+                    val results = FloatArray(1)
+                    android.location.Location.distanceBetween(
+                        r.latitude, r.longitude, amenity.lat, amenity.lon, results
+                    )
+                    results[0].toDouble()
+                }
+            }
+            LaunchedEffect(showAddStopSheet) {
+                viewModel.estimateCandidateDetours(candidates)
+            }
+            com.example.ui.components.AddStopCandidatesSheet(
+                candidates = candidates,
+                riderLocation = currentUser?.location,
+                detourSecondsById = candidateDetours,
+                onSelect = { amenity ->
+                    showAddStopSheet = false
+                    viewModel.selectAmenity(amenity)
+                },
+                onDismiss = { showAddStopSheet = false }
+            )
+        }
+
+        // The entry point of the add-stop flow: the places on the map that the
+        // ride can pass through.
+        Surface(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 16.dp, bottom = 312.dp)
+                .clickable {
+                    showAddStopSheet = true
+                }
+                .testTag("add_stop_button"),
+            color = Color(0xFF101318),
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, CardBorderColor)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = androidx.compose.material.icons.Icons.Default.AddLocationAlt,
+                    contentDescription = null,
+                    tint = AmberPrimary,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Add a stop",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+
         if (selectedAmenity != null) {
             com.example.ui.components.AmenityDetailsSheet(
                 amenity = selectedAmenity!!,
                 riderLocation = currentUser?.location,
+                onAddAsStop = {
+                    val place = selectedAmenity
+                    if (place != null) {
+                        // Capture the estimate before the details sheet closes:
+                        // the confirmation sheet shows the same measured price.
+                        addStopCandidate = place
+                        addStopEstimateSeconds = amenityDetourSeconds
+                        addStopEstimateMeters = amenityDetourMeters
+                        viewModel.selectAmenity(null)
+                    }
+                },
+                onDirections = { viewModel.routeToSelectedAmenity() },
+                onToggleSave = { viewModel.toggleSavedAmenity(selectedAmenity!!) },
+                onShowOnMap = {
+                    centerOnPlace = LatLng(selectedAmenity!!.lat, selectedAmenity!!.lon)
+                },
+                detourSeconds = amenityDetourSeconds,
+                isEstimatingDetour = isEstimatingAmenityDetour,
+                isSaved = selectedAmenity!!.osmId in savedAmenityIds,
                 onDismiss = {
                     viewModel.selectAmenity(null)
                     if (isBottomActionBarVisible) scheduleAutoHide()
                 }
+            )
+        }
+
+        // The outcome of "add this place as a stop" — shown over the map.
+        amenityStopMessage?.let { message ->
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 132.dp, start = 16.dp, end = 16.dp)
+                    .testTag("amenity_stop_message"),
+                color = SlateDark900,
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, Color(0xFF253248))
+            ) {
+                Text(
+                    text = message,
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                )
+            }
+        }
+
+        // The navigation menu (screen 7 of the reference).
+        if (showNavMenu) {
+            val isLeader = ride?.leaderId != null && (
+                ride?.leaderId == currentUser?.id ||
+                    currentUser?.role == com.example.data.model.RideRole.LEADER
+                )
+            NavigationMenuSheet(
+                isAudioMuted = isAudioMuted,
+                onToggleAudioMute = { viewModel.toggleAudioMute() },
+                onAddStop = {
+                    showNavMenu = false
+                    showAddStopSheet = true
+                },
+                onNearbyPlaces = {
+                    showNavMenu = false
+                    showNearbyPlaces = true
+                },
+                onRouteOverview = {
+                    showNavMenu = false
+                    overviewRequestId += 1
+                },
+                onGroupRide = {
+                    showNavMenu = false
+                    viewModel.openRiderListSheet(true)
+                },
+                onReportIssue = {
+                    showNavMenu = false
+                    showReportIssue = true
+                },
+                routeStops = viewModel.routePlanStops.collectAsState().value,
+                onRemoveStop = { stopId -> viewModel.removeRouteStop(stopId) },
+                onEndRide = {
+                    showNavMenu = false
+                    showEndRideConfirm = true
+                },
+                endRideLabel = if (isLeader) "End ride" else "Leave ride",
+                onDismiss = { showNavMenu = false }
+            )
+        }
+
+        // Nearby places along the route (screen 8).
+        if (showNearbyPlaces) {
+            val priced = remember(visibleAmenities, currentUser?.location) {
+                visibleAmenities.sortedBy { amenity ->
+                    val r = currentUser?.location ?: return@sortedBy Double.MAX_VALUE
+                    val results = FloatArray(1)
+                    android.location.Location.distanceBetween(
+                        r.latitude, r.longitude, amenity.lat, amenity.lon, results
+                    )
+                    results[0].toDouble()
+                }
+            }
+            LaunchedEffect(showNearbyPlaces) { viewModel.estimateCandidateDetours(priced) }
+            NearbyPlacesSheet(
+                amenities = visibleAmenities,
+                riderLocation = currentUser?.location,
+                detourSecondsById = candidateDetours,
+                onSelect = { amenity ->
+                    showNearbyPlaces = false
+                    viewModel.selectAmenity(amenity)
+                },
+                onDismiss = { showNearbyPlaces = false }
+            )
+        }
+
+        // The stop confirmation (screen 10), then the updated route (screen 11).
+        addStopCandidate?.let { candidate ->
+            AddStopConfirmSheet(
+                amenityName = candidate.name?.takeIf { it.isNotBlank() } ?: "This place",
+                route = viewModel.getRoutePoints(),
+                rider = currentUser?.location,
+                candidate = LatLng(candidate.lat, candidate.lon),
+                destination = ride?.destinationLocation,
+                detourSeconds = addStopEstimateSeconds,
+                detourMeters = addStopEstimateMeters,
+                isCommitting = isRerouting,
+                onCancel = { addStopCandidate = null },
+                onConfirm = {
+                    viewModel.addAmenityAsStop(candidate)
+                    addStopCandidate = null
+                    viewModel.clearAmenityStopMessage()
+                }
+            )
+        }
+
+        addedStopSummary?.let { summary ->
+            UpdatedRouteSheet(
+                stops = routeResult?.stops.orEmpty(),
+                addedStopName = summary.name,
+                detourSeconds = summary.detourSeconds,
+                addedDistanceMeters = summary.addedDistanceMeters,
+                totalDistanceMeters = routeResult?.totalDistanceMeters,
+                totalDurationSeconds = routeResult?.totalDurationSeconds,
+                onDone = { viewModel.clearAddedStopSummary() }
+            )
+        }
+
+        if (showReportIssue) {
+            ReportIssueDialog(
+                onSend = { text ->
+                    viewModel.submitNavigationReport(text)
+                    showReportIssue = false
+                },
+                onDismiss = { showReportIssue = false }
+            )
+        }
+
+        if (showEndRideConfirm) {
+            val isLeader = ride?.leaderId != null && (
+                ride?.leaderId == currentUser?.id ||
+                    currentUser?.role == com.example.data.model.RideRole.LEADER
+                )
+            EndRideConfirmDialog(
+                isLeader = isLeader,
+                rideName = ride?.name ?: "this ride",
+                onConfirm = {
+                    showEndRideConfirm = false
+                    if (isLeader) viewModel.endRide() else viewModel.leaveRide()
+                },
+                onDismiss = { showEndRideConfirm = false }
             )
         }
 

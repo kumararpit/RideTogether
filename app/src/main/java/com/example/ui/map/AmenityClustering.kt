@@ -40,10 +40,15 @@ object AmenityClustering {
      * other (in both axes).
      *
      * @param points amenity id → screen position
+     * @param maxDistancePx the grouping radius in screen pixels
+     * @param expandedIds amenities the rider has expanded: they are **never**
+     *   merged into a group and are returned as single markers, so a tapped
+     *   cluster stays open instead of re-forming on the next frame.
      */
     fun cluster(
         points: List<Pair<Long, Pair<Float, Float>>>,
-        maxDistancePx: Float
+        maxDistancePx: Float,
+        expandedIds: Set<Long> = emptySet()
     ): List<Cluster> {
         if (points.isEmpty()) return emptyList()
 
@@ -80,6 +85,8 @@ object AmenityClustering {
             for (j in i + 1 until ids.size) {
                 val a = positions[ids[i]] ?: continue
                 val b = positions[ids[j]] ?: continue
+                // An expanded amenity stands on its own.
+                if (ids[i] in expandedIds || ids[j] in expandedIds) continue
                 if (kotlin.math.abs(a.first - b.first) <= maxDistancePx &&
                     kotlin.math.abs(a.second - b.second) <= maxDistancePx
                 ) {

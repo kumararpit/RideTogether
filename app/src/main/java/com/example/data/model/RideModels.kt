@@ -127,7 +127,26 @@ data class NavigationStep(
     val distanceMeters: Double,
     val durationSeconds: Double,
     val maneuverType: String = "turn",
-    val modifier: String = "straight"
+    val modifier: String = "straight",
+    /**
+     * The maneuver in RideTogether's own vocabulary (see [ManeuverType]).
+     *
+     * [maneuverType] / [modifier] keep the routing engine's raw pair for
+     * backwards compatibility (and for the persisted route document); this
+     * field is what the UI and the voice use, because the raw pair cannot
+     * distinguish a bear-left from a keep-left, or a roundabout exit from a
+     * plain turn.
+     */
+    val maneuver: ManeuverType = ManeuverType.UNKNOWN,
+    /** The engine's exit number, when it reported one (ramp number or roundabout ordinal). */
+    val exitNumber: Int? = null,
+    /** Signed turn angle in degrees (negative = left, positive = right). */
+    val turnAngleDegrees: Int? = null,
+    /**
+     * The lane guidance for this maneuver, or null when the routing engine
+     * supplied no lane data for it. Never synthesised — see [LaneGuidance].
+     */
+    val lanes: LaneGuidance? = null
 ) {
     val formattedDistance: String
         get() = if (distanceMeters >= 1000) {

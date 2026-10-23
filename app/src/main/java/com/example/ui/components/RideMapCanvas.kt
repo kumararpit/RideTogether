@@ -91,11 +91,13 @@ import com.example.data.model.LatLng
 import com.example.data.model.MemberStatus
 import com.example.data.model.RiderMember
 import com.example.ui.theme.AmberPrimary
+import com.example.ui.theme.RouteBlue
 import com.example.ui.theme.SlateDark900
 import com.example.ui.theme.StatusEmergencyRed
 import com.example.ui.theme.StatusRidingGreen
 import com.example.ui.map.AmenityClustering
 import com.example.ui.map.AmenityPalette
+import com.example.ui.map.AmenitySelection
 import com.example.ui.map.MapChromeInsets
 import com.example.ui.map.MapLabelTheme
 import com.example.ui.map.MapOverlayContract
@@ -131,6 +133,12 @@ fun RideMapCanvas(
      * chord across a waypoint. Empty for legacy single-destination routes.
      */
     routeLegStartIndices: List<Int> = emptyList(),
+    /**
+     * Ordered stops of the ride plan. Intermediate stops are painted as
+     * numbered amber markers on the map, so the plan the group is riding is
+     * visible on the canvas and not only inside the menu.
+     */
+    routeStops: List<com.example.data.model.RouteStop> = emptyList(),
     members: List<RiderMember>,
     selectedRider: RiderMember?,
     onSelectRider: (RiderMember?) -> Unit,
@@ -143,6 +151,38 @@ fun RideMapCanvas(
     amenities: List<com.example.data.amenities.AmenityEntity> = emptyList(),
     selectedAmenity: com.example.data.amenities.AmenityEntity? = null,
     onSelectAmenity: (com.example.data.amenities.AmenityEntity?) -> Unit = {},
+    /**
+     * The amenities the rider has expanded out of a cluster. They are drawn as
+     * single markers and are never merged again, so a tapped cluster stays
+     * open while the rider looks at it.
+     */
+    expandedAmenityIds: Set<Long> = emptySet(),
+    /** Called when the rider taps a cluster: the cluster's members are expanded. */
+    onExpandAmenityCluster: (List<Long>) -> Unit = {},
+
+    /**
+     * Index into [route] of the vertex where the rider currently is (from
+     * [com.example.data.location.NavEngine] progress). When >= 0, the route is
+     * split into "completed" (behind the rider) and "remaining" (ahead to the
+     * destination) portions, each styled differently — the reference's
+     * per-segment traffic color intervals / remaining-route dimming.
+     * -1 disables remaining-route styling (legacy single-destination behavior).
+     */
+    remainingFromIndex: Int = -1,
+    /**
+     * The estimated price of adding the selected place as a stop, in seconds.
+     *
+     * It is drawn as a badge on the place's marker, so the rider sees what
+     * the stop costs while looking at the map - not only inside the sheet.
+     */
+    selectedAmenityDetourSeconds: Double? = null,
+    /** A place the rider asked to see: the camera centres on it. */
+    centerOnPlace: LatLng? = null,
+    /**
+     * Incremented when the rider asks for the route overview from the
+     * navigation menu; the canvas fits the whole route/group once per change.
+     */
+    overviewRequestId: Int = 0,
     onViewportChanged: (minLat: Double, maxLat: Double, minLon: Double, maxLon: Double) -> Unit = { _, _, _, _ -> },
     initialStartLocation: LatLng? = null,
     onMapTapped: (() -> Unit)? = null,
@@ -206,6 +246,31 @@ fun RideMapCanvas(
 
     val cameraController = remember { com.example.data.map.MapCameraController() }
     val cameraState by cameraController.state.collectAsState()
+
+    // "Show on map": the camera centres on the place the rider asked to see.
+    LaunchedEffect(centerOnPlace) {
+        centerOnPlace?.let { cameraController.centerOn(it) }
+    }
+
+    // "Route overview" from the navigation menu: fit the whole ride.
+    val overviewDensity = androidx.compose.ui.platform.LocalDensity.current
+    val overviewConfiguration = androidx.compose.ui.platform.LocalConfiguration.current
+    LaunchedEffect(overviewRequestId) {
+        if (overviewRequestId == 0) return@LaunchedEffect
+        val allPoints = members.map { it.location } + route
+        if (allPoints.isNotEmpty()) {
+            val widthPx = with(overviewDensity) { overviewConfiguration.screenWidthDp.dp.toPx() }
+            val heightPx = with(overviewDensity) { overviewConfiguration.screenHeightDp.dp.toPx() }
+            cameraController.showOverview(
+                points = allPoints,
+                widthPx = widthPx,
+                heightPx = heightPx,
+                paddingPx = 100f,
+                topInsetPx = with(overviewDensity) { topInsetDp.toPx() },
+                bottomInsetPx = with(overviewDensity) { bottomInsetDp.toPx() }
+            )
+        }
+    }
 
     var displayCenterLat by remember { mutableFloatStateOf(initialCenter.latitude.toFloat()) }
     var displayCenterLng by remember { mutableFloatStateOf(initialCenter.longitude.toFloat()) }
@@ -387,6 +452,14 @@ fun RideMapCanvas(
 
     val riderScreenPositions = remember { mutableMapOf<String, Offset>() }
     val amenityScreenPositions = remember { mutableMapOf<Long, Offset>() }
+    /**
+     * The visible amenity markers in draw order (bottom first).
+     *
+     * The tap handler resolves against this list instead of the amenity list,
+     * so the marker the rider sees on top is the one that answers the tap, and
+     * a cluster is tappable at all.
+     */
+    val amenityDrawnMarkers = remember { mutableListOf<AmenitySelection.Marker>() }
     // Painted footprint (screen-space bounds) of each drawn pin, recorded during draw
     // with the exact same geometry used to paint it, for icon-avoiding label placement.
     val amenityPaintedBounds = remember { mutableMapOf<Long, AmenityLabelPlanner.IconRect>() }
@@ -746,62 +819,129 @@ fun RideMapCanvas(
                             tileSizePx = baseTileSizePx
                         )
 
-                        val routePath = Path()
-                        val firstIdx = kept[0]
-                        routePath.moveTo(
-                            transform.mapX(world[firstIdx * 2]),
-                            transform.mapY(world[firstIdx * 2 + 1])
-                        )
-                        for (k in 1 until kept.size) {
-                            val idx = kept[k]
-                            routePath.lineTo(
-                                transform.mapX(world[idx * 2]),
-                                transform.mapY(world[idx * 2 + 1])
+                        // Zoom-band presence culling (reference: materialParams.styleZoomRange
+                        // / IsPresent in adaptive_route_component.cc). If the core is culled at
+                        // this zoom, the whole route band is skipped.
+                        val coreWidthOpt = RouteRenderMath.coreWidthDpWithBand(displayZoom)
+                        if (coreWidthOpt == null) return@Canvas
+                        val coreWidthPx = with(density) { coreWidthOpt.dp.toPx() }
+                        val casingWidthPx = with(density) {
+                            RouteRenderMath.casingWidthDpWithBand(displayZoom)!!
+                                .dp.toPx()
+                        }
+                        val streakWidthPx = with(density) {
+                            RouteRenderMath.streakWidthDpWithBand(displayZoom)!!
+                                .dp.toPx()
+                        }
+
+                        // Split kept indices into completed (behind rider) and remaining
+                        // (ahead to destination) when remaining-route styling is enabled.
+                        // Reference: per-segment traffic color intervals + remaining-distance
+                        // dimming (TrafficColoringProto / PolylineColorInterval).
+                        //
+                        // The two paths SHARE the split vertex so no gap can appear where
+                        // the completed band meets the remaining band (the split index
+                        // rarely coincides exactly with a simplified vertex).
+                        val remainingFrom = remainingFromIndex.coerceAtLeast(0)
+                        val splitPos = kept.indexOfFirst { it >= remainingFrom }
+                            .let { if (it < 0) kept.size - 1 else it }
+                        val completedKept = kept.copyOfRange(0, splitPos + 1)
+                        val remainingKept = kept.copyOfRange(splitPos, kept.size)
+
+                        /** Builds a Path from a list of kept vertex indices. */
+                        fun buildRoutePath(indices: IntArray): Path {
+                            val p = Path()
+                            if (indices.isEmpty()) return p
+                            val firstIdx = indices[0]
+                            p.moveTo(
+                                transform.mapX(world[firstIdx * 2]),
+                                transform.mapY(world[firstIdx * 2 + 1])
+                            )
+                            for (k in 1 until indices.size) {
+                                val idx = indices[k]
+                                p.lineTo(
+                                    transform.mapX(world[idx * 2]),
+                                    transform.mapY(world[idx * 2 + 1])
+                                )
+                            }
+                            return p
+                        }
+
+                        /** Draws the four-pass route band (shadow → casing → core → streak). */
+                        fun drawRouteBand(path: Path, coreColor: Color, casingColor: Color, streakColor: Color) {
+                            // 1. Soft outer shadow
+                            drawPath(
+                                path = path,
+                                color = Color(0x33000000),
+                                style = Stroke(width = casingWidthPx + 3.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                            )
+                            // 2. Casing
+                            drawPath(
+                                path = path,
+                                color = casingColor,
+                                style = Stroke(width = casingWidthPx, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                            )
+                            // 3. Core
+                            drawPath(
+                                path = path,
+                                color = coreColor,
+                                style = Stroke(width = coreWidthPx, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                            )
+                            // 4. Centre streak
+                            drawPath(
+                                path = path,
+                                color = streakColor,
+                                style = Stroke(width = streakWidthPx, cap = StrokeCap.Round, join = StrokeJoin.Round)
                             )
                         }
 
-                        val coreWidthPx = with(density) { RouteRenderMath.coreWidthDp(displayZoom).dp.toPx() }
-                        val casingWidthPx = with(density) { RouteRenderMath.casingWidthDp(displayZoom).dp.toPx() }
-                        val streakWidthPx = with(density) { RouteRenderMath.streakWidthDp(displayZoom).dp.toPx() }
+                        if (remainingFromIndex >= 0) {
+                            // Completed portion (behind rider) — RT brand amber core on
+                            // dark casing.
+                            if (completedKept.size >= 2) {
+                                drawRouteBand(
+                                    path = buildRoutePath(completedKept),
+                                    coreColor = AmberPrimary,
+                                    casingColor = RouteCasing,
+                                    streakColor = RouteStreak
+                                )
+                            }
 
-                        // 1. Soft outer shadow (separation from pale daytime imagery)
-                        drawPath(
-                            path = routePath,
-                            color = Color(0x33000000),
-                            style = Stroke(width = casingWidthPx + 3.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-                        )
-
-                        // 2. Dark casing — RT brand slate, high separation on both
-                        //    the light day raster and the dark night raster.
-                        drawPath(
-                            path = routePath,
-                            color = RouteCasing,
-                            style = Stroke(width = casingWidthPx, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                        )
-
-                        // 3. Core — brand amber, width scales with zoom (18 → 17 dp).
-                        drawPath(
-                            path = routePath,
-                            color = AmberPrimary,
-                            style = Stroke(width = coreWidthPx, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                        )
-
-                        // 4. Light centre streak (RT-original pale amber accent).
-                        drawPath(
-                            path = routePath,
-                            color = RouteStreak,
-                            style = Stroke(width = streakWidthPx, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                        )
+                            // Remaining portion (ahead to destination) — RouteBlue accent
+                            // core on a dimmer slate casing, so the unridden part reads as
+                            // "still to go".
+                            if (remainingKept.size >= 2) {
+                                drawRouteBand(
+                                    path = buildRoutePath(remainingKept),
+                                    coreColor = RouteBlue,
+                                    casingColor = RouteCasing.copy(alpha = 0.55f),
+                                    streakColor = RouteStreak.copy(alpha = 0.35f)
+                                )
+                            }
+                        } else {
+                            // Legacy preview (lobby / summary / single-destination): the
+                            // whole route is one amber band.
+                            drawRouteBand(
+                                path = buildRoutePath(kept),
+                                coreColor = AmberPrimary,
+                                casingColor = RouteCasing,
+                                streakColor = RouteStreak
+                            )
+                        }
 
                         // 5. Direction dots — spaced by SCREEN distance (not vertex
-                        //    count), so the cadence is zoom-independent.
+                        //    count), so the cadence is zoom-independent. When
+                        //    remaining-route styling is active they mark the portion
+                        //    ahead of the rider only (what lies ahead); otherwise they
+                        //    cover the whole route (legacy preview behavior).
+                        val dotKept = if (remainingFromIndex >= 0) remainingKept else kept
                         val dotSpacingPx = RouteRenderMath.directionDotSpacingPx(displayZoom)
-                        if (dotSpacingPx > 0f) {
+                        if (dotSpacingPx > 0f && dotKept.size >= 2) {
                             var accumulated = dotSpacingPx
                             var prevX = 0f
                             var prevY = 0f
-                            for (k in 1 until kept.size) {
-                                val idx = kept[k]
+                            for (k in 1 until dotKept.size) {
+                                val idx = dotKept[k]
                                 val x = transform.mapX(world[idx * 2])
                                 val y = transform.mapY(world[idx * 2 + 1])
                                 if (k == 1) {
@@ -964,29 +1104,32 @@ fun RideMapCanvas(
                             onSelectRider(clickedRider)
                             onSelectAmenity(null)
                         } else {
-                            var clickedAmenity: com.example.data.amenities.AmenityEntity? = null
                             val tapTargetRadius = with(density) { 24.dp.toPx() } // Minimum 48dp tap target
-                            // Phase B (B-14): the selected amenity is tested first, so a
-                            // selected pin that is covered by a cluster badge stays
-                            // selectable.
-                            val amenitiesForHit = if (selectedAmenity != null) {
-                                listOf(selectedAmenity) + amenities.filter { it.osmId != selectedAmenity.osmId }
-                            } else {
-                                amenities
-                            }
-                            for (amenity in amenitiesForHit) {
-                                val pos = amenityScreenPositions[amenity.osmId] ?: continue
-                                val distance = (tapOffset - pos).getDistance()
-                                if (distance < tapTargetRadius) {
-                                    clickedAmenity = amenity
-                                    break
+                            // The tap resolves to the **topmost** marker under it
+                            // (the one the rider actually sees), not to the first
+                            // one in the data list: a marker that is drawn under
+                            // another must not steal the tap. A cluster answers
+                            // with an expansion, a single marker with a
+                            // selection.
+                            val outcome = AmenitySelection.resolveTap(
+                                tapX = tapOffset.x,
+                                tapY = tapOffset.y,
+                                markers = amenityDrawnMarkers.toList(),
+                                radiusPx = tapTargetRadius
+                            )
+                            when (outcome) {
+                                is AmenitySelection.TapOutcome.Picked -> {
+                                    val picked = amenities.firstOrNull { it.osmId == outcome.amenityId }
+                                    onSelectAmenity(picked)
+                                    if (picked != null) onSelectRider(null)
                                 }
-                            }
-                            onSelectAmenity(clickedAmenity)
-                            if (clickedAmenity != null) {
-                                onSelectRider(null)
-                            } else {
-                                onMapTapped?.invoke()
+                                is AmenitySelection.TapOutcome.Expanded -> {
+                                    onExpandAmenityCluster(outcome.memberIds)
+                                }
+                                is AmenitySelection.TapOutcome.Nothing -> {
+                                    onSelectAmenity(null)
+                                    onMapTapped?.invoke()
+                                }
                             }
                         }
                     }
@@ -994,6 +1137,47 @@ fun RideMapCanvas(
         ) {
             val canvasW = size.width
             val canvasH = size.height
+
+            // Numbered intermediate-stop markers (reference pattern: the plan's
+            // waypoints are lettered on the map, here numbered like the plan
+            // list). Drawn in the unrotated overlay so the digits stay upright
+            // while the map rotates.
+            val intermediateStops = routeStops.filter {
+                it.role == com.example.data.model.RouteStopRole.INTERMEDIATE
+            }
+            intermediateStops.forEachIndexed { index, stop ->
+                val pos = latLngToRotatedScreen(stop.latLng)
+                if (pos.x < -60f || pos.x > canvasW + 60f ||
+                    pos.y < -60f || pos.y > canvasH + 60f
+                ) {
+                    return@forEachIndexed
+                }
+                drawCircle(
+                    color = Color(0xCC0B0F12),
+                    radius = 15.dp.toPx(),
+                    center = pos
+                )
+                drawCircle(
+                    color = AmberPrimary,
+                    radius = 12.dp.toPx(),
+                    center = pos
+                )
+                val label = textMeasurer.measure(
+                    text = "${index + 1}",
+                    style = TextStyle(
+                        color = Color(0xFF1A1205),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                )
+                drawText(
+                    textLayoutResult = label,
+                    topLeft = Offset(
+                        pos.x - label.size.width / 2f,
+                        pos.y - label.size.height / 2f
+                    )
+                )
+            }
 
             // Safe text drawing helper
             fun drawSafeText(
@@ -1066,10 +1250,14 @@ fun RideMapCanvas(
             amenityScreenPositions.clear()
             amenityLabelAnchors.clear()
             amenityPaintedBounds.clear()
+            amenityDrawnMarkers.clear()
             // Phase B (backlog B-14): dense amenities are CLUSTERED — one marker
             // is drawn per group (with a count badge), which keeps a dense area
             // readable instead of turning into a pin field. The clustering is
             // deterministic and order independent (see AmenityClustering).
+            //
+            // A cluster the rider has tapped stays open: its members are
+            // excluded from the grouping and are drawn as single markers.
             val visibleAmenityPositions = ArrayList<Pair<Long, Pair<Float, Float>>>()
             for (amenity in amenities) {
                 val pos = latLngToRotatedScreen(LatLng(amenity.lat, amenity.lon))
@@ -1080,7 +1268,11 @@ fun RideMapCanvas(
                 }
                 visibleAmenityPositions.add(amenity.osmId to (pos.x to pos.y))
             }
-            val amenityClusters = AmenityClustering.cluster(visibleAmenityPositions, maxDistancePx = 30f)
+            val amenityClusters = AmenityClustering.cluster(
+                points = visibleAmenityPositions,
+                maxDistancePx = 30f,
+                expandedIds = expandedAmenityIds
+            )
             val amenitiesById = amenities.associateBy { it.osmId }
             // The selected amenity always gets its own marker (never hidden in a
             // cluster) and is drawn last, on top of everything else.
@@ -1096,6 +1288,7 @@ fun RideMapCanvas(
                 .toMutableList()
             if (selectedCluster != null) drawOrder.add(selectedCluster)
 
+            var amenityDrawIndex = 0
             for (cluster in drawOrder) {
                 val drawnId = if (selectedCluster != null && cluster.representativeId == selectedCluster.representativeId) {
                     selectedAmenity?.osmId ?: cluster.representativeId
@@ -1108,6 +1301,13 @@ fun RideMapCanvas(
                 val screenPos = latLngToRotatedScreen(LatLng(amenity.lat, amenity.lon))
 
                 val isSelected = amenity.osmId == selectedAmenity?.osmId
+                // When a place is selected, the other markers are dimmed: the
+                // selection has to read at a glance, and the rider must still
+                // see what else is around it.
+                val markerAlpha = AmenitySelection.markerAlpha(
+                    isSelected = isSelected,
+                    hasSelection = selectedAmenity != null
+                )
                 val basePinSizeDp = when {
                     displayZoom >= 17f -> 32.dp
                     displayZoom >= 15f -> 28.dp
@@ -1135,6 +1335,21 @@ fun RideMapCanvas(
 
                 // Save visible pin head center for hit-testing alignment
                 amenityScreenPositions[amenity.osmId] = Offset(cx, cy)
+
+                // The marker as the rider sees it: the tap handler resolves
+                // against these, so a cluster is tappable and the topmost
+                // marker is the one that answers a tap.
+                amenityDrawnMarkers.add(
+                    AmenitySelection.Marker(
+                        id = amenity.osmId,
+                        x = cx,
+                        y = cy,
+                        isCluster = groupCount > 1,
+                        memberIds = cluster.memberIds,
+                        drawIndex = amenityDrawIndex
+                    )
+                )
+                amenityDrawIndex++
 
                 // 1. Selected Focus Halo / Glow Ring
                 if (isSelected) {
@@ -1172,11 +1387,11 @@ fun RideMapCanvas(
                     close()
                 }
 
-                drawPath(path = pinPath, color = categoryColor)
+                drawPath(path = pinPath, color = categoryColor.copy(alpha = markerAlpha))
                 // Dual outline: dark rim first (separates the marker from pale daytime
                 // imagery where a white border alone is invisible), then bright inner rim.
-                drawPath(path = pinPath, color = Color(0x66101828), style = Stroke(width = 4.6.dp.toPx()))
-                drawPath(path = pinPath, color = Color.White, style = Stroke(width = 2.1.dp.toPx()))
+                drawPath(path = pinPath, color = Color(0x66101828).copy(alpha = markerAlpha), style = Stroke(width = 4.6.dp.toPx()))
+                drawPath(path = pinPath, color = Color.White.copy(alpha = markerAlpha), style = Stroke(width = 2.1.dp.toPx()))
 
                 // 4. White Category Icon Glyph
                 val painter = categoryPainters[amenity.type] ?: categoryPainters[com.example.data.amenities.AmenityType.UNKNOWN]!!
@@ -1186,7 +1401,7 @@ fun RideMapCanvas(
                     with(painter) {
                         draw(
                             size = androidx.compose.ui.geometry.Size(glyphSize, glyphSize),
-                            colorFilter = ColorFilter.tint(Color.White)
+                            colorFilter = ColorFilter.tint(Color.White.copy(alpha = markerAlpha))
                         )
                     }
                 } finally {
@@ -1213,6 +1428,42 @@ fun RideMapCanvas(
                             cy - pinRadiusPx * 0.72f - badgeLayout.size.height / 2f
                         )
                     )
+                }
+
+                // The price of the place as a stop, drawn as a badge on the
+                // marker. The rider sees what the stop costs on the map, not
+                // only inside the sheet.
+                if (isSelected && selectedAmenityDetourSeconds != null) {
+                    val detourLabel = com.example.data.model.AmenityStopPlan
+                        .detourLabel(selectedAmenityDetourSeconds)
+                    if (detourLabel != null) {
+                        val badgeLayout = textMeasurer.measure(
+                            text = detourLabel,
+                            style = TextStyle(
+                                color = Color.Black,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Black
+                            )
+                        )
+                        val padH = 6.dp.toPx()
+                        val padV = 3.dp.toPx()
+                        val badgeW = badgeLayout.size.width + padH * 2
+                        val badgeH = badgeLayout.size.height + padV * 2
+                        // The badge sits beside the pin, on the side that is
+                        // free of the pin body.
+                        val badgeX = cx + pinRadiusPx * 0.9f
+                        val badgeY = cy - pinRadiusPx - badgeH / 2f
+                        drawRoundRect(
+                            color = AmberPrimary,
+                            topLeft = Offset(badgeX, badgeY),
+                            size = androidx.compose.ui.geometry.Size(badgeW, badgeH),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(badgeH / 2f)
+                        )
+                        drawText(
+                            textLayoutResult = badgeLayout,
+                            topLeft = Offset(badgeX + padH, badgeY + padV)
+                        )
+                    }
                 }
 
                 // Label anchor (screen-space) just below the pin tip for Part B labels.

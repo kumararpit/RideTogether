@@ -1,5 +1,6 @@
 package com.example.ui.map
 
+import androidx.compose.ui.graphics.Color
 import com.example.data.map.TileMath
 import com.example.data.model.LatLng
 import kotlin.math.abs
@@ -253,4 +254,71 @@ object RouteRenderMath {
      */
     fun directionDotSpacingPx(displayZoom: Float): Float = (110f * 2.0.pow((16f - displayZoom).toDouble()).toFloat())
             .coerceIn(56f, 320f)
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Zoom-indexed style bands (reference: adaptive_route_component.cc shader
+    // uniforms materialParams.styleZoomRange / stylePropertiesTexture / IsPresent).
+    //
+    // Each route visual property owns a [minZoom..maxZoom] band. Outside the band
+    // the property is culled (isPresent == false) so the route fades out
+    // gracefully at extreme zooms instead of being hard-clamped. Inside the band
+    // the value is interpolated linearly between the band anchors.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /** A style property's valid zoom band and its end-anchor values. */
+    data class RouteStyleBand(
+        /** Zoom below which the property is culled. */
+        val minZoom: Float,
+        /** Zoom above which the property is culled. */
+        val maxZoom: Float,
+        /** Value at minZoom. */
+        val valueMin: Float,
+        /** Value at maxZoom. */
+        val valueMax: Float
+    ) {
+        /** True when [displayZoom] falls inside this band (inclusive). */
+        fun isPresent(displayZoom: Float): Boolean =
+            displayZoom in minZoom..maxZoom
+
+        /** Interpolated value at [displayZoom], clamped to the band. Returns null when culled. */
+        fun valueAt(displayZoom: Float): Float? {
+            if (!isPresent(displayZoom)) return null
+            val span = maxZoom - minZoom
+            val t = if (span <= 0f) 0f else (displayZoom - minZoom) / span
+            return valueMin + t * (valueMax - valueMin)
+        }
+    }
+
+    /** Route style bands, anchored to the measured reference relationship
+     *  (≈24 dp total at overview → ≈17 dp core at street navigation zoom). */
+    object RouteStyleBands {
+        /** Core stroke width band: 18 dp at overview (z=13) → 17 dp at street (z=16+). */
+        val CORE = RouteStyleBand(
+            minZoom = 13f, maxZoom = 16f,
+            valueMin = CORE_WIDTH_FAR_DP, valueMax = CORE_WIDTH_NEAR_DP
+        )
+        /** Casing width band: core + fixed margin on each side. */
+        val CASING = RouteStyleBand(
+            minZoom = 13f, maxZoom = 16f,
+            valueMin = CORE_WIDTH_FAR_DP + 2f * CASING_MARGIN_DP,
+            valueMax = CORE_WIDTH_NEAR_DP + 2f * CASING_MARGIN_DP
+        )
+        /** Light accent streak width: constant 2 dp across the band. */
+        val STREAK = RouteStyleBand(
+            minZoom = 13f, maxZoom = 16f,
+            valueMin = STREAK_WIDTH_DP, valueMax = STREAK_WIDTH_DP
+        )
+    }
+
+    /** Core width (dp) with zoom-band presence culling. Null = culled (do not draw). */
+    fun coreWidthDpWithBand(displayZoom: Float): Float? =
+        RouteStyleBands.CORE.valueAt(displayZoom)
+
+    /** Casing width (dp) with zoom-band presence culling. Null = culled. */
+    fun casingWidthDpWithBand(displayZoom: Float): Float? =
+        RouteStyleBands.CASING.valueAt(displayZoom)
+
+    /** Streak width (dp) with zoom-band presence culling. Null = culled. */
+    fun streakWidthDpWithBand(displayZoom: Float): Float? =
+        RouteStyleBands.STREAK.valueAt(displayZoom)
 }

@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -20,11 +21,19 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AltRoute
+import androidx.compose.material.icons.filled.CallMade
 import androidx.compose.material.icons.filled.ChangeCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.ForkLeft
+import androidx.compose.material.icons.filled.ForkRight
 import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.GpsNotFixed
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Merge
 import androidx.compose.material.icons.filled.Navigation
+import androidx.compose.material.icons.filled.RampRight
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Timer
@@ -40,50 +49,79 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.ManeuverType
 import com.example.data.model.NavigationStep
 import com.example.ui.theme.AmberPrimary
+import com.example.ui.theme.RideGuidanceGreen
+import com.example.ui.theme.RideGuidanceGreenDark
+import com.example.ui.theme.RouteBlue
+import com.example.ui.theme.SlateDark500
+import com.example.ui.theme.SlateDark600
+import com.example.ui.theme.SlateDark700
 import com.example.ui.theme.SlateDark800
-import com.example.ui.theme.SlateDark900
 import com.example.ui.theme.StatusEmergencyRed
 import com.example.ui.theme.StatusRidingGreen
+import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.TextTertiary
 
-private val CardBorderColor = Color(0xFF253248)
-private val PrimaryBlue = Color(0xFF2563EB)
-private val AccentCyan = Color(0xFF38BDF8)
+private val TabularNumericStyle = TextStyle(fontFeatureSettings = "tnum")
 
 /**
- * Returns a suitable Material Icon for the given maneuver type and modifier.
+ * The maneuver icon for RideTogether's own maneuver vocabulary.
+ *
+ * The vocabulary separates the manoeuvres the raw `(type, modifier)` pair
+ * cannot: a bear-left is not a keep-left, a fork is not a merge, a ramp is
+ * not a turn, and a roundabout exit is not a plain turn. Every icon used
+ * here is a stock Material icon.
  */
-fun getManeuverIcon(maneuverType: String, modifier: String): ImageVector {
-    val mod = modifier.lowercase()
-    val type = maneuverType.lowercase()
-
-    return when {
-        type.contains("arrive") -> Icons.Default.Flag
-        type.contains("roundabout") || type.contains("rotary") -> Icons.Default.ChangeCircle
-        type.contains("fork") -> Icons.Default.AltRoute
-        mod.contains("slight left") -> Icons.Default.TurnSlightLeft
-        mod.contains("slight right") -> Icons.Default.TurnSlightRight
-        mod.contains("sharp left") || mod == "left" -> Icons.Default.TurnLeft
-        mod.contains("sharp right") || mod == "right" -> Icons.Default.TurnRight
-        mod.contains("u-turn") || mod.contains("uturn") -> Icons.Default.AltRoute
-        else -> Icons.Default.Navigation
-    }
+fun getManeuverIcon(maneuver: ManeuverType): ImageVector = when (maneuver) {
+    ManeuverType.DEPART -> Icons.Default.Navigation
+    ManeuverType.ARRIVE -> Icons.Default.Flag
+    ManeuverType.TURN_LEFT -> Icons.Default.TurnLeft
+    ManeuverType.TURN_SLIGHT_LEFT -> Icons.Default.TurnSlightLeft
+    ManeuverType.TURN_SHARP_LEFT -> Icons.Default.TurnLeft
+    ManeuverType.TURN_RIGHT -> Icons.Default.TurnRight
+    ManeuverType.TURN_SLIGHT_RIGHT -> Icons.Default.TurnSlightRight
+    ManeuverType.TURN_SHARP_RIGHT -> Icons.Default.TurnRight
+    ManeuverType.KEEP_LEFT -> Icons.Default.TurnSlightLeft
+    ManeuverType.KEEP_RIGHT -> Icons.Default.TurnSlightRight
+    ManeuverType.CONTINUE, ManeuverType.NEW_NAME -> Icons.Default.Navigation
+    ManeuverType.ON_RAMP -> Icons.Default.RampRight
+    ManeuverType.OFF_RAMP -> Icons.Default.RampRight
+    ManeuverType.FORK_LEFT -> Icons.Default.ForkLeft
+    ManeuverType.FORK_RIGHT -> Icons.Default.ForkRight
+    ManeuverType.MERGE_LEFT, ManeuverType.MERGE_RIGHT -> Icons.Default.Merge
+    ManeuverType.ROUNDABOUT_ENTER, ManeuverType.ROUNDABOUT_EXIT -> Icons.Default.ChangeCircle
+    ManeuverType.END_OF_ROAD -> Icons.Default.Route
+    ManeuverType.U_TURN -> Icons.Default.AltRoute
+    ManeuverType.FERRY -> Icons.Default.CallMade
+    ManeuverType.UNKNOWN -> Icons.Default.Navigation
 }
 
 /**
- * Top Turn-by-Turn Navigation Header — Google Maps inspired high-contrast design.
+ * The live guidance card.
+ *
+ * The reference gives the maneuver its own high-contrast green surface: it is
+ * the one element a rider reads at a glance while moving. The card carries
+ * the distance, the maneuver, the road name when the engine reports one, the
+ * following instruction, the lane strip (only when the engine supplied lane
+ * data) and the audio/reroute controls.
  */
 @Composable
 fun TurnByTurnNavHeader(
@@ -98,9 +136,14 @@ fun TurnByTurnNavHeader(
     modifier: Modifier = Modifier
 ) {
     val cardBg = when {
-        isOffRoute -> Color(0xFF3B1212)
-        isRerouting -> Color(0xFF1E2812)
-        else -> Color(0xFF0E1A30)
+        isOffRoute -> Color(0xFF4A1717)
+        isRerouting -> Color(0xFF3A2A0E)
+        else -> RideGuidanceGreen
+    }
+    val accent = when {
+        isOffRoute -> StatusEmergencyRed
+        isRerouting -> AmberPrimary
+        else -> RideGuidanceGreenDark
     }
 
     Surface(
@@ -110,29 +153,23 @@ fun TurnByTurnNavHeader(
             .padding(horizontal = 12.dp, vertical = 6.dp)
             .testTag("nav_turn_header"),
         color = cardBg,
-        shape = RoundedCornerShape(22.dp),
-        border = BorderStroke(1.dp, if (isOffRoute) StatusEmergencyRed.copy(alpha = 0.5f) else CardBorderColor),
-        tonalElevation = 8.dp,
-        shadowElevation = 8.dp
+        shape = RoundedCornerShape(20.dp),
+        border = if (isOffRoute) BorderStroke(1.dp, StatusEmergencyRed.copy(alpha = 0.6f)) else null,
+        tonalElevation = 0.dp,
+        shadowElevation = 10.dp
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+                .padding(horizontal = 14.dp, vertical = 13.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Maneuver Icon Tile — prominent circular blue badge
+            // Maneuver glyph — large, white, on the deeper green disc.
             Box(
                 modifier = Modifier
                     .size(52.dp)
                     .clip(CircleShape)
-                    .background(
-                        when {
-                            isOffRoute -> StatusEmergencyRed
-                            isRerouting -> AmberPrimary
-                            else -> PrimaryBlue
-                        }
-                    ),
+                    .background(accent),
                 contentAlignment = Alignment.Center
             ) {
                 when {
@@ -145,44 +182,45 @@ fun TurnByTurnNavHeader(
                         imageVector = Icons.Default.Warning,
                         contentDescription = "Off route",
                         tint = Color.White,
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier.size(26.dp)
                     )
-                    else -> {
-                        val icon = getManeuverIcon(
-                            currentStep?.maneuverType ?: "turn",
-                            currentStep?.modifier ?: "straight"
-                        )
-                        Icon(
-                            imageVector = icon,
-                            contentDescription = "Maneuver",
-                            tint = Color.White,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
+                    else -> Icon(
+                        imageVector = getManeuverIcon(currentStep?.maneuver ?: ManeuverType.UNKNOWN),
+                        contentDescription = "Maneuver",
+                        tint = Color.White,
+                        modifier = Modifier.size(30.dp)
+                    )
                 }
             }
 
             Spacer(modifier = Modifier.width(14.dp))
 
-            // Distance + Road Name column
             Column(modifier = Modifier.weight(1f)) {
                 when {
                     isOffRoute -> {
                         Text(
-                            text = "Off Route",
-                            color = StatusEmergencyRed,
-                            fontSize = 22.sp,
+                            text = "Off route",
+                            color = Color.White,
+                            fontSize = 23.sp,
                             fontWeight = FontWeight.Black,
                             maxLines = 1
                         )
                         Text(
-                            text = "Recalculating route...",
-                            color = Color.White.copy(alpha = 0.75f),
+                            text = "Recalculating route…",
+                            color = Color.White.copy(alpha = 0.78f),
                             fontSize = 13.sp,
                             maxLines = 1
                         )
                     }
                     currentStep != null -> {
+                        // Lane guidance is rendered only when this maneuver's own
+                        // node carried lane data.
+                        currentStep.lanes?.takeIf { !it.isEmpty }?.let { lanes ->
+                            LaneGuidanceStrip(
+                                guidance = lanes,
+                                modifier = Modifier.padding(bottom = 5.dp)
+                            )
+                        }
                         val formattedDist = if (distanceToNextManeuverMeters >= 1000) {
                             String.format(
                                 java.util.Locale.US,
@@ -195,23 +233,42 @@ fun TurnByTurnNavHeader(
                         Text(
                             text = formattedDist,
                             color = Color.White,
-                            fontSize = 26.sp,
+                            fontSize = 30.sp,
                             fontWeight = FontWeight.Black,
-                            style = androidx.compose.ui.text.TextStyle(fontFeatureSettings = "tnum"),
+                            style = TabularNumericStyle,
                             maxLines = 1
                         )
                         Text(
                             text = currentStep.instruction,
-                            color = Color.White.copy(alpha = 0.90f),
-                            fontSize = 14.sp,
+                            color = Color.White,
+                            fontSize = 16.sp,
                             fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
+                        val roadName = currentStep.roadName.trim()
+                        if (roadName.isNotEmpty() && !roadName.equals("unnamed", ignoreCase = true)) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Surface(
+                                color = RideGuidanceGreenDark,
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(
+                                    text = roadName,
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
                         if (nextStep != null) {
+                            Spacer(modifier = Modifier.height(5.dp))
                             Text(
-                                text = "Then: ${nextStep.instruction}",
-                                color = TextSecondary,
+                                text = "Then ${nextStep.instruction}",
+                                color = Color.White.copy(alpha = 0.72f),
                                 fontSize = 11.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
@@ -220,15 +277,15 @@ fun TurnByTurnNavHeader(
                     }
                     else -> {
                         Text(
-                            text = "Follow Route",
+                            text = "Follow route",
                             color = Color.White,
-                            fontSize = 20.sp,
+                            fontSize = 21.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1
                         )
                         Text(
-                            text = "Heading toward destination",
-                            color = TextSecondary,
+                            text = "Heading toward the destination",
+                            color = Color.White.copy(alpha = 0.78f),
                             fontSize = 13.sp,
                             maxLines = 1
                         )
@@ -236,39 +293,40 @@ fun TurnByTurnNavHeader(
                 }
             }
 
-            // Action Buttons (Mute & Reroute)
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            // Audio + reroute stay one tap away.
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 IconButton(
                     onClick = onToggleAudioMute,
                     modifier = Modifier
-                        .size(38.dp)
+                        .size(40.dp)
                         .testTag("audio_mute_button")
                 ) {
                     Icon(
-                        imageVector = if (isAudioMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
-                        contentDescription = if (isAudioMuted) "Unmute Navigation Voice" else "Mute Navigation Voice",
-                        tint = if (isAudioMuted) TextSecondary else Color.White,
-                        modifier = Modifier.size(20.dp)
+                        imageVector = if (isAudioMuted) Icons.AutoMirrored.Filled.VolumeOff
+                        else Icons.AutoMirrored.Filled.VolumeUp,
+                        contentDescription = if (isAudioMuted) "Unmute navigation voice"
+                        else "Mute navigation voice",
+                        tint = if (isAudioMuted) Color.White.copy(alpha = 0.55f) else Color.White,
+                        modifier = Modifier.size(21.dp)
                     )
                 }
-
                 IconButton(
                     onClick = onReroute,
                     modifier = Modifier
-                        .size(38.dp)
+                        .size(40.dp)
                         .testTag("reroute_button")
                 ) {
                     if (isRerouting) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(18.dp),
-                            color = AmberPrimary,
+                            color = Color.White,
                             strokeWidth = 2.dp
                         )
                     } else {
                         Icon(
                             imageVector = Icons.Default.Refresh,
                             contentDescription = "Reroute",
-                            tint = if (isOffRoute) StatusEmergencyRed else Color.White.copy(alpha = 0.85f),
+                            tint = Color.White.copy(alpha = 0.85f),
                             modifier = Modifier.size(20.dp)
                         )
                     }
@@ -279,7 +337,13 @@ fun TurnByTurnNavHeader(
 }
 
 /**
- * Bottom Navigation Metrics Panel — 3-Column Grid (ETA, Remaining Distance, Speed), Progress Bar, and Route Sub-Row.
+ * The bottom trip bar.
+ *
+ * Collapsed it mirrors the reference: the remaining time, the remaining
+ * distance and the ETA, with a one-tap end action and a chevron that expands
+ * the full telemetry (traveled distance, progress and the tracking toggle).
+ * Nothing is lost — the detailed panel is one tap away — and the map gains
+ * back the space the old always-open card occupied.
  */
 @Composable
 fun NavigationTripHud(
@@ -293,214 +357,235 @@ fun NavigationTripHud(
     traveledDistance: String = "",
     startLocationName: String = "Start",
     progressFraction: Float = 0f,
-    totalTripDistanceAndDuration: String = ""
+    totalTripDistanceAndDuration: String = "",
+    onEndNavigation: (() -> Unit)? = null
 ) {
+    var expanded by remember { mutableStateOf(false) }
+
     Surface(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
             .testTag("nav_trip_hud"),
-        color = Color(0xFF141A24),
-        shape = RoundedCornerShape(22.dp),
-        border = BorderStroke(1.dp, CardBorderColor),
-        tonalElevation = 8.dp,
-        shadowElevation = 8.dp
+        color = SlateDark800,
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, SlateDark500),
+        tonalElevation = 0.dp,
+        shadowElevation = 10.dp
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp)
-        ) {
-            // 3-Column Metrics Grid
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Column 1: ETA
-                Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF143825)),
-                        contentAlignment = Alignment.Center
+        Column(modifier = Modifier.fillMaxWidth()) {
+            AnimatedVisibility(visible = expanded) {
+                Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Timer,
-                            contentDescription = "ETA",
+                        MetricCell(
+                            icon = Icons.Default.Timer,
+                            value = remainingDuration.ifBlank { "—" },
+                            label = "ETA $etaTime",
                             tint = StatusRidingGreen,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.weight(1f)
+                        )
+                        MetricCell(
+                            icon = Icons.Default.Navigation,
+                            value = remainingDistance.ifBlank { "—" },
+                            label = "Remaining",
+                            tint = RouteBlue,
+                            modifier = Modifier.weight(1f)
+                        )
+                        MetricCell(
+                            icon = Icons.Default.Route,
+                            value = traveledDistance.ifBlank { "—" },
+                            label = "Traveled",
+                            tint = TextSecondary,
+                            modifier = Modifier.weight(1f)
                         )
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column {
-                        Text(
-                            text = remainingDuration.ifBlank { "7 min" },
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            style = androidx.compose.ui.text.TextStyle(fontFeatureSettings = "tnum"),
-                            maxLines = 1
-                        )
-                        Text(
-                            text = "ETA ${etaTime.ifBlank { "12:45" }}",
-                            color = TextSecondary,
-                            fontSize = 11.sp,
-                            maxLines = 1
-                        )
-                    }
-                }
 
-                // Column 2: Remaining Distance
-                Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
+                    Spacer(modifier = Modifier.height(10.dp))
+                    LinearProgressIndicator(
+                        progress = { progressFraction.coerceIn(0f, 1f) },
                         modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF152E52)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Navigation,
-                            contentDescription = "Remaining",
-                            tint = PrimaryBlue,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column {
-                        Text(
-                            text = remainingDistance.ifBlank { "4.2 km" },
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            style = androidx.compose.ui.text.TextStyle(fontFeatureSettings = "tnum"),
-                            maxLines = 1
-                        )
-                        Text(
-                            text = "Remaining",
-                            color = TextSecondary,
-                            fontSize = 11.sp,
-                            maxLines = 1
-                        )
-                    }
-                }
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp)),
+                        color = AmberPrimary,
+                        trackColor = SlateDark600
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                // Column 3: Distance Traveled (Odometer) — replaces duplicate speed readout
-                Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF0C2E4E)),
-                        contentAlignment = Alignment.Center
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Route,
-                            contentDescription = "Traveled",
-                            tint = AccentCyan,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column {
-                        Text(
-                            text = traveledDistance.ifBlank { "0.0 km" },
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            style = androidx.compose.ui.text.TextStyle(fontFeatureSettings = "tnum"),
-                            maxLines = 1
-                        )
-                        Text(
-                            text = "Traveled",
-                            color = TextSecondary,
-                            fontSize = 11.sp,
-                            maxLines = 1
-                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "$startLocationName → $destinationName",
+                                color = TextPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (totalTripDistanceAndDuration.isNotBlank()) {
+                                Text(
+                                    text = totalTripDistanceAndDuration,
+                                    color = TextTertiary,
+                                    fontSize = 11.sp,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (isFollowMode) RouteBlue else SlateDark700)
+                                .clickable { onToggleFollowMode() }
+                                .padding(horizontal = 10.dp, vertical = 7.dp)
+                                .testTag("toggle_follow_mode_button"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = if (isFollowMode) Icons.Default.GpsFixed
+                                    else Icons.Default.GpsNotFixed,
+                                    contentDescription = if (isFollowMode) "Following rider"
+                                    else "Free pan mode",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (isFollowMode) "Tracking" else "Free pan",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Progress Bar
-            LinearProgressIndicator(
-                progress = { progressFraction.coerceIn(0.05f, 1f) },
+            // Collapsed summary row (always visible).
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(4.dp)
-                    .clip(RoundedCornerShape(2.dp)),
-                color = PrimaryBlue,
-                trackColor = Color(0xFF253248)
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Sub-row: Route Name & Total Info + Follow Mode Toggle Pill
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                    .padding(start = 8.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                if (onEndNavigation != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF2A1A1A))
+                            .clickable(onClick = onEndNavigation)
+                            .testTag("end_navigation_button"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "End navigation",
+                            tint = StatusEmergencyRed,
+                            modifier = Modifier.size(21.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { expanded = !expanded }
+                        .padding(vertical = 4.dp)
+                ) {
                     Text(
-                        text = "$startLocationName → $destinationName",
-                        color = Color.White,
+                        text = remainingDuration.ifBlank { "—" },
+                        color = TextPrimary,
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.Bold,
+                        style = TabularNumericStyle,
+                        maxLines = 1
+                    )
+                    Text(
+                        text = buildString {
+                            if (remainingDistance.isNotBlank()) append(remainingDistance)
+                            if (etaTime.isNotBlank()) {
+                                if (isNotEmpty()) append(" · ")
+                                append(etaTime)
+                            }
+                            if (isEmpty()) append(destinationName)
+                        },
+                        color = TextSecondary,
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    if (totalTripDistanceAndDuration.isNotBlank()) {
-                        Text(
-                            text = totalTripDistanceAndDuration,
-                            color = TextSecondary,
-                            fontSize = 11.sp,
-                            maxLines = 1
-                        )
-                    }
                 }
 
-                Spacer(modifier = Modifier.width(8.dp))
-
-                // Follow / Tracking mode toggle pill
-                Box(
+                IconButton(
+                    onClick = { expanded = !expanded },
                     modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(if (isFollowMode) PrimaryBlue else SlateDark800)
-                        .clickable { onToggleFollowMode() }
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                        .testTag("toggle_follow_mode_button"),
-                    contentAlignment = Alignment.Center
+                        .size(44.dp)
+                        .testTag("expand_trip_hud_button")
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = if (isFollowMode) Icons.Default.GpsFixed else Icons.Default.GpsNotFixed,
-                            contentDescription = if (isFollowMode) "Following rider" else "Free pan mode",
-                            tint = Color.White,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = if (isFollowMode) "Tracking" else "Free Pan",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                    Icon(
+                        imageVector = if (expanded) Icons.Default.KeyboardArrowDown
+                        else Icons.Default.KeyboardArrowUp,
+                        contentDescription = if (expanded) "Hide trip details" else "Show trip details",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun MetricCell(
+    icon: ImageVector,
+    value: String,
+    label: String,
+    tint: Color,
+    modifier: Modifier = Modifier
+) {
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .background(tint.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = tint,
+                modifier = Modifier.size(16.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(7.dp))
+        Column {
+            Text(
+                text = value,
+                color = TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                style = TabularNumericStyle,
+                maxLines = 1
+            )
+            Text(
+                text = label,
+                color = TextTertiary,
+                fontSize = 10.sp,
+                maxLines = 1
+            )
         }
     }
 }

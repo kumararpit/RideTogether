@@ -74,6 +74,7 @@ import com.example.ui.components.RideMapCanvas
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.StatusEmergencyRed
 import com.example.ui.theme.StatusRidingGreen
+import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.TextTertiary
 import java.text.SimpleDateFormat
@@ -81,10 +82,10 @@ import java.util.Date
 import java.util.Locale
 
 // Design System Dark Carbon Color Tokens
-private val DarkBackground = Color(0xFF0F131A)
-private val CardSurface = Color(0xFF1B212B)
-private val CardBorder = Color(0xFF2B3444)
-private val PrimaryBlue = Color(0xFF2563EB)
+private val DarkBackground = com.example.ui.theme.SlateDark900
+private val CardSurface = com.example.ui.theme.SlateDark800
+private val CardBorder = com.example.ui.theme.SlateDark500
+private val PrimaryBlue = com.example.ui.theme.AmberPrimary
 private val AccentGreen = Color(0xFF22C55E)
 private val AccentOrange = Color(0xFFF97316)
 private val AccentPurple = Color(0xFFA855F7)
@@ -161,7 +162,7 @@ fun RideSummaryScreen(
 
     val routeTitle = if (ride != null && ride.startLocationName.isNotBlank() && ride.destinationName.isNotBlank()) {
         "${ride.startLocationName} → ${ride.destinationName}"
-    } else ride?.name ?: "Pune → Lonavala"
+    } else ride?.name ?: "Ride completed"
 
     // Route overview map modal state ("View Route on Map")
     var showRouteMapDialog by remember { mutableStateOf(false) }
@@ -178,31 +179,110 @@ fun RideSummaryScreen(
                 .navigationBarsPadding(),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // 1. Scenic Mountain Journey Image Header
+            // 1. Completion hero — the ride is over, so the screen leads with
+            //    the outcome, then the numbers, then the way home.
             item {
-                ScenicJourneyHeader(
-                    onBack = onBackToHome,
-                    onShare = {
-                        Toast.makeText(context, "Sharing ride summary...", Toast.LENGTH_SHORT).show()
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 20.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = onBackToHome,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("back_from_summary_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                                tint = TextPrimary
+                            )
+                        }
+                        Spacer(modifier = Modifier.weight(1f))
+                        IconButton(
+                            onClick = {
+                                val summary = buildString {
+                                    appendLine("${ride?.name ?: "Ride"} — completed on RideTogether")
+                                    appendLine(routeTitle)
+                                    appendLine("$formattedDist · $formattedDuration · $ridersLabel")
+                                }
+                                val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(android.content.Intent.EXTRA_TEXT, summary.trim())
+                                }
+                                context.startActivity(
+                                    android.content.Intent.createChooser(send, "Share ride summary")
+                                )
+                            },
+                            modifier = Modifier.size(48.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Share,
+                                contentDescription = "Share ride summary",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
-                )
-            }
 
-            // 2. Completion Status Banner
-            item {
-                RideCompletionHeader(
-                    hasEmergency = hasEmergency,
-                    safetySubtitle = safetySubtitle
-                )
-            }
+                    Spacer(modifier = Modifier.height(12.dp))
 
-            // 3. Route Identity Card
-            item {
-                Box(modifier = Modifier.padding(horizontal = 20.dp)) {
-                    RideRouteHeaderCard(
-                        routeTitle = routeTitle,
-                        dateRangeText = formattedDateRange
-                    )
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(132.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    Brush.radialGradient(
+                                        colors = listOf(
+                                            AmberPrimary.copy(alpha = 0.30f),
+                                            AmberPrimary.copy(alpha = 0.04f),
+                                            Color.Transparent
+                                        )
+                                    )
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            com.example.ui.screens.LogoMark(size = 80.dp)
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = if (hasEmergency) "Ride ended" else "Ride completed!",
+                            color = TextPrimary,
+                            fontSize = 28.sp,
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = (-0.5).sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = routeTitle,
+                            color = TextSecondary,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = formattedDateRange,
+                            color = TextTertiary,
+                            fontSize = 11.sp
+                        )
+                        if (hasEmergency) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = safetySubtitle,
+                                color = StatusEmergencyRed,
+                                fontSize = 12.sp,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
                 }
             }
 
@@ -218,17 +298,11 @@ fun RideSummaryScreen(
                 }
             }
 
-            // 5. Congratulatory Card
-            item {
-                Box(modifier = Modifier.padding(horizontal = 20.dp)) {
-                    RideCelebrationCard()
-                }
-            }
-
             // 6. Secondary Action — View Route on Map
             item {
                 Box(modifier = Modifier.padding(horizontal = 20.dp)) {
                     RideSecondaryActionButton(
+                        label = "View on map",
                         onClick = {
                             if (onViewRouteOnMap != null) {
                                 onViewRouteOnMap()
@@ -275,14 +349,14 @@ fun RideSummaryScreen(
                             .height(54.dp)
                             .testTag("back_to_home_button"),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = PrimaryBlue,
-                            contentColor = Color.White
+                            containerColor = AmberPrimary,
+                            contentColor = Color(0xFF1A1205)
                         ),
-                        shape = RoundedCornerShape(16.dp)
+                        shape = RoundedCornerShape(14.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Home,
-                            contentDescription = "Home",
+                            contentDescription = null,
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
@@ -443,22 +517,6 @@ private fun ScenicJourneyHeader(
                     )
                 }
 
-                // More Options Button
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.45f))
-                        .border(1.dp, Color.White.copy(alpha = 0.15f), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.MoreVert,
-                        contentDescription = "More",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
             }
         }
     }
@@ -760,6 +818,7 @@ private fun RideCelebrationCard() {
  */
 @Composable
 private fun RideSecondaryActionButton(
+    label: String,
     onClick: () -> Unit
 ) {
     Surface(
@@ -787,7 +846,7 @@ private fun RideSecondaryActionButton(
                 )
                 Spacer(modifier = Modifier.width(12.dp))
                 Text(
-                    text = "View Route on Map",
+                    text = label,
                     color = Color.White,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold

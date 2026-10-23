@@ -307,6 +307,94 @@ class RideViewModelMultiWaypointTest {
         assertSame("stale response rejected after newer plan applied", appliedAfterReroute, viewModel.routeResult.value)
     }
 
+    @Test
+    fun `removing a stop before the ride re-plans through the stops that remain`() = runBlocking {
+        provider.enqueue(multiLegResult(listOf(pointA, stop1, stop2, pointD), planStops()))
+        viewModel.createRide(
+            "Via Stops", "Pune", "Lonavala", pointA, pointD,
+            places(
+                StopSpec("s1", "Tea Point", stop1),
+                StopSpec("s2", "Fuel B", stop2)
+            )
+        )
+
+        // The edit route: origin -> Fuel B -> destination, bypassing Tea Point.
+        provider.enqueue(
+            multiLegResult(
+                points = listOf(pointA, stop2, pointD),
+                stops = listOf(
+                    planStops()[0], planStops()[2], planStops()[3]
+                )
+            )
+        )
+        viewModel.removeRouteStop("s1")
+
+        val (start, dest, intermediates) = provider.requestLog.last()
+        assertEquals("planned origin is kept before the ride", pointA, start)
+        assertEquals("destination is unchanged", pointD, dest)
+        assertEquals("the removed stop is not requested", listOf(stop2), intermediates)
+        assertEquals(
+            listOf("origin", "s2", "destination"),
+            viewModel.routePlanStops.value.map { it.id }
+        )
+        assertEquals(
+            "the edited plan is what the group sees",
+            listOf("origin", "s2", "destination"),
+            viewModel.repository.currentRide.value!!.routeStops.map { it.id }
+        )
+    }
+
+    @Test
+    fun `removing a stop mid-ride bypasses it from the current position`() = runBlocking {
+        provider.enqueue(multiLegResult(listOf(pointA, stop1, stop2, pointD), planStops()))
+        viewModel.createRide(
+            "Via Stops", "Pune", "Lonavala", pointA, pointD,
+            places(
+                StopSpec("s1", "Tea Point", stop1),
+                StopSpec("s2", "Fuel B", stop2)
+            )
+        )
+        viewModel.startRide()
+
+        // The rider has reached the first stop: the next stop (s2) is ahead.
+        viewModel.navEngine.processLocation(
+            LocationUpdate(stop1, speedKmh = 40.0, headingDeg = 90f, accuracyMeters = 5f)
+        )
+        assertEquals(1, viewModel.navEngine.progress.value.currentLegIndex)
+        viewModel.locationTracker.updateLocationForTesting(
+            LocationUpdate(stop1, speedKmh = 40.0, headingDeg = 90f, accuracyMeters = 8f)
+        )
+
+        provider.enqueue(
+            multiLegResult(
+                points = listOf(stop1, pointD),
+                stops = listOf(
+                    RouteStop(
+                        id = "place-0", name = "Current Position",
+                        latitude = stop1.latitude, longitude = stop1.longitude,
+                        role = RouteStopRole.ORIGIN
+                    ),
+                    planStops()[3]
+                )
+            )
+        )
+        viewModel.removeRouteStop("s2")
+
+        val (start, dest, intermediates) = provider.requestLog.last()
+        assertEquals("mid-ride re-plan starts at the validated fix", stop1, start)
+        assertEquals("destination is unchanged", pointD, dest)
+        assertTrue("the removed stop is skipped entirely", intermediates.isEmpty())
+        assertEquals(
+            "the plan the group receives no longer contains the stop",
+            listOf("destination"),
+            viewModel.routePlanStops.value.map { it.id }
+        )
+        assertTrue(
+            "the rider is not routed back to the completed stop",
+            viewModel.routePlanStops.value.none { it.id == "s1" || it.id == "s2" }
+        )
+    }
+
     private fun planStops() = listOf(
         RouteStop(id = "origin", name = "Home", latitude = pointA.latitude, longitude = pointA.longitude, role = RouteStopRole.ORIGIN),
         RouteStop(id = "s1", name = "Tea Point", latitude = stop1.latitude, longitude = stop1.longitude),

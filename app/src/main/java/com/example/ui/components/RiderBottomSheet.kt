@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -28,6 +29,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -95,7 +97,7 @@ fun RiderBottomSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = SlateDark900,
+        containerColor = SlateDark800,
         dragHandle = {
             Box(
                 modifier = Modifier
@@ -121,9 +123,9 @@ fun RiderBottomSheet(
             ) {
                 Column {
                     Text(
-                        text = "Ride Controls",
+                        text = "Group ride",
                         color = Color.White,
-                        fontSize = 20.sp,
+                        fontSize = 22.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Row(
@@ -150,81 +152,68 @@ fun RiderBottomSheet(
                             softWrap = false
                         )
                         Text(
-                            text = ride?.inviteCode ?: "ABC123",
+                            text = ride?.inviteCode ?: "",
                             color = AmberPrimary,
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF3A2E14)),
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(AmberPrimary.copy(alpha = 0.14f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
                             maxLines = 1,
                             softWrap = false
                         )
                     }
                 }
 
-                IconButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.testTag("close_riders_sheet_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Close sheet",
-                        tint = Color.White
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = onLeaveRide,
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("leave_ride_button")
+                    ) {
+                        Text("Leave", color = com.example.ui.theme.TextSecondary, fontSize = 13.sp)
+                    }
+                    if (isLeader) {
+                        TextButton(
+                            onClick = { showEndRideConfirm = true },
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("end_ride_button")
+                        ) {
+                            Text(
+                                "End",
+                                color = StatusEmergencyRed,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("close_riders_sheet_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close sheet",
+                            tint = com.example.ui.theme.TextSecondary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
-
-            // Actions: Member gets ONLY "Leave Ride". Leader gets "Leave Ride" and "End Ride".
-            if (isLeader) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(
-                        onClick = onLeaveRide,
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("leave_ride_button"),
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Text("Leave", color = Color(0xFFCFD8DC))
-                    }
-
-                    Button(
-                        onClick = { showEndRideConfirm = true },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("end_ride_button"),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = StatusEmergencyRed,
-                            contentColor = Color.White
-                        ),
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Text("End Ride", fontWeight = FontWeight.Bold)
-                    }
-                }
-            } else {
-                OutlinedButton(
-                    onClick = onLeaveRide,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .testTag("leave_ride_button"),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text("Leave Convoy Session", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                }
-            }
 
             Spacer(modifier = Modifier.height(20.dp))
             HorizontalDivider(color = DividerColor)
             Spacer(modifier = Modifier.height(16.dp))
 
             Text(
-                text = "${members.size} RIDERS IN PACK",
+                text = "${members.size} RIDERS ON THIS RIDE",
                 color = Color(0xFF90A4AE),
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold
@@ -237,11 +226,17 @@ fun RiderBottomSheet(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(sortedMembers, key = { it.id }) { rider ->
-                    val gapText = if (userLoc != null && !rider.isCurrentUser) {
-                        "📏 Gap: ${rider.getFormattedDistanceTo(userLoc)}"
-                    } else if (rider.isCurrentUser) {
-                        "Current device (You)"
-                    } else ""
+                    val statusWord = when (rider.status) {
+                        MemberStatus.RIDING -> "Riding"
+                        MemberStatus.STOPPED -> "Stopped"
+                        MemberStatus.OFFLINE -> "Offline"
+                        MemberStatus.EMERGENCY -> "SOS"
+                    }
+                    val gapText = when {
+                        rider.isCurrentUser -> "You · $statusWord"
+                        userLoc != null -> "$statusWord · ${rider.getFormattedDistanceTo(userLoc)} away"
+                        else -> statusWord
+                    }
 
                     RiderCardItem(
                         rider = rider,

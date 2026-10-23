@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -21,15 +24,20 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.AltRoute
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.AddLocationAlt
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Search
@@ -41,6 +49,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -49,15 +58,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -79,6 +91,9 @@ import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.SlateDark700
 import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
+import com.example.ui.theme.TextPrimary
+import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.TextTertiary
 import com.example.ui.theme.StatusRidingGreen
 import com.example.ui.theme.SurfaceCard
 import kotlinx.coroutines.Job
@@ -213,6 +228,18 @@ fun CreateRideScreen(
     fun autoRideName(start: String, dest: String): String =
         listOf(start.trim(), dest.trim()).filter { it.isNotBlank() }.joinToString(" → ")
 
+    // Swap the two endpoint fields atomically (text + selection).
+    fun swapEnds() {
+        cancelGpsRequestAndMarkManual()
+        val swapStartQuery = destSearchState.query
+        val swapStartPlace = destSearchState.selectedPlace
+        val swapDestQuery = startSearchState.query
+        val swapDestPlace = startSearchState.selectedPlace
+        startSearchEngine.replaceState(swapStartQuery, swapStartPlace)
+        destSearchEngine.replaceState(swapDestQuery, swapDestPlace)
+        rideName = autoRideName(swapStartQuery, swapDestQuery)
+    }
+
     // Route estimate preview
     var routeDistanceText by remember { mutableStateOf("Calculating...") }
     var routeDurationText by remember { mutableStateOf("Estimating...") }
@@ -223,6 +250,18 @@ fun CreateRideScreen(
     var previewOptions by remember { mutableStateOf<List<com.example.data.model.RouteOption>>(emptyList()) }
     var selectedRouteIndex by remember { mutableStateOf(0) }
     var previewRoute by remember { mutableStateOf<com.example.data.model.RouteResult?>(null) }
+    var showRouteAlternatives by remember { mutableStateOf(false) }
+    // Which row is open for editing; everything else stays a compact plan row.
+    var activeField by remember { mutableStateOf<String?>(null) }
+    var focusNewStop by remember { mutableStateOf(false) }
+    var draggingStopId by remember { mutableStateOf<Long?>(null) }
+
+    LaunchedEffect(stopDrafts, focusNewStop) {
+        if (focusNewStop) {
+            activeField = stopDrafts.lastOrNull()?.let { "stop-$it" }
+            focusNewStop = false
+        }
+    }
 
     fun applyPreviewSelection(options: List<com.example.data.model.RouteOption>, index: Int) {
         if (options.isEmpty()) return
@@ -292,6 +331,31 @@ fun CreateRideScreen(
         }
     }
 
+    val submitRide: () -> Unit = {
+        val finalName = if (rideName.isBlank()) {
+            "${startLocationText} → ${destinationText}"
+        } else {
+            rideName
+        }
+        isCreating = true
+        onCreateRide(
+            finalName,
+            startLocationText,
+            destinationText,
+            startCoords,
+            destCoords,
+            intermediateSelections,
+            selectedRouteIndex,
+            previewOptions.map { option ->
+                com.example.data.model.RouteOptionSummary(
+                    index = option.index,
+                    distanceMeters = option.distanceMeters,
+                    durationSeconds = option.durationSeconds
+                )
+            }
+        )
+    }
+
     Surface(
         modifier = modifier
             .fillMaxSize()
@@ -304,7 +368,7 @@ fun CreateRideScreen(
                 .statusBarsPadding()
                 .navigationBarsPadding()
                 .imePadding()
-                .padding(horizontal = 24.dp)
+                .padding(horizontal = 20.dp)
         ) {
             Column(
                 modifier = Modifier
@@ -315,12 +379,14 @@ fun CreateRideScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 16.dp),
+                        .padding(vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(
                         onClick = onBack,
-                        modifier = Modifier.testTag("back_from_create_button")
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("back_from_create_button")
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
@@ -328,94 +394,76 @@ fun CreateRideScreen(
                             tint = Color.White
                         )
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Create Group Ride",
+                        text = "Create Ride",
                         color = Color.White,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.weight(1f)
                     )
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Ride Name Field
-                Surface(
-                    color = SurfaceCard,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "RIDE NAME *",
-                            color = AmberPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = rideName,
-                            onValueChange = {
-                                rideName = it
-                                nameError = it.isBlank()
-                            },
-                            placeholder = { Text("e.g. Pune → Lonavala", color = Color(0xFF78909C)) },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.TwoWheeler,
-                                    contentDescription = null,
-                                    tint = AmberPrimary
-                                )
-                            },
-                            isError = nameError,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = AmberPrimary,
-                                unfocusedBorderColor = SlateDark700,
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White
-                            ),
-                            singleLine = true,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("ride_name_input"),
-                            shape = RoundedCornerShape(12.dp)
-                        )
-                        if (nameError) {
-                            Text(
-                                text = "Ride name is required",
-                                color = Color(0xFFFF5252),
-                                fontSize = 12.sp,
-                                modifier = Modifier.padding(top = 4.dp)
-                            )
-                        }
-                    }
+                    // Balances the back button so the title stays centred.
+                    Spacer(modifier = Modifier.width(48.dp))
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Start Location Search Field
+                // The route card: reference order is origin, stops, then
+                // destination, all in one surface so the plan reads as one object.
                 Surface(
                     color = SurfaceCard,
-                    shape = RoundedCornerShape(16.dp),
+                    shape = RoundedCornerShape(18.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
+                    Column {
+                // Start Location Search Field
+                Surface(
+                    color = Color.Transparent,
+                    shape = RoundedCornerShape(0.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                        if (activeField == "start") {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "START POINT (MAP SEARCH)",
-                                color = AmberPrimary,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(22.dp)
+                                        .clip(RoundedCornerShape(50))
+                                        .background(com.example.ui.theme.StatusRidingGreen.copy(alpha = 0.16f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(RoundedCornerShape(50))
+                                            .background(com.example.ui.theme.StatusRidingGreen)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = "Starting point",
+                                        color = com.example.ui.theme.TextPrimary,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = "Search or use your location",
+                                        color = com.example.ui.theme.TextTertiary,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
 
                             // Quick Button: Use Current GPS
                             Row(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
+                                    .clip(RoundedCornerShape(10.dp))
                                     .background(SlateDark800)
                                     .clickable(enabled = !isGpsFixLoading) {
                                         gpsFixJob?.cancel()
@@ -474,7 +522,8 @@ fun CreateRideScreen(
                                             }
                                         }
                                     }
-                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    .heightIn(min = 48.dp)
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 if (isGpsFixLoading) {
@@ -495,7 +544,7 @@ fun CreateRideScreen(
                                 Text(
                                     text = if (isGpsFixLoading) "Locating..." else "Use GPS",
                                     color = Color.White,
-                                    fontSize = 10.sp,
+                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
@@ -610,54 +659,324 @@ fun CreateRideScreen(
                             },
                             onRetry = { startSearchEngine.retry() }
                         )
+                        } else {
+                            PlanRow(
+                                label = "Starting point",
+                                value = startSearchState.selectedPlace?.name
+                                    ?: if (currentGpsLocation != null) "My Location"
+                                    else "Choose starting point",
+                                marker = {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(22.dp)
+                                            .clip(RoundedCornerShape(50))
+                                            .background(com.example.ui.theme.StatusRidingGreen.copy(alpha = 0.16f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(9.dp)
+                                                .clip(RoundedCornerShape(50))
+                                                .background(com.example.ui.theme.StatusRidingGreen)
+                                        )
+                                    }
+                                },
+                                onClick = { activeField = "start" }
+                            )
+                        }
+
                     }
                 }
 
-                // Swap Start & Destination Button
-                Spacer(modifier = Modifier.height(10.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center
+                Spacer(modifier = Modifier.height(12.dp))
+
+                        androidx.compose.material3.HorizontalDivider(color = SlateDark700)
+
+                // ── Intermediate Stops (Maps-style ordered waypoint planning) ──
+                Surface(
+                    color = Color.Transparent,
+                    shape = RoundedCornerShape(0.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    androidx.compose.material3.OutlinedButton(
-                        onClick = {
-                            cancelGpsRequestAndMarkManual()
-                            // Swap full field states atomically (text + selection).
-                            val swapStartQuery = destSearchState.query
-                            val swapStartPlace = destSearchState.selectedPlace
-                            val swapDestQuery = startSearchState.query
-                            val swapDestPlace = startSearchState.selectedPlace
-                            startSearchEngine.replaceState(swapStartQuery, swapStartPlace)
-                            destSearchEngine.replaceState(swapDestQuery, swapDestPlace)
-                            rideName = autoRideName(swapStartQuery, swapDestQuery)
-                        },
-                        shape = androidx.compose.foundation.shape.CircleShape,
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberPrimary),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.6f)),
-                        modifier = Modifier
-                            .height(36.dp)
-                            .testTag("swap_start_dest_button")
-                    ) {
-                        Icon(imageVector = Icons.Default.SwapVert, contentDescription = "Swap", tint = AmberPrimary, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Swap Start & Destination", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                        stopDrafts.forEachIndexed { rowIndex, id ->
+                            val engine = stopEngine(id)
+                            val rowState = stopStates[id] ?: PlaceSearchUiState.Idle()
+                            val selection = rowState.selectedPlace
+                            val currentDrafts by rememberUpdatedState(stopDrafts)
+
+                            key(id) {
+                            if (activeField == "stop-$id") {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(22.dp)
+                                        .clip(RoundedCornerShape(50))
+                                        .background(if (selection != null) AmberPrimary else AmberPrimary.copy(alpha = 0.18f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "${rowIndex + 1}",
+                                        color = if (selection != null) Color(0xFF1A1205) else AmberPrimary,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                // Reorder controls: smallest stable interaction —
+                                // up/down arrows keep a stable id per row (drag
+                                // reordering deliberately omitted in this slice).
+                                Column {
+                                    Icon(
+                                        imageVector = Icons.Default.KeyboardArrowUp,
+                                        contentDescription = "Move stop ${rowIndex + 1} up",
+                                        tint = if (rowIndex > 0) AmberPrimary else Color(0xFF546E7A),
+                                        modifier = Modifier
+                                            .size(20.dp)
+                                            .clickable(enabled = rowIndex > 0) { moveStopDraft(id, -1) }
+                                            .testTag("stop_${rowIndex}_up")
+                                    )
+                                    Icon(
+                                        imageVector = Icons.Default.KeyboardArrowDown,
+                                        contentDescription = "Move stop ${rowIndex + 1} down",
+                                        tint = if (rowIndex < stopDrafts.lastIndex) AmberPrimary else Color(0xFF546E7A),
+                                        modifier = Modifier
+                                            .size(20.dp)
+                                            .clickable(enabled = rowIndex < stopDrafts.lastIndex) { moveStopDraft(id, +1) }
+                                            .testTag("stop_${rowIndex}_down")
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                OutlinedTextField(
+                                    value = rowState.query,
+                                    onValueChange = { engine.onQueryChanged(it) },
+                                    placeholder = { Text("Search a stop on the map", color = Color(0xFF78909C)) },
+                                    leadingIcon = {
+                                        if (selection != null) {
+                                            Icon(imageVector = Icons.Default.CheckCircle, contentDescription = "Stop confirmed", tint = AmberPrimary, modifier = Modifier.size(18.dp))
+                                        }
+                                    },
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = AmberPrimary,
+                                        unfocusedBorderColor = SlateDark700,
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White
+                                    ),
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("stop_${rowIndex}_input"),
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Remove stop ${rowIndex + 1}",
+                                    tint = Color(0xFFFF8A80),
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .clickable { removeStopDraft(id) }
+                                        .testTag("stop_${rowIndex}_remove")
+                                )
+                            }
+
+                            SearchResultsArea(
+                                state = rowState,
+                                accentColor = AmberPrimary,
+                                testTagPrefix = "stop_${rowIndex}_search",
+                                onPlaceSelected = { place -> engine.onPlaceSelected(place) },
+                                onRetry = { engine.retry() }
+                            )
+                            } else {
+                                PlanRow(
+                                    label = "Stop",
+                                    value = selection?.name
+                                        ?: rowState.query.ifBlank { "Choose a stop" },
+                                    marker = {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(22.dp)
+                                                .clip(RoundedCornerShape(50))
+                                                .background(
+                                                    if (selection != null) AmberPrimary
+                                                    else AmberPrimary.copy(alpha = 0.18f)
+                                                ),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = "${rowIndex + 1}",
+                                                color = if (selection != null) Color(0xFF1A1205) else AmberPrimary,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    },
+                                    onClick = { activeField = "stop-$id" },
+                                    rowModifier = if (draggingStopId == id) {
+                                        Modifier.background(AmberPrimary.copy(alpha = 0.10f))
+                                    } else {
+                                        Modifier
+                                    },
+                                    trailing = {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .pointerInput(id) {
+                                                    val rowHeightPx = 60.dp.toPx()
+                                                    var accumulated = 0f
+                                                    detectDragGestures(
+                                                        onDragStart = {
+                                                            accumulated = 0f
+                                                            draggingStopId = id
+                                                        },
+                                                        onDragEnd = { draggingStopId = null },
+                                                        onDragCancel = { draggingStopId = null },
+                                                        onDrag = { change, amount ->
+                                                            change.consume()
+                                                            accumulated += amount.y
+                                                            val drafts = currentDrafts
+                                                            val index = drafts.indexOf(id)
+                                                            if (index < 0) return@detectDragGestures
+                                                            val threshold = rowHeightPx * 0.55f
+                                                            when {
+                                                                accumulated > threshold && index < drafts.lastIndex -> {
+                                                                    val mutable = drafts.toMutableList()
+                                                                    mutable.removeAt(index)
+                                                                    mutable.add(index + 1, id)
+                                                                    stopDrafts = mutable
+                                                                    accumulated -= rowHeightPx
+                                                                }
+                                                                accumulated < -threshold && index > 0 -> {
+                                                                    val mutable = drafts.toMutableList()
+                                                                    mutable.removeAt(index)
+                                                                    mutable.add(index - 1, id)
+                                                                    stopDrafts = mutable
+                                                                    accumulated += rowHeightPx
+                                                                }
+                                                            }
+                                                        }
+                                                    )
+                                                }
+                                                .clickable { activeField = "stop-$id" }
+                                                .testTag("stop_${rowIndex}_handle"),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Menu,
+                                                contentDescription = "Drag to reorder stop ${rowIndex + 1}",
+                                                tint = if (draggingStopId == id) AmberPrimary else TextSecondary,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                )
+                            }
+                            }
+
+                        }
+
+                        if (stopDrafts.isNotEmpty() && !allStopsConfirmed) {
+                            Text(
+                                text = "Confirm every stop by tapping a search result — unconfirmed stops are excluded from the route.",
+                                color = Color(0xFFFFB74D),
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(top = 6.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable(enabled = stopDrafts.size < 8) { addStopDraft() }
+                                .heightIn(min = 48.dp)
+                                .padding(horizontal = 4.dp)
+                                .testTag("add_stop_button"),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .clip(RoundedCornerShape(50))
+                                    .background(AmberPrimary.copy(alpha = 0.18f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = null,
+                                    tint = AmberPrimary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (stopDrafts.size < 8) "Add stop" else "Stop limit reached",
+                                color = if (stopDrafts.size < 8) AmberPrimary else com.example.ui.theme.TextTertiary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        if (stopDrafts.isNotEmpty()) {
+                            val stopNames = stopDrafts.mapIndexedNotNull { idx, id ->
+                                stopStates[id]?.selectedPlace?.let { "${idx + 1}. ${it.name}" }
+                            }
+                            if (stopNames.size == stopDrafts.size) {
+                                Text(
+                                    text = "Route: Start → ${stopNames.joinToString(" → ")} → Destination",
+                                    color = Color(0xFF90A4AE),
+                                    fontSize = 10.sp,
+                                    modifier = Modifier.padding(top = 6.dp)
+                                )
+                            }
+                        }
                     }
                 }
-                Spacer(modifier = Modifier.height(10.dp))
+
+                        androidx.compose.material3.HorizontalDivider(color = SlateDark700)
 
                 // Destination Search Field
                 Surface(
-                    color = SurfaceCard,
-                    shape = RoundedCornerShape(16.dp),
+                    color = Color.Transparent,
+                    shape = RoundedCornerShape(0.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "DESTINATION (MAP SEARCH)",
-                            color = AmberPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                        if (activeField == "dest") {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .clip(RoundedCornerShape(50))
+                                    .background(com.example.ui.theme.StatusEmergencyRed.copy(alpha = 0.16f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Flag,
+                                    contentDescription = null,
+                                    tint = com.example.ui.theme.StatusEmergencyRed,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = "Destination",
+                                    color = com.example.ui.theme.TextPrimary,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Town, ghat or landmark",
+                                    color = com.example.ui.theme.TextTertiary,
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
 
                         Spacer(modifier = Modifier.height(8.dp))
 
@@ -777,238 +1096,164 @@ fun CreateRideScreen(
                             },
                             onRetry = { destSearchEngine.retry() }
                         )
+                        } else {
+                            PlanRow(
+                                label = "Destination",
+                                value = destSearchState.selectedPlace?.name
+                                    ?: destinationText.ifBlank { "Choose destination" },
+                                marker = {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(22.dp)
+                                            .clip(RoundedCornerShape(50))
+                                            .background(com.example.ui.theme.StatusEmergencyRed.copy(alpha = 0.16f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Flag,
+                                            contentDescription = null,
+                                            tint = com.example.ui.theme.StatusEmergencyRed,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                    }
+                                },
+                                onClick = { activeField = "dest" }
+                            )
+                        }
+
                     }
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // ── Intermediate Stops (Maps-style ordered waypoint planning) ──
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // The reference's two shortcuts under the route card.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            addStopDraft()
+                            focusNewStop = true
+                        },
+                        enabled = stopDrafts.size < 8,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(50.dp)
+                            .testTag("add_from_map_button"),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, SlateDark700),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AddLocationAlt,
+                            contentDescription = null,
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            "Add from map",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = { activeField = "dest" },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(50.dp)
+                            .testTag("find_places_button"),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, SlateDark700),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = null,
+                            tint = TextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            "Find places",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                    }
+                }
+
+                // Route Options: the reference row. The subtitle carries the
+                // engine's real numbers; no invented "scenic" preferences.
+                val chosenOption = previewOptions.firstOrNull { it.index == selectedRouteIndex }
+                    ?: previewOptions.firstOrNull()
                 Surface(
                     color = SurfaceCard,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "INTERMEDIATE STOPS (IN ORDER)",
-                                color = AmberPrimary,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "${stopDrafts.size} added",
-                                color = Color(0xFF78909C),
-                                fontSize = 10.sp
-                            )
-                        }
-
-                        stopDrafts.forEachIndexed { rowIndex, id ->
-                            val engine = stopEngine(id)
-                            val rowState = stopStates[id] ?: PlaceSearchUiState.Idle()
-                            val selection = rowState.selectedPlace
-
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "STOP ${rowIndex + 1}",
-                                    color = Color(0xFF78909C),
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.width(52.dp)
-                                )
-                                // Reorder controls: smallest stable interaction —
-                                // up/down arrows keep a stable id per row (drag
-                                // reordering deliberately omitted in this slice).
-                                Column {
-                                    Icon(
-                                        imageVector = Icons.Default.KeyboardArrowUp,
-                                        contentDescription = "Move stop ${rowIndex + 1} up",
-                                        tint = if (rowIndex > 0) AmberPrimary else Color(0xFF546E7A),
-                                        modifier = Modifier
-                                            .size(20.dp)
-                                            .clickable(enabled = rowIndex > 0) { moveStopDraft(id, -1) }
-                                            .testTag("stop_${rowIndex}_up")
-                                    )
-                                    Icon(
-                                        imageVector = Icons.Default.KeyboardArrowDown,
-                                        contentDescription = "Move stop ${rowIndex + 1} down",
-                                        tint = if (rowIndex < stopDrafts.lastIndex) AmberPrimary else Color(0xFF546E7A),
-                                        modifier = Modifier
-                                            .size(20.dp)
-                                            .clickable(enabled = rowIndex < stopDrafts.lastIndex) { moveStopDraft(id, +1) }
-                                            .testTag("stop_${rowIndex}_down")
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                OutlinedTextField(
-                                    value = rowState.query,
-                                    onValueChange = { engine.onQueryChanged(it) },
-                                    placeholder = { Text("Search a stop on the map", color = Color(0xFF78909C)) },
-                                    leadingIcon = {
-                                        if (selection != null) {
-                                            Icon(imageVector = Icons.Default.CheckCircle, contentDescription = "Stop confirmed", tint = AmberPrimary, modifier = Modifier.size(18.dp))
-                                        }
-                                    },
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        focusedBorderColor = AmberPrimary,
-                                        unfocusedBorderColor = SlateDark700,
-                                        focusedTextColor = Color.White,
-                                        unfocusedTextColor = Color.White
-                                    ),
-                                    singleLine = true,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("stop_${rowIndex}_input"),
-                                    shape = RoundedCornerShape(12.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Remove stop ${rowIndex + 1}",
-                                    tint = Color(0xFFFF8A80),
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .clickable { removeStopDraft(id) }
-                                        .testTag("stop_${rowIndex}_remove")
-                                )
-                            }
-
-                            SearchResultsArea(
-                                state = rowState,
-                                accentColor = AmberPrimary,
-                                testTagPrefix = "stop_${rowIndex}_search",
-                                onPlaceSelected = { place -> engine.onPlaceSelected(place) },
-                                onRetry = { engine.retry() }
-                            )
-                        }
-
-                        if (stopDrafts.isNotEmpty() && !allStopsConfirmed) {
-                            Text(
-                                text = "Confirm every stop by tapping a search result — unconfirmed stops are excluded from the route.",
-                                color = Color(0xFFFFB74D),
-                                fontSize = 10.sp,
-                                modifier = Modifier.padding(top = 6.dp)
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "+ ADD STOP",
-                            color = AmberPrimary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(SlateDark800)
-                                .clickable(enabled = stopDrafts.size < 8) { addStopDraft() }
-                                .padding(horizontal = 14.dp, vertical = 8.dp)
-                                .testTag("add_stop_button")
-                        )
-                        if (stopDrafts.isNotEmpty()) {
-                            val stopNames = stopDrafts.mapIndexedNotNull { idx, id ->
-                                stopStates[id]?.selectedPlace?.let { "${idx + 1}. ${it.name}" }
-                            }
-                            if (stopNames.size == stopDrafts.size) {
-                                Text(
-                                    text = "Route: Start → ${stopNames.joinToString(" → ")} → Destination",
-                                    color = Color(0xFF90A4AE),
-                                    fontSize = 10.sp,
-                                    modifier = Modifier.padding(top = 6.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // Candidate routes for the same ordered stops. The engine may
-                // return more than one road path; the leader picks the one the
-                // group rides before the ride starts.
-                if (previewOptions.isNotEmpty()) {
-                    RouteOptionSelector(
-                        options = previewOptions.map { option ->
-                            com.example.data.model.RouteOptionSummary(
-                                index = option.index,
-                                distanceMeters = option.distanceMeters,
-                                durationSeconds = option.durationSeconds
-                            )
-                        },
-                        selectedIndex = selectedRouteIndex,
-                        onSelect = { index -> applyPreviewSelection(previewOptions, index) },
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-                }
-
-                // Stop-by-stop itinerary of the selected candidate.
-                val itineraryRoute = previewRoute
-                if (itineraryRoute != null && itineraryRoute.legs.size > 1) {
-                    RouteItineraryCard(
-                        route = itineraryRoute,
-                        title = "STOP ITINERARY",
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Road-Following Route Preview Card
-                Surface(
-                    color = SlateDark800.copy(alpha = 0.9f),
                     shape = RoundedCornerShape(14.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.4f)),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .then(
+                            if (chosenOption != null) {
+                                Modifier
+                                    .clickable { showRouteAlternatives = true }
+                                    .testTag("open_route_alternatives")
+                            } else {
+                                Modifier
+                            }
+                        )
                 ) {
                     Row(
-                        modifier = Modifier.padding(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 64.dp)
+                            .padding(horizontal = 16.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(AmberPrimary.copy(alpha = 0.15f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(imageVector = Icons.Default.Directions, contentDescription = null, tint = AmberPrimary, modifier = Modifier.size(24.dp))
-                        }
-
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.AltRoute,
+                            contentDescription = null,
+                            tint = if (chosenOption != null) AmberPrimary else TextTertiary,
+                            modifier = Modifier.size(20.dp)
+                        )
                         Spacer(modifier = Modifier.width(12.dp))
-
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "OSRM ROAD ROUTE ESTIMATE",
-                                color = AmberPrimary,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
+                                text = "Route Options",
+                                color = TextPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
                             )
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = "$routeDistanceText • $routeDurationText",
-                                    color = Color.White,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                if (isEstimatingRoute) {
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    CircularProgressIndicator(modifier = Modifier.size(14.dp), color = AmberPrimary, strokeWidth = 2.dp)
-                                }
-                            }
                             Text(
-                                text = "Real highway paths will be traced on the live map",
-                                color = Color(0xFF90A4AE),
+                                text = chosenOption?.let { option ->
+                                    if (previewOptions.size == 1) {
+                                        "Fastest · ${option.formattedDistance} · ${option.formattedDuration}"
+                                    } else {
+                                        "${previewOptions.size} routes · ${option.formattedDistance} · ${option.formattedDuration}"
+                                    }
+                                } ?: "Set both ends to compare routes",
+                                color = TextSecondary,
                                 fontSize = 11.sp
                             )
                         }
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowRight,
+                            contentDescription = null,
+                            tint = TextTertiary,
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
                 }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
             }
 
             // Create Button
@@ -1021,34 +1266,16 @@ fun CreateRideScreen(
                 // selections with valid coordinates — an edited-but-unconfirmed
                 // query can never be routed with previously selected coordinates.
                 // Every intermediate stop row must equally carry a confirmed place.
-                val isFormValid = rideName.isNotBlank() &&
-                    startSearchState.selectedPlace != null &&
+                val isFormValid = startSearchState.selectedPlace != null &&
                     destSearchState.selectedPlace != null &&
                     allStopsConfirmed
                 Button(
                     onClick = {
-                        val finalName = if (rideName.isBlank()) {
-                            "${startLocationText} → ${destinationText}"
+                        if (previewOptions.isEmpty()) {
+                            submitRide()
                         } else {
-                            rideName
+                            showRouteAlternatives = true
                         }
-                        isCreating = true
-                        onCreateRide(
-                            finalName,
-                            startLocationText,
-                            destinationText,
-                            startCoords,
-                            destCoords,
-                            intermediateSelections,
-                            selectedRouteIndex,
-                            previewOptions.map { option ->
-                                com.example.data.model.RouteOptionSummary(
-                                    index = option.index,
-                                    distanceMeters = option.distanceMeters,
-                                    durationSeconds = option.durationSeconds
-                                )
-                            }
-                        )
                     },
                     enabled = !isCreating && isFormValid,
                     modifier = Modifier
@@ -1057,16 +1284,16 @@ fun CreateRideScreen(
                         .testTag("submit_create_ride_button"),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = AmberPrimary,
-                        contentColor = Color.Black,
-                        disabledContainerColor = AmberPrimary.copy(alpha = 0.4f),
-                        disabledContentColor = Color.Black.copy(alpha = 0.5f)
+                        contentColor = Color(0xFF1A1205),
+                        disabledContainerColor = SlateDark700,
+                        disabledContentColor = Color(0xFF1A1205).copy(alpha = 0.5f)
                     ),
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     if (isCreating) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(20.dp),
-                            color = Color.Black,
+                            color = Color(0xFF1A1205),
                             strokeWidth = 2.dp
                         )
                         Spacer(modifier = Modifier.width(10.dp))
@@ -1077,7 +1304,7 @@ fun CreateRideScreen(
                         )
                     } else {
                         Text(
-                            text = "Create Ride & Open Lobby",
+                            text = "Find Routes",
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -1085,6 +1312,28 @@ fun CreateRideScreen(
                 }
             }
         }
+    }
+
+    if (showRouteAlternatives && previewOptions.isNotEmpty()) {
+        com.example.ui.components.RouteAlternativesSheet(
+            options = previewOptions.map { option ->
+                com.example.data.model.RouteOptionSummary(
+                    index = option.index,
+                    distanceMeters = option.distanceMeters,
+                    durationSeconds = option.durationSeconds
+                )
+            },
+            selectedIndex = selectedRouteIndex,
+            points = previewRoute?.coordinates.orEmpty(),
+            start = startCoords,
+            destination = destCoords,
+            onSelect = { index -> applyPreviewSelection(previewOptions, index) },
+            onConfirm = {
+                showRouteAlternatives = false
+                submitRide()
+            },
+            onDismiss = { showRouteAlternatives = false }
+        )
     }
 }
 
@@ -1237,4 +1486,45 @@ private fun searchFailureMessage(failure: PlaceSearchFailure): String = when (fa
     PlaceSearchFailure.RATE_LIMITED -> "Search service is busy (rate-limited). Try again shortly."
     PlaceSearchFailure.SERVER_ERROR -> "Search service temporarily unavailable."
     PlaceSearchFailure.MALFORMED_RESPONSE -> "Search service returned an unreadable response."
+}
+
+
+/**
+ * One compact row of the plan card (reference screen 3): a marker, a small
+ * label, the chosen value and an optional control on the right. The whole row
+ * is the tap target, so the editor opens from anywhere on it.
+ */
+@Composable
+private fun PlanRow(
+    label: String,
+    value: String,
+    marker: @Composable () -> Unit,
+    onClick: () -> Unit,
+    valueColor: Color = Color.White,
+    rowModifier: Modifier = Modifier,
+    trailing: (@Composable () -> Unit)? = null
+) {
+    Row(
+        modifier = rowModifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .heightIn(min = 60.dp)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        marker()
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = label, color = TextTertiary, fontSize = 11.sp)
+            Text(
+                text = value,
+                color = valueColor,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
+        }
+        trailing?.invoke()
+    }
 }

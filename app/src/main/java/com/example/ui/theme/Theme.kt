@@ -1,43 +1,47 @@
 package com.example.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-private val DarkColorScheme = darkColorScheme(
+/**
+ * RideTogether is a dark-only product: the navigation surfaces are designed
+ * for a motorcycle cockpit in daylight and at night, and a light theme would
+ * wash out the map overlays. The "light" scheme is therefore the same dark
+ * scheme (the reference has no light variant either).
+ */
+private val RideColorScheme = darkColorScheme(
     primary = AmberPrimary,
-    onPrimary = Color.Black,
+    onPrimary = Color(0xFF1A1205),
     primaryContainer = AmberDark,
     onPrimaryContainer = Color.White,
     secondary = AmberLight,
     onSecondary = Color.Black,
+    secondaryContainer = SlateDark700,
+    onSecondaryContainer = TextPrimary,
+    tertiary = RouteBlue,
+    onTertiary = Color.White,
     background = SlateDark900,
     onBackground = TextPrimary,
     surface = SlateDark800,
     onSurface = TextPrimary,
     surfaceVariant = SlateDark700,
     onSurfaceVariant = TextSecondary,
+    surfaceContainerLowest = SlateDark900,
+    surfaceContainerLow = SlateDark800,
+    surfaceContainer = SlateDark800,
+    surfaceContainerHigh = SlateDark700,
+    surfaceContainerHighest = SlateDark600,
     error = StatusEmergencyRed,
     onError = Color.White,
-    outline = SlateDark500
-)
-
-private val LightColorScheme = darkColorScheme(
-    // Group bike riding apps heavily favor dark, high-contrast HUD mode even in daylight to reduce glare and battery drain
-    primary = AmberPrimary,
-    onPrimary = Color.Black,
-    background = SlateDark900,
-    onBackground = TextPrimary,
-    surface = SlateDark800,
-    onSurface = TextPrimary,
-    surfaceVariant = SlateDark700,
-    onSurfaceVariant = TextSecondary,
-    error = StatusEmergencyRed,
-    onError = Color.White,
-    outline = SlateDark500
+    errorContainer = StatusEmergencyRedDark,
+    onErrorContainer = Color.White,
+    outline = SlateDark500,
+    outlineVariant = SlateDark600,
+    scrim = Color(0xCC000000),
+    inverseSurface = TextPrimary,
+    inverseOnSurface = SlateDark900
 )
 
 @Composable
@@ -46,9 +50,8 @@ fun RideTogetherTheme(
     dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
-    val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
     MaterialTheme(
-        colorScheme = colorScheme,
+        colorScheme = RideColorScheme,
         typography = Typography,
         content = content
     )

@@ -348,3 +348,257 @@ platform commit and no SOS code was changed by the reconciliation.
 
 **Diagnostics.** The `RT-D7` instrumentation stays in place; the open coordinate item is
 still open.
+
+---
+
+# 17. Phase B implementation, batch 6 (approved 2026-10-21) — B-19 + B-28 (lane guidance and richer turn instructions)
+
+**Full evidence and design:** `docs/reverse-engineering/feature-13-lane-guidance.md`.
+
+## 17.1 What the evidence showed (reference side)
+
+The reference draws a **lane strip** in the turn card: the lanes of the
+carriageway the rider is on, with the route's lanes highlighted. It is a
+custom `View`
+(`com.google.android.libraries.geo.navcore.turncard.views.TurnCardLaneGuidanceListView`,
+evidence `ev_ff392141989a8d0171e63bd8e9237df1c9e1412ac3ad1bc7921238f8ca8697c3`)
+whose decompiled `onDraw` proves three behaviours:
+
+* **two passes, recommended last** — usable lanes are drawn after the dimmed
+  ones with a second `ColorFilter`, so a highlight can never be overdrawn;
+* **the strip shrinks to fit** and is centred — the glyph size is
+  `max(min, min(max, (width − 60dp) / laneCount))`;
+* **the left/right arrows are one glyph mirrored** (`canvas.scale(-1, 1)`),
+  so the reference needs one base drawing per shape family.
+
+The reference's own public model (`androidx.car.app.navigation.model`) is a
+**48-type maneuver vocabulary** with a roundabout exit number and exit angle
+(`ev_0dd6c033089f6aa0a9a104f3b46c65e22f0e111d9a82945acbbbb0353ae87bc7`), and
+a lane model of **10 arrow shapes with a recommended flag**
+(`ev_b20f9a73ebf7b5f2cabe80edb44d348dc237bc44524613f1620633d251874067`).
+The lane-aware route line itself is **native**
+(`NativeLaneAwarePolylineInterpolator.nativeInterpolateBeziersJni`) and was
+not reproduced.
+
+Two negative findings that shaped the implementation: the reference has **no
+lane announcements** (the lane strip is visual only), and its own help text
+states that offline directions have **no lane guidance** — lane data is a
+property of the *route response*, not of the map.
+
+## 17.2 What the routing engine actually provides (probe)
+
+A live probe of the OSRM endpoint the app uses returned:
+
+* `maneuver.type` / `maneuver.modifier` / `maneuver.exit` /
+  `bearing_before` / `bearing_after` on every step;
+* `intersections[].lanes[] = { "valid": bool, "indications": [ … ] }` — but
+  **only on roads mapped with `turn:lanes`**. The app's own test route
+  (Pune→Lonavala) returns **no** lane data at all; a European route returns
+  2–4 lane sets.
+
+Empirically verified over four routes: a manoeuvre's lanes are the ones
+attached to the **manoeuvre's own node** (`maneuver.location ==
+intersections[0].location`); the lanes of the later intersections of the same
+step belong to the *next* manoeuvre.
+
+## 17.3 What was implemented
+
+| Item | Change |
+|---|---|
+| **B-19** maneuver taxonomy | New `data/model/ManeuverType.kt` — a RideTogether-original, closed 24-value vocabulary mapped from the engine's `(type, modifier)` pair. It separates the cases the raw pair cannot: `turn/slight left` (bear left) vs `continue/slight left` (keep left), fork vs merge vs ramp, and it adds roundabout exits, exit numbers, U-turns, end-of-road and ferries. The icon mapping now reads the vocabulary instead of `String.contains`; the instruction text is built from it (`"Take the 3rd exit onto NH-48"`, `"Keep right at the fork onto B"`). |
+| **B-28** lane guidance | New `data/model/LaneGuidance.kt` + `data/location/OsrmStepParser.kt` + `ui/map/LaneArrowGeometry.kt` + `ui/components/LaneGuidanceStrip.kt`. The strip is drawn from **RideTogether-original** arrow geometry (left/right pairs are exact mirrors), shrinks to fit, is centred, and draws the usable lanes in white over the dimmed ones. |
+| The no-invention rule | Lane guidance is attached to a manoeuvre **only** when the engine supplied lane data for that manoeuvre's own node, and only when the data can carry the manoeuvre. No data ⇒ no strip; contradictory data ⇒ dropped. The engine's `valid` flag is copied verbatim — RideTogether never decides which lane is usable. |
+| Persistence | `RouteGeometryCodec` round-trips the maneuver, exit number, turn angle and the lane guidance (additive; old documents decode to the defaults). |
+
+**B-19 is closed** (the taxonomy backlog item) and **B-28 is new** (lane
+guidance was previously listed as "not implementable with the current data" —
+see §13, B-26; that judgement was **wrong**: the data exists in the route
+response, it is simply absent on roads without `turn:lanes` mapping).
+
+## 17.4 Verification
+
+`ManeuverVocabularyTest` (11), `LaneGuidanceParsingTest` (12),
+`LaneArrowGeometryTest` (7) and `OsrmLaneGuidanceIntegrationTest` (5) are new;
+the fixtures are trimmed copies of real engine responses, and the
+integration test runs the **whole** service path over a verbatim live
+capture. Full offline suite: **58 classes / 493 tests / 0 failures / 0 errors / 0 skipped**.
+
+**On-device (RMX3360, 1080×2400, 3.0×):** the instrumented
+`LaneGuidanceDeviceRenderTest` renders the real turn card and the real strip
+on the device (3 tests, green; captures written to the device and pulled):
+
+* the route's lane is drawn **bright**, the other lanes **dimmed**;
+* a lane that may be used for two movements is drawn as **one arrow with a
+  branch**, not as two arrows;
+* the strip sits at the top of the turn card's instruction column, in the
+  reference's placement;
+* with no lane data the card is unchanged.
+
+**Live app run (real route, real device):** the live ride screen re-armed a
+live OSRM route (Pune → Lonavala, 49.8 km). The turn card shows
+**"82 m / Turn right"** with the vocabulary icon, and the secondary line
+shows **"Then: Turn at the end of the road…"** — the new `END_OF_ROAD`
+instruction, which the old text builder could not produce. The voice log
+confirms the announcement (`Spoke maneuver [1]: Turn right`). **No lane strip
+is shown, correctly** — the engine has no lane data for that road.
+
+**The data limit, measured:** 13 Indian routes were probed against the live
+engine — **0 lane-bearing intersections in total**. Lane data exists only
+where OpenStreetMap is mapped with `turn:lanes`, which in India it very
+largely is not.
+
+**Not verified:** a *live in-app* lane strip. The rider's real position is in
+Pune (no lane data) and a mock position could not be injected — the device
+refuses the shell `MOCK_LOCATION` appop and blocks `pm grant`. The strip is
+verified as rendering (instrumented, real UI, real device) and as data (live
+engine response through the whole service path), but it has not been observed
+inside a live ride.
+
+---
+
+# 18. Phase B implementation, batch 7 (approved 2026-10-22) — B-29 / B-31 (amenity selection and adding a place as a stop)
+
+**Full evidence and design:** `docs/reverse-engineering/feature-14-amenity-selection.md`.
+
+## 18.1 What the evidence showed (reference side)
+
+Observed live on the rider's device (Google Maps 26.42.01.997557324):
+
+* the **place sheet** on a POI tap: name, rating, category/attributes/price,
+  open status, photo card, and an action row whose primary action is
+  **Directions** (`gm_04_poi.png`);
+* the **route preview**: the route line with a duration pill, the travel-mode
+  chips (**Drive / Motorcycle / Transit / Walk**), "Start · **Add stops** ·
+  Share" (`gm_05_directions.png`);
+* the **"Add stops to your route"** sheet: "Search along route", category
+  chips (Petrol pumps, Restaurants, Coffee shops, Grocery stores) and
+  candidate cards carrying a **detour badge** — "+2 min", "+1 min" — with the
+  **same badge on the map markers** ("Desi Dhaba +1 min · Punjabi")
+  (`gm_06_addstops.png`);
+* the **place sheet in add-stop mode**, whose primary action is literally
+  **"Add stop"** (`gm_07_added.png`);
+* the **declutter ladder**: POIs are individual category markers at z≈14–17
+  and are **gone** at z≈11 (`gm_08_zoom.png`, `gm_09_cluster.png`).
+
+Three behaviours were extracted: the primary action of a place sheet is
+**contextual** ("Directions" vs "Add stop"), a stop has a **price that is
+shown before it is taken**, and **selecting a place is not acting on it**.
+
+## 18.2 What was implemented
+
+| Item | Change |
+|---|---|
+| **B-29** selection semantics | New `ui/map/AmenitySelection.kt`: the tap resolves to the **topmost drawn** marker (not to the first one in the data list), a **cluster expands** instead of selecting, and a selection **dims** the other markers to 40 %. `AmenityClustering` now keeps an expanded cluster **open** (its members are excluded from the grouping). |
+| **B-31** a place becomes a stop of the ride | New `data/model/AmenityStopPlan.kt` + `RideViewModel.addSelectedAmenityAsStop()`: the place is inserted as the **last intermediate stop**, the route is **re-planned from the rider's position** through it, the **detour is derived from the two route results** the app already has, the plan is published as one versioned unit through the existing leader-owned path, and the announcement suppression of the old route is cleared. |
+| The independent-stack invariant | The amenity sheet's "Navigate Here" button handed the ride to **Google Maps** (`google.navigation:` intent). It is replaced by the in-app **"Add as a stop"** action (plus a neutral "Show on map"), so the ride, the group and the plan stay in RideTogether. |
+
+## 18.3 Verification
+
+`AmenitySelectionTest` (7) and `AmenityStopPlanTest` (6) are new. Full
+offline suite: **60 classes / 507 tests / 0 failures / 0 errors / 0 skipped**.
+
+**On-device (RMX3360):** `AmenitySelectionSheetDeviceRenderTest` renders the
+sheet on the device — the category badge, the name, the distance chip, the
+amber "Add as a stop" action and the explanation, with **no hand-off to
+another navigation app** (`/tmp/opencode/amenity_shots/amenity_sheet.png`).
+`AmenityTapSelectionDeviceTest` renders the map with a synthetic amenity set
+and taps it on the device (a tap on a marker **selects** that place, a tap on
+a **cluster expands** it) — the test is written and compiled but **was not
+executed**: the phone disconnected from USB before the run.
+
+**Blocked:** the live ride could not be driven with **real** places in this
+window — the Overpass endpoint is not answering (a 40 s POST to
+`overpass-api.de/api/interpreter` times out from the host as well), so the
+live map has no places to select. The selection and the stop insertion are
+therefore verified on the device with a synthetic amenity set and against the
+live route engine, not against a live Overpass response.
+
+---
+
+# 19. Phase B implementation, batch 8 (approved 2026-10-22) — the place card, the category symbols and the add-stop workflow
+
+**Full evidence and design:** `docs/reverse-engineering/feature-14-amenity-selection.md` §7.
+
+## 19.1 The place card
+
+The reference's place card carries a clear hierarchy — large name, category,
+rating + review count, distance, open status, photo, clear actions. The
+RideTogether card now carries the same hierarchy in its own visual identity
+(`ui/components/PlaceCard.kt`): the place's own photo (or the category symbol
+when it has none), the name, the category, the rating and review count **when
+the data carries them**, the opening status **when the hours can be read**,
+the distance from the rider, and the address/phone/website when they are
+there.
+
+The opening-hours reader is deliberately conservative: `24/7`, day ranges,
+several ranges in a day and several rules in a value are read; **anything it
+cannot read produces no status at all** — a wrong "Open" is worse than no
+badge.
+
+## 19.2 The category symbols
+
+Stock **Material icons** (Apache License 2.0) — nothing is extracted from or
+copied out of the reference's proprietary POI artwork. The mapping was
+corrected where the old symbol was semantically wrong: a motorcycle repair
+shop is a **motorcycle**, a roadside rest stop is a **seat** (it was a
+parking sign), a convenience store is a **shop front** (it was a shopping
+trolley) and a viewpoint is a **landscape** (it was a camera). The symbols
+are distinct per category, which the tests pin.
+
+## 19.3 The add-stop workflow
+
+| Element | Implementation |
+|---|---|
+| The contextual action | "**Add stop**" on the place sheet, with the price of the stop attached: "Add stop · +3 min detour" |
+| The price before the commitment | the estimate is computed when the place is selected (a route planned through it, compared with the ride that is left) and is drawn as a **badge on the place's marker** on the map |
+| The candidate list | "**Add a stop**": the places on the map, with their category, their distance and their price when known; a bounded number of places are priced, because every price is a route request |
+| The entry point | an "Add a stop" button on the live map |
+| The other actions | "**Directions**" (the place becomes the destination of the ride, in-app), "**Save place**" (the rider's own shortlist, in Room — migration 5 → 6), "**Show on map**" (the camera centres on the place) |
+| The wording | "Add stop", "Add a stop", "Directions", "Save place", "Show on map" — concise functional phrases, no branded wording or artwork |
+
+## 19.4 Verification
+
+`OpeningHoursTest` (11), `PlaceCardTest` (11) and an extended
+`AmenityIconConfigTest` (7) are new. Full offline suite: **62 classes / 533 tests /
+0 failures / 0 errors / 0 skipped**.
+**Not device-verified in this pass** — the phone was not connected when this
+batch was written, so the new card, the symbols, the candidate list and the
+detour badge are covered by the unit tests and the code, not by a capture.
+
+## 20. The 14-screen product redesign
+
+The showcase reference was implemented as a design system plus fourteen screens
+(see `docs/design/14-screen-redesign.md` for the full mapping).
+
+**What changed is presentation, not the domain.** The navigation engine, the
+routing provider, the plan/versioning rules, the Firestore writes, the SOS and
+chat paths and the foreground location service are untouched. The redesign
+changed the token values (one palette for the whole app), added the shared
+component library, and rebuilt the composition of each screen.
+
+**The screens that did not exist as screens were added as real surfaces**, not
+mock-ups:
+
+| Reference screen | Where it lives | The data it shows |
+|---|---|---|
+| Navigation Menu | `NavigationMenuSheet` | opens the real add-stop/nearby/overview/group/report/end actions; voice mute is the engine's own mute |
+| Nearby Places | `NearbyPlacesSheet` | the amenity cache the map already holds; rating only when OSM has one; detour only when priced |
+| Add Stop Confirmation | `AddStopConfirmSheet` | the real route geometry and the measured route change, or an explicit "not available yet" |
+| Updated Route | `UpdatedRouteSheet` | the committed stop list from the active plan and the measured deltas |
+| Ride History tabs | `RideHistorySheet` | local completed rides, and the one real upcoming ride |
+
+**Three claims were removed because they were not true:** the lobby's
+"Permission Granted / GPS Fixed / Group Sync" ticks (nothing measured them),
+the completion screen's "More options" button (it had no action) and the
+completion screen's "Sharing ride summary…" toast (it shared nothing). The
+share now builds a real text summary and hands it to the system chooser.
+
+**Deliberate divergences** (documented in the design record): the route
+alternatives stay inline where the decision is made; the map keeps its tested
+AUTO day/night default instead of being forced to night; "Discover" shows real
+saved places/recent rides rather than a curated dataset the app does not have.
+
+**Verification:** `:app:compileDebugKotlin` clean; the full offline suite is
+re-run after the redesign (numbers in §20.1); device captures on the RMX3360
+are listed in the design record. The resident phone disconnected mid-pass, so
+only the Home and Live Navigation captures exist from this session.

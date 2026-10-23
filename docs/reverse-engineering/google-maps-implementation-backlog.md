@@ -356,3 +356,227 @@ All in the enhancement worktree. Two new pure cores: `ui/map/FrameBudget.kt` (re
   1. the device's **display went to sleep** and could not be woken programmatically (`mWakefulness=Asleep`; `screencap` returns an empty file even after `keyevent 26` + `wm dismiss-keyguard`);
   2. the **on-device OSRM estimate request stopped completing** (the create-ride flow stayed on "Calculating…" for minutes while the **host's** OSRM answered `http=200` in 0.57 s) — so the flow that reaches the live map was blocked.
 - Consequently the amenity clustering, the palette, the count badge and the frame-statistics line are **unit-verified only** and are **not** claimed as device-observed.
+
+---
+
+## Implementation record, batch 6 (approved 2026-10-21): B-19 and B-28
+
+Evidence and design: `docs/reverse-engineering/feature-13-lane-guidance.md`.
+
+### B-19 · Maneuver taxonomy upgrade — **DONE (closed)**
+
+**Change.** New `data/model/ManeuverType.kt`: a RideTogether-original, closed
+24-value vocabulary (`DEPART`, `ARRIVE`, `TURN_{LEFT,SLIGHT_LEFT,SHARP_LEFT,…}`,
+`KEEP_{LEFT,RIGHT}`, `CONTINUE`, `NEW_NAME`, `ON_RAMP`, `OFF_RAMP`,
+`FORK_{LEFT,RIGHT}`, `MERGE_{LEFT,RIGHT}`, `ROUNDABOUT_{ENTER,EXIT}`,
+`END_OF_ROAD`, `U_TURN`, `FERRY`, `UNKNOWN`) mapped from the engine's
+`(type, modifier)` pair, plus the instruction builder and the icon mapping.
+The vocabulary is deliberately smaller than the reference's 48 types: the
+extra reference types are combinations the engine never produces, and the
+split that matters is the one the raw pair cannot express — `turn/slight
+left` (a bear left) versus `continue/slight left` (a keep left).
+
+**Verification.** `ManeuverVocabularyTest` (11 tests).
+
+### B-28 · Lane guidance — **DONE**
+
+> The backlog previously listed lane guidance as **not implementable with the
+> current data** (B-26). That judgement was **wrong**: the lane data *is* in
+> the route response. It is simply **absent on roads that are not mapped with
+> `turn:lanes`**, which is why the implementation must be honest about
+> absence instead of being impossible.
+
+**Change.**
+- `data/model/LaneGuidance.kt` — the lane model: one lane = a set of arrows +
+  the engine's `valid` flag; a guidance = the lanes of one manoeuvre.
+- `data/location/OsrmStepParser.kt` — parses the manoeuvre, the exit number,
+  the signed turn angle and the lane guidance out of one engine step. The
+  lanes are looked up **by manoeuvre location**, so the lanes of the next
+  junction can never be shown with this manoeuvre.
+- `ui/map/LaneArrowGeometry.kt` — RideTogether-original arrow geometry;
+  left/right pairs are exact mirrors of one another.
+- `ui/components/LaneGuidanceStrip.kt` — the strip: fits the available width,
+  centred, usable lanes in white over dimmed ones, accessibility description.
+- `NavigationHud.kt` — the strip is rendered at the top of the turn card's
+  instruction column (the reference's `step_instruction_lane_guidance_top`
+  placement).
+- `RouteGeometryCodec.kt` — the maneuver, exit number, turn angle and lane
+  guidance are persisted (additive; old documents decode to the defaults).
+
+**The no-invention rules** (unit-tested):
+1. no engine lane data for the manoeuvre ⇒ no guidance and nothing drawn;
+2. the lanes of a later intersection are never shown with this manoeuvre;
+3. lane data that cannot carry the manoeuvre is dropped instead of displayed;
+4. the engine's `valid` flag is copied verbatim — RideTogether never decides
+   which lane is usable;
+5. unknown lane indications are dropped, and `"none"` is no marking, not an
+   arrow.
+
+**Verification.** `LaneGuidanceParsingTest` (12 tests, fixtures are trimmed
+copies of real engine responses), `LaneArrowGeometryTest` (7 tests) and
+`OsrmLaneGuidanceIntegrationTest` (5 tests, the whole service path over a
+verbatim live engine capture). Full offline suite: 58 classes / 493 tests /
+0 failures / 0 errors / 0 skipped.
+
+**On-device (RMX3360):** the instrumented `LaneGuidanceDeviceRenderTest`
+renders the real turn card and the real strip on the device (3 tests, green,
+captures pulled and inspected): the route's lane is bright, the others dimmed,
+a two-movement lane is one arrow with a branch, the strip sits at the top of
+the instruction column, and a step without lane data leaves the card
+unchanged.
+
+**Live app run:** the live ride screen re-armed a live OSRM route
+(Pune → Lonavala) and the turn card showed **"82 m / Turn right"** with the
+vocabulary icon and **"Then: Turn at the end of the road…"** — the new
+`END_OF_ROAD` instruction, announced by the voice as well. **No lane strip
+was shown, correctly**: the engine has no lane data for that road (13 probed
+Indian routes → **0** lane-bearing intersections; lane data exists only where
+OpenStreetMap is mapped with `turn:lanes`).
+
+**Not verified:** a *live in-app* lane strip — the rider is physically in
+Pune (no lane data) and the device blocks mock locations from the shell.
+
+### Still open
+
+B-08 (blocked by D7), B-10, B-20 … B-27, plus the new items:
+- **B-29** — use the parsed signed turn angle to refine the icon when the
+  engine's modifier is coarse;
+- **B-30** — show the lane strip in the stop-by-stop itinerary card as well as
+  in the live turn card.
+
+---
+
+## Implementation record, batch 7 (approved 2026-10-22): B-29 and B-31
+
+Evidence and design: `docs/reverse-engineering/feature-14-amenity-selection.md`.
+
+### B-29 · Selection semantics — **DONE** (closes S5-4 of Feature 05)
+
+**Change.** New `ui/map/AmenitySelection.kt`:
+
+- the tap resolves to the **topmost drawn marker**, not to the first one in
+  the amenity list — a marker drawn under another can no longer steal the tap
+  (F5-D4 / F14-D1);
+- a **cluster expands** instead of selecting, and an expanded cluster **stays
+  open**: its members are excluded from the grouping and drawn as single
+  markers (F14-D2, F14-D3);
+- a selection **dims** the other markers to 40 %, so the selection reads at a
+  glance and the surroundings stay visible (F14-D4).
+
+**Verification.** `AmenitySelectionTest` (7 tests).
+
+### B-31 · A selected place becomes a stop of the ride — **DONE**
+
+**Change.** New `data/model/AmenityStopPlan.kt` and
+`RideViewModel.addSelectedAmenityAsStop()`:
+
+- the place is inserted into the plan as the **last intermediate stop**, just
+  before the final destination;
+- the route is **re-planned from the rider's position** through the new stop;
+- the **detour** is derived from the two route results the app already has
+  (the ride that was left vs the ride that is left now) — exact, and no extra
+  service call;
+- the plan is published as **one versioned unit** through the existing
+  leader-owned path, and the announcement suppression of the old route is
+  cleared;
+- a member is told who can change the route instead of silently failing.
+
+The sheet's primary action is now the in-app **"Add as a stop"**; the
+**"Navigate Here" hand-off to Google Maps is gone** (independent-stack
+invariant).
+
+**Verification.** `AmenityStopPlanTest` (6 tests), and on the device:
+`AmenitySelectionSheetDeviceRenderTest` (the sheet renders with the in-app
+action — executed, capture pulled) and `AmenityTapSelectionDeviceTest` (a tap
+on a marker selects it, a tap on a cluster expands it — **written and
+compiled, not executed**: the phone disconnected from USB before the run).
+Full offline suite: 60 classes / 507 tests / 0 failures / 0 errors / 0
+skipped.
+
+**Blocked:** the live ride could not be driven with real places in this
+window — the Overpass endpoint is not answering, so the live map has no
+places to select.
+
+### Still open
+
+B-08 (blocked by D7), B-10, B-20 … B-27, B-29 (turn-angle icon refinement),
+B-30 (lane strip in the itinerary card), plus the new items:
+- **B-32** — show the **detour before** the stop is taken (the reference shows
+  it on the candidate cards and on the markers); RideTogether can only derive
+  it after the re-plan, so this needs a second route request per candidate;
+- **B-33** — a member can **suggest** a stop to the leader (needs a message
+  type that does not exist yet);
+- **B-34** — relevance weighting for amenities (backlog S5-1): the detour
+  gives a cost signal, a fuel-before-a-long-leg signal is still missing.
+
+---
+
+## Implementation record, batch 8 (approved 2026-10-22): the place card, the symbols and the add-stop workflow
+
+Evidence and design: `docs/reverse-engineering/feature-14-amenity-selection.md` §7.
+
+### The place card — **DONE**
+
+New `data/amenities/PlaceCard.kt` (model + the conservative opening-hours
+reader + the tag reader) and `ui/components/PlaceCard.kt` (the layout). The
+card shows the place's photo (or the category symbol), the name, the
+category, the rating and review count **when the data has them**, the opening
+status **when the hours can be read**, the distance and the contact details.
+Nothing is invented: unreadable hours produce no badge at all.
+
+### The category symbols — **DONE** (closes the icon half of S5-2)
+
+Stock Material icons (Apache License 2.0) — no reference artwork is copied or
+traced. Corrected where the old symbol was wrong: motorcycle repair → a
+motorcycle, rest stop → a seat (was a parking sign), convenience store → a
+shop front (was a trolley), viewpoint → a landscape (was a camera). The
+symbols are distinct per category.
+
+### The add-stop workflow — **DONE**
+
+The contextual action is "**Add stop**" and it carries the **price** of the
+stop ("Add stop · +3 min detour") as soon as a reliable estimate exists. The
+price is drawn as a badge on the place's **marker** as well, so the rider sees
+it on the map before committing. A **candidate list** ("Add a stop") shows
+the places on the map with their category, distance and price; the entry
+point is a button on the live map. The other actions are "**Directions**"
+(the place becomes the destination of the ride, in-app), "**Save place**"
+(the rider's own shortlist, in Room) and "**Show on map**" (the camera
+centres on the place).
+
+### Verification
+
+`OpeningHoursTest` (11), `PlaceCardTest` (11) and an extended
+`AmenityIconConfigTest` (7). Full offline suite: **62 classes / 533 tests / 0
+failures / 0 errors / 0 skipped**. **Not device-verified in this pass** — the
+phone was not connected.
+
+---
+
+## Batch 9 — the 14-screen redesign
+
+**Goal:** implement the supplied premium-dark showcase (charcoal + amber) across
+the whole product without moving any domain logic.
+
+**Approach:** one token change (the palette lived behind named constants, so
+every call site restyled at once), a shared component library
+(`ui/components/DesignSystem.kt`), then screen-by-screen composition. Domain
+classes were not edited for style; the only domain-adjacent edits were the
+view-model flows needed by the new surfaces (saved places, detour metres, the
+added-stop summary, the navigation report) and their unit tests.
+
+**New functional surfaces (not restyles):**
+- the navigation menu (share status, add stop, nearby places, overview, group
+  ride, voice, report, end/leave) — screen 7;
+- the nearby-places sheet with local search, category chips, distance and
+  priced detours — screen 8;
+- the stop confirmation with the real route preview and the measured change —
+  screen 10;
+- the updated-route sheet built from the committed plan — screen 11;
+- the two-tab ride history — screen 14.
+
+**Open items:** consolidate the six map control buttons into the reference's
+three (functional change in the renderer); device-capture the place, nearby,
+confirmation and updated-route surfaces once Overpass answers; decide whether
+the default map appearance should be NIGHT for the dark product (currently
+AUTO, pinned by `MapThemeControllerTest`).
