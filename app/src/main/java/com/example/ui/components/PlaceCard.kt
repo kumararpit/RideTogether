@@ -39,6 +39,7 @@ import com.example.ui.map.AmenityPalette
 import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.StatusEmergencyRed
 import com.example.ui.theme.StatusRidingGreen
+import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.TextTertiary
 
@@ -62,7 +63,9 @@ fun PlaceCard(
 ) {
     Column(modifier = modifier.fillMaxWidth().testTag("place_card")) {
 
-        // The place's own photo, or its category symbol when it has none.
+        // The hero: the place's own photo when OSM carries one, otherwise a
+        // category-tinted panel with the same symbol used on the map. Both
+        // paths produce the same information hierarchy: image, name, facts.
         if (card.imageUrl != null) {
             AsyncImage(
                 model = ImageRequest.Builder(LocalContext.current)
@@ -73,69 +76,65 @@ fun PlaceCard(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(150.dp)
-                    .clip(RoundedCornerShape(16.dp))
+                    .height(180.dp)
+                    .clip(RoundedCornerShape(18.dp))
                     .background(SlateDark800)
             )
-            Spacer(modifier = Modifier.height(14.dp))
         } else {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .background(categoryColor),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = categoryIcon,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.width(14.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = card.name ?: card.categoryName,
-                        color = Color.White,
-                        fontSize = 19.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = card.categoryName,
-                        color = TextSecondary,
-                        fontSize = 13.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                card.distanceText?.let { DistanceChip(it, categoryColor) }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(112.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(
+                        androidx.compose.ui.graphics.Brush.linearGradient(
+                            colors = listOf(
+                                categoryColor.copy(alpha = 0.45f),
+                                categoryColor.copy(alpha = 0.12f),
+                                SlateDark800
+                            )
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = categoryIcon,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.92f),
+                    modifier = Modifier.size(46.dp)
+                )
             }
-            Spacer(modifier = Modifier.height(14.dp))
         }
 
-        // A place with a photo repeats the name under it.
-        if (card.imageUrl != null) {
-            Text(
-                text = card.name ?: card.categoryName,
-                color = Color.White,
-                fontSize = 19.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = card.categoryName,
-                color = TextSecondary,
-                fontSize = 13.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(14.dp))
+
+        Row(verticalAlignment = Alignment.Top) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = card.name ?: card.categoryName,
+                    color = TextPrimary,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 27.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = card.categoryName,
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            card.distanceText?.let {
+                Spacer(modifier = Modifier.width(10.dp))
+                DistanceChip(it, categoryColor)
+            }
         }
+
+        Spacer(modifier = Modifier.height(10.dp))
 
         // The rating, when the place has one.
         card.rating?.let { ratingValue ->

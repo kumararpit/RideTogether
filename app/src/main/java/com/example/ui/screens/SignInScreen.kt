@@ -4,28 +4,28 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Navigation
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.TwoWheeler
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,12 +37,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.ui.theme.AmberDark
 import com.example.ui.theme.AmberPrimary
-import com.example.ui.theme.SlateDark700
-import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
+import com.example.ui.theme.StatusEmergencyRed
+import com.example.ui.theme.TextPrimary
+import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.TextTertiary
 
+/**
+ * Sign in (reference screen 1, second state).
+ *
+ * The splash sold the product; this screen asks one question and offers one
+ * promise: an account keeps the group in sync, and the app still works without
+ * one. There is no duplicate "Sign In" button here — the Google button is the
+ * only sign-in path, and the text button is the genuine local-mode route.
+ */
 @Composable
 fun SignInScreen(
     isLoading: Boolean,
@@ -58,181 +67,157 @@ fun SignInScreen(
         color = SlateDark900
     ) {
         Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(
+                            AmberPrimary.copy(alpha = 0.10f),
+                            Color.Transparent
+                        ),
+                        radius = 900f
+                    )
+                )
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 28.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .padding(horizontal = 24.dp)
             ) {
-                // App Logo Badge
-                Box(
-                    modifier = Modifier
-                        .size(96.dp)
-                        .clip(CircleShape)
-                        .background(
-                            Brush.linearGradient(
-                                listOf(AmberPrimary, AmberDark)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (onBack != null) {
+                        IconButton(
+                            onClick = onBack,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("cancel_sign_in_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back to ride",
+                                tint = TextSecondary
                             )
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.TwoWheeler,
-                        contentDescription = "RideTogether Icon",
-                        tint = SlateDark900,
-                        modifier = Modifier.size(54.dp)
-                    )
+                        }
+                    }
                 }
+
+                Spacer(modifier = Modifier.weight(0.55f))
+
+                LogoMark(size = 92.dp)
 
                 Spacer(modifier = Modifier.height(24.dp))
 
                 Text(
-                    text = "RideTogether",
-                    fontSize = 32.sp,
+                    text = "Sign in to ride together",
+                    color = TextPrimary,
+                    fontSize = 28.sp,
                     fontWeight = FontWeight.Black,
-                    color = Color.White,
-                    letterSpacing = 1.sp
+                    letterSpacing = (-0.6).sp
                 )
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 Text(
-                    text = "Real-time convoy telemetry, live pack tracking, and smart navigation.",
-                    fontSize = 15.sp,
-                    color = Color(0xFF94A3B8),
-                    textAlign = TextAlign.Center,
-                    lineHeight = 22.sp,
-                    modifier = Modifier.padding(horizontal = 16.dp)
+                    text = "Live positions, the shared route and every stop, on every rider's phone.",
+                    color = TextSecondary,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp
                 )
 
-                Spacer(modifier = Modifier.height(40.dp))
+                Spacer(modifier = Modifier.height(24.dp))
 
-                // Sign in card
-                Surface(
-                    color = SlateDark800,
-                    shape = RoundedCornerShape(20.dp),
-                    tonalElevation = 4.dp,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                if (!errorMessage.isNullOrBlank()) {
+                    Surface(
+                        color = StatusEmergencyRed.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(
-                            text = "Account Required",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        Text(
-                            text = "Sign in to synchronize convoy location, join pack rides via code, and broadcast telemetry to riders in real-time.",
-                            fontSize = 13.sp,
-                            color = Color(0xFF94A3B8),
-                            textAlign = TextAlign.Center,
-                            lineHeight = 18.sp
-                        )
-
-                        if (!errorMessage.isNullOrBlank()) {
-                            Spacer(modifier = Modifier.height(14.dp))
-                            Surface(
-                                color = Color(0xFF7F1D1D).copy(alpha = 0.45f),
-                                shape = RoundedCornerShape(10.dp),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.4f)),
-                                modifier = Modifier.fillMaxWidth()
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(
+                                text = errorMessage,
+                                color = StatusEmergencyRed,
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp
+                            )
+                            if (errorMessage.contains("Google Account", ignoreCase = true) ||
+                                errorMessage.contains("credentials", ignoreCase = true)
                             ) {
-                                Column(modifier = Modifier.padding(12.dp)) {
-                                    Text(
-                                        text = errorMessage,
-                                        color = Color(0xFFFCA5A5),
-                                        fontSize = 12.sp,
-                                        textAlign = TextAlign.Center,
-                                        lineHeight = 16.sp,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                    if (errorMessage.contains("Google Account", ignoreCase = true) || errorMessage.contains("credentials", ignoreCase = true)) {
-                                        Spacer(modifier = Modifier.height(6.dp))
-                                        Text(
-                                            text = "Tip: Make sure you are signed into Google Play Services on this device or emulator.",
-                                            color = Color(0xFFE2E8F0),
-                                            fontSize = 11.sp,
-                                            textAlign = TextAlign.Center,
-                                            modifier = Modifier.fillMaxWidth()
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(24.dp))
-
-                        Button(
-                            onClick = onSignInClick,
-                            enabled = !isLoading,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = AmberPrimary,
-                                contentColor = SlateDark900,
-                                disabledContainerColor = SlateDark700
-                            ),
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(52.dp)
-                                .testTag("google_sign_in_button")
-                        ) {
-                            if (isLoading) {
-                                CircularProgressIndicator(
-                                    color = SlateDark900,
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
                                 Text(
-                                    text = "Signing in...",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 15.sp
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.Lock,
-                                    contentDescription = "Sign in",
-                                    tint = SlateDark900,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Text(
-                                    text = "Sign in with Google",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 15.sp
-                                )
-                            }
-                        }
-
-                        if (onBack != null) {
-                            Spacer(modifier = Modifier.height(12.dp))
-                            androidx.compose.material3.TextButton(
-                                onClick = onBack,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("cancel_sign_in_button")
-                            ) {
-                                Text(
-                                    text = "Cancel & Return to Home",
-                                    color = Color(0xFF90A4AE),
-                                    fontSize = 14.sp
+                                    text = "Make sure this device is signed into Google Play Services.",
+                                    color = TextTertiary,
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp
                                 )
                             }
                         }
                     }
+                    Spacer(modifier = Modifier.height(16.dp))
                 }
+
+                Button(
+                    onClick = onSignInClick,
+                    enabled = !isLoading,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AmberPrimary,
+                        contentColor = Color(0xFF1A1205),
+                        disabledContainerColor = AmberPrimary.copy(alpha = 0.4f),
+                        disabledContentColor = Color(0xFF1A1205)
+                    ),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp)
+                        .testTag("google_sign_in_button")
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            color = Color(0xFF1A1205),
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text("Signing in…", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = Color(0xFF1A1205),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text("Sign in with Google", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    }
+                }
+
+                if (onBack != null) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    TextButton(
+                        onClick = onBack,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                    ) {
+                        Text(
+                            text = "Continue without an account",
+                            color = TextSecondary,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                Text(
+                    text = "Without an account, rides stay on this device.",
+                    color = TextTertiary,
+                    fontSize = 11.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 24.dp)
+                )
             }
         }
     }

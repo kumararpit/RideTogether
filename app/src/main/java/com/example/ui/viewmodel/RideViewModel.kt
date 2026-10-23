@@ -50,6 +50,23 @@ enum class AppScreen {
 /** How many candidate places are priced at once (each price is a route request). */
 private const val MAX_ESTIMATED_CANDIDATES = 4
 
+/** A preview of what a stop would cost, in time and distance. */
+private data class DetourEstimate(val seconds: Double, val meters: Double)
+
+/**
+ * The stop that was just added to the plan.
+ *
+ * Every field is measured from the route the rider actually got: the name
+ * from the place, the deltas from the two route results that were compared.
+ */
+data class AddedStopSummary(
+    val name: String,
+    val detourSeconds: Double?,
+    val addedDistanceMeters: Double,
+    val addedDurationSeconds: Double,
+    val stopCount: Int
+)
+
 class RideViewModel(    application: Application,
     routeProviderOverride: com.example.data.location.RouteProvider? = null
 ) : AndroidViewModel(application) {
@@ -153,6 +170,12 @@ class RideViewModel(    application: Application,
     val currentRiderStatus = repository.currentRiderStatus
     val joinError = repository.joinError
 
+    // Declared before the init block: the init reads the saved places, and
+    // Kotlin initialises properties in declaration order.
+    private val savedPlaceDao = com.example.data.db.RideDatabase
+        .getInstance(application)
+        .savedPlaceDao()
+
     val amenityRepository = com.example.data.amenities.AmenityRepository(com.example.data.db.RideDatabase.getInstance(application))
 
     init {
@@ -163,6 +186,8 @@ class RideViewModel(    application: Application,
             val caps = cm?.activeNetwork?.let { cm.getNetworkCapabilities(it) }
             caps == null || !caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
         }
+        // The rider's saved places feed the Home screen and the place sheets.
+        loadSavedAmenities()
     }
 
     /**
@@ -207,6 +232,17 @@ class RideViewModel(    application: Application,
     private val _amenityDetourSeconds = MutableStateFlow<Double?>(null)
     val amenityDetourSeconds: StateFlow<Double?> = _amenityDetourSeconds.asStateFlow()
 
+    /** The extra distance of the selected place's detour, in metres, when known. */
+    private val _amenityDetourMeters = MutableStateFlow<Double?>(null)
+    val amenityDetourMeters: StateFlow<Double?> = _amenityDetourMeters.asStateFlow()
+
+    /**
+     * The stop that was just committed to the plan, for the "Route updated"
+     * confirmation. Null when nothing has been added.
+     */
+    private val _addedStopSummary = MutableStateFlow<AddedStopSummary?>(null)
+    val addedStopSummary: StateFlow<AddedStopSummary?> = _addedStopSummary.asStateFlow()
+
     /** True while the detour of the selected place is being estimated. */
     private val _isEstimatingAmenityDetour = MutableStateFlow(false)
     val isEstimatingAmenityDetour: StateFlow<Boolean> = _isEstimatingAmenityDetour.asStateFlow()
@@ -215,12 +251,13 @@ class RideViewModel(    application: Application,
     private val _savedAmenityIds = MutableStateFlow<Set<Long>>(emptySet())
     val savedAmenityIds: StateFlow<Set<Long>> = _savedAmenityIds.asStateFlow()
 
-    private val savedPlaceDao = com.example.data.db.RideDatabase
-        .getInstance(application)
-        .savedPlaceDao()
+    /** The rider's saved places, newest first (the "Saved places" screen). */
+    private val _savedPlaces = MutableStateFlow<List<com.example.data.db.SavedPlaceEntity>>(emptyList())
+    val savedPlaces: StateFlow<List<com.example.data.db.SavedPlaceEntity>> = _savedPlaces.asStateFlow()
 
     private var amenityDetourJob: kotlinx.coroutines.Job? = null
     private var amenityStopJob: kotlinx.coroutines.Job? = null
+    private var stopEditJob: kotlinx.coroutines.Job? = null
 
     /**
      * Routes the ride **to** the selected place: the place becomes the
@@ -318,9 +355,14 @@ class RideViewModel(    application: Application,
     fun selectAmenity(amenity: com.example.data.amenities.AmenityEntity?) {
         _selectedAmenity.value = amenity
         _amenityDetourSeconds.value = null
+        _amenityDetourMeters.value = null
         if (amenity != null) {
             estimateAmenityDetour(amenity)
         }
+    }
+
+    fun clearAddedStopSummary() {
+        _addedStopSummary.value = null
     }
 
     fun clearAmenityStopMessage() {
@@ -341,7 +383,9 @@ class RideViewModel(    application: Application,
         amenityDetourJob = viewModelScope.launch {
             _isEstimatingAmenityDetour.value = true
             try {
-                _amenityDetourSeconds.value = computeAmenityDetourSeconds(amenity)
+                val estimate = computeAmenityDetour(amenity)
+                _amenityDetourSeconds.value = estimate?.seconds
+                _amenityDetourMeters.value = estimate?.meters
             } finally {
                 _isEstimatingAmenityDetour.value = false
             }
@@ -356,15 +400,18 @@ class RideViewModel(    application: Application,
      * compared with the ride that is left now. It changes nothing: the ride
      * is only re-planned when the rider commits to the stop.
      */
-    private suspend fun computeAmenityDetourSeconds(
+    private suspend fun computeAmenityDetour(
         amenity: com.example.data.amenities.AmenityEntity
-    ): Double? {
+    ): DetourEstimate? {
         val ride = repository.currentRide.value ?: return null
         val destination = ride.destinationLocation ?: return null
         val userLoc = locationTracker.currentLocation.value?.latLng
             ?: repository.members.value.find { it.isCurrentUser }?.location
             ?: ride.startLocation
             ?: return null
+
+        val oldRemainingMeters = navEngine.progress.value.remainingRouteDistanceMeters
+        if (oldRemainingMeters <= 0.0) return null
 
         val activeStops = _routeResult.value?.stops ?: _routePlanStops.value
         val completedLegs = navEngine.progress.value.currentLegIndex
@@ -398,7 +445,6 @@ class RideViewModel(    application: Application,
         }
         if (preview.coordinates.isEmpty() || preview.isFallback) return null
 
-        val oldRemainingMeters = navEngine.progress.value.remainingRouteDistanceMeters
         val newAverageSpeedMps = if (preview.totalDistanceMeters > 0.0) {
             preview.totalDistanceMeters / maxOf(preview.totalDurationSeconds, 1.0)
         } else {
@@ -409,9 +455,12 @@ class RideViewModel(    application: Application,
         } else {
             0.0
         }
-        return com.example.data.model.AmenityStopPlan.detourSeconds(
-            newRemainingSeconds = preview.totalDurationSeconds,
-            oldRemainingSeconds = oldRemainingSeconds
+        return DetourEstimate(
+            seconds = com.example.data.model.AmenityStopPlan.detourSeconds(
+                newRemainingSeconds = preview.totalDurationSeconds,
+                oldRemainingSeconds = oldRemainingSeconds
+            ),
+            meters = preview.totalDistanceMeters - oldRemainingMeters
         )
     }
 
@@ -437,8 +486,8 @@ class RideViewModel(    application: Application,
         candidateDetourJob = viewModelScope.launch {
             val out = HashMap<Long, Double>()
             for (candidate in bounded) {
-                val detour = computeAmenityDetourSeconds(candidate) ?: continue
-                out[candidate.osmId] = detour
+                val detour = computeAmenityDetour(candidate) ?: continue
+                out[candidate.osmId] = detour.seconds
                 _amenityCandidateDetours.value = out.toMap()
             }
         }
@@ -470,11 +519,24 @@ class RideViewModel(    application: Application,
         }
     }
 
-    /** Loads the saved places into the view state. */
+    /** Removes a place from the rider's shortlist. */
+    fun removeSavedPlace(osmId: Long) {
+        viewModelScope.launch {
+            savedPlaceDao.delete(osmId)
+            _savedAmenityIds.value = _savedAmenityIds.value - osmId
+        }
+    }
+
+    private var savedPlacesLoaded = false
+
+    /** Loads the saved places into the view state (once per process). */
     fun loadSavedAmenities() {
+        if (savedPlacesLoaded) return
+        savedPlacesLoaded = true
         viewModelScope.launch {
             savedPlaceDao.observeAll().collect { places ->
                 _savedAmenityIds.value = places.map { it.osmId }.toSet()
+                _savedPlaces.value = places
             }
         }
     }
@@ -493,6 +555,17 @@ class RideViewModel(    application: Application,
      */
     fun addSelectedAmenityAsStop() {
         val amenity = _selectedAmenity.value ?: return
+        addAmenityAsStop(amenity)
+    }
+
+    /**
+     * Adds [amenity] to the ride as a stop and re-plans through it.
+     *
+     * The caller passes the place explicitly: the confirmation sheet shows
+     * the place's own estimate, and the details sheet may already be closed
+     * by the time the rider confirms.
+     */
+    fun addAmenityAsStop(amenity: com.example.data.amenities.AmenityEntity) {
         if (!currentUserIsLeader()) {
             _amenityStopMessage.value = "Only the ride leader can change the route"
             return
@@ -597,6 +670,13 @@ class RideViewModel(    application: Application,
                 } else {
                     "Added ${newStop.name} to the route"
                 }
+                _addedStopSummary.value = AddedStopSummary(
+                    name = newStop.name,
+                    detourSeconds = detourSeconds,
+                    addedDistanceMeters = result.totalDistanceMeters - oldRemainingMeters,
+                    addedDurationSeconds = result.totalDurationSeconds - oldRemainingSeconds,
+                    stopCount = nextStops.count { it.role != com.example.data.model.RouteStopRole.ORIGIN }
+                )
                 _selectedAmenity.value = null
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -604,6 +684,104 @@ class RideViewModel(    application: Application,
                 _amenityStopMessage.value = e.message ?: "Could not plan a route through that place"
             } catch (_: Exception) {
                 _amenityStopMessage.value = "Could not plan a route through that place"
+            } finally {
+                _isRerouting.value = false
+            }
+        }
+    }
+
+
+    /**
+     * Removes an intermediate stop and re-plans the ride through the stops
+     * that remain.
+     *
+     * Mid-ride the new route starts at the rider's current position (the same
+     * rule "add a stop" follows), so the removed stop is bypassed instead of
+     * being ridden to. Before the ride starts the planned origin is kept.
+     *
+     * A stop that is already behind the rider only changes the published
+     * plan; there is no route left to recompute.
+     */
+    fun removeRouteStop(stopId: String) {
+        if (!currentUserIsLeader()) {
+            _amenityStopMessage.value = "Only the ride leader can change the route"
+            return
+        }
+        val ride = repository.currentRide.value ?: return
+        val plan = _routePlanStops.value.ifEmpty { _routeResult.value?.stops.orEmpty() }
+        val target = plan.firstOrNull {
+            it.id == stopId && it.role == RouteStopRole.INTERMEDIATE
+        } ?: return
+        val destination = plan.lastOrNull { it.role == RouteStopRole.DESTINATION } ?: return
+        val isActive = ride.status == com.example.data.model.RideStatus.ACTIVE
+
+        val remaining = if (isActive) {
+            com.example.data.model.RoutePlanEditor.remainingAfterLeg(
+                stops = plan,
+                currentLegIndex = navEngine.progress.value.currentLegIndex
+            )
+        } else {
+            plan
+        }
+        val nextStops = com.example.data.model.RoutePlanEditor
+            .withoutIntermediate(remaining, stopId)
+        if (nextStops.none { it.role == RouteStopRole.DESTINATION }) return
+
+        // Already ridden past: publish the edited plan, keep the live route.
+        if (nextStops == remaining) {
+            _routePlanStops.value = com.example.data.model.RoutePlanEditor
+                .withoutIntermediate(plan, stopId)
+            publishRoutePlan(selectedIndex = selectedRouteIndex, options = _routeOptions.value)
+            _amenityStopMessage.value = "Removed ${target.name}"
+            return
+        }
+
+        val start = if (isActive) {
+            locationTracker.currentLocation.value?.latLng
+                ?: repository.members.value.find { it.isCurrentUser }?.location
+                ?: plan.firstOrNull { it.role == RouteStopRole.ORIGIN }?.latLng
+                ?: return
+        } else {
+            plan.firstOrNull { it.role == RouteStopRole.ORIGIN }?.latLng ?: return
+        }
+
+        stopEditJob?.cancel()
+        stopEditJob = viewModelScope.launch {
+            _isRerouting.value = true
+            try {
+                val nextIntermediates = nextStops.filter {
+                    it.role == RouteStopRole.INTERMEDIATE
+                }
+                val result = osrmRoutingService.fetchRoute(
+                    start = start,
+                    destination = destination.latLng,
+                    intermediateStops = nextIntermediates.map { it.latLng }
+                )
+                if (result.coordinates.isEmpty() || result.isFallback) {
+                    _amenityStopMessage.value = "Could not plan a route without that stop"
+                    return@launch
+                }
+                _routeResult.value = result
+                _routePlanError.value = null
+                _routeOptions.value = emptyList()
+                navEngine.setRoute(result)
+                navAudioGuidance.resetAnnounceHistory()
+                repository.updateRoute(
+                    result.coordinates,
+                    result.totalDistanceMeters,
+                    result.totalDurationSeconds,
+                    result.steps
+                )
+                _routePlanStops.value = nextStops
+                publishRoutePlan(selectedIndex = 0, options = emptyList())
+                _amenityStopMessage.value = "Removed ${target.name}"
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: RouteRequestException) {
+                _amenityStopMessage.value =
+                    e.message ?: "Could not plan a route without that stop"
+            } catch (_: Exception) {
+                _amenityStopMessage.value = "Could not plan a route without that stop"
             } finally {
                 _isRerouting.value = false
             }
@@ -1497,6 +1675,36 @@ class RideViewModel(    application: Application,
 
     fun resolveSos() {
         repository.resolveSos()
+    }
+
+    private val feedbackRepository by lazy {
+        com.example.data.repository.FeedbackRepository(
+            com.example.data.db.RideDatabase.getInstance(application).feedbackDao()
+        )
+    }
+
+    /**
+     * Stores a ride-issue report on the device with the ride it happened on.
+     * The report is the rider's own note; it is never invented and never sent
+     * anywhere the rider did not ask for.
+     */
+    fun submitNavigationReport(comments: String) {
+        val text = comments.trim()
+        if (text.isEmpty()) return
+        viewModelScope.launch {
+            runCatching {
+                feedbackRepository.submitFeedback(
+                    com.example.data.db.UserFeedback(
+                        riderName = userName.value,
+                        rideName = currentRide.value?.name.orEmpty(),
+                        rating = 0,
+                        category = "navigation",
+                        comments = text,
+                        isRealGpsMode = true
+                    )
+                )
+            }
+        }
     }
 
     val showRidersSheet: StateFlow<Boolean> = _showRiderListSheet

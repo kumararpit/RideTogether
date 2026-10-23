@@ -138,10 +138,13 @@ fun RideTogetherApp(viewModel: RideViewModel) {
                         viewModel.navigateTo(AppScreen.SIGN_IN)
                     }
                 },
+                onSignInClick = { viewModel.navigateTo(AppScreen.SIGN_IN) },
                 onSignOutClick = { viewModel.signOut(context) },
                 isSignedIn = (currentUser != null),
                 userEmail = currentUser?.email,
-                pastRides = completedRides
+                pastRides = completedRides,
+                savedPlaces = viewModel.savedPlaces.collectAsState().value,
+                onRemoveSavedPlace = { viewModel.removeSavedPlace(it) }
             )
         }
 

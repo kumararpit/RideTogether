@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
@@ -68,15 +69,16 @@ import com.example.ui.theme.CustomIcons
 import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
 import com.example.ui.theme.StatusRidingGreen
+import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.TextTertiary
 import java.util.Locale
 
-private val DarkBackground = Color(0xFF0F131A)
-private val CardSurface = Color(0xFF1B212B)
-private val CardBorderColor = Color(0xFF253248)
-private val StartOrange = Color(0xFFF97316)
-private val AccentCyan = Color(0xFF38BDF8)
+private val DarkBackground = com.example.ui.theme.SlateDark900
+private val CardSurface = com.example.ui.theme.SlateDark800
+private val CardBorderColor = com.example.ui.theme.SlateDark500
+private val StartOrange = com.example.ui.theme.AmberPrimary
+private val AccentCyan = com.example.ui.theme.TextSecondary
 
 @Composable
 fun RideLobbyScreen(
@@ -106,6 +108,8 @@ fun RideLobbyScreen(
                     .fillMaxSize()
                     .statusBarsPadding()
                     .padding(horizontal = 20.dp),
+                // The docked Start Ride bar must never cover the last card.
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 112.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 // 1. Top App Bar Header
@@ -127,7 +131,7 @@ fun RideLobbyScreen(
                             )
                         }
                         Spacer(modifier = Modifier.width(8.dp))
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = ride.name,
                                 color = Color.White,
@@ -144,96 +148,118 @@ fun RideLobbyScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                    }
-                }
-
-                // 2. Route Hero Card (Scenic Banner + Live Map Preview)
-                item {
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("route_overview_card"),
-                        color = CardSurface,
-                        shape = RoundedCornerShape(20.dp),
-                        border = BorderStroke(1.dp, CardBorderColor)
-                    ) {
-                        Column {
-                            // Scenic Image Banner
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(110.dp)
-                                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
-                            ) {
-                                Image(
-                                    painter = painterResource(id = R.drawable.scenic_mountain_road),
-                                    contentDescription = "Scenic route preview",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .background(
-                                            Brush.verticalGradient(
-                                                colors = listOf(
-                                                    Color.Black.copy(alpha = 0.40f),
-                                                    CardSurface.copy(alpha = 0.95f)
-                                                )
-                                            )
-                                        )
-                                )
-
-                                Column(
-                                    modifier = Modifier
-                                        .align(Alignment.BottomStart)
-                                        .padding(14.dp)
-                                ) {
-                                    Text(
-                                        text = "${ride.startLocationName} → ${ride.destinationName}",
-                                        color = Color.White,
-                                        fontSize = 18.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    val distStr = if (ride.totalDistanceMeters > 0) {
-                                        String.format(Locale.US, "%.1f km", ride.totalDistanceMeters / 1000.0)
-                                    } else "49.8 km"
-                                    val durStr = if (ride.totalDurationSeconds > 0) {
-                                        "${(ride.totalDurationSeconds / 60.0).toInt()} min"
-                                    } else "40 min"
-                                    Text(
-                                        text = "$distStr • $durStr • Scenic Route",
-                                        color = AmberPrimary,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold
+                        IconButton(
+                            onClick = {
+                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(
+                                        Intent.EXTRA_TEXT,
+                                        "Join my motorcycle ride on RideTogether!\nRide: ${ride.name}\nInvite Code: ${ride.inviteCode}"
                                     )
                                 }
-                            }
-
-                            // Embedded Live Map Preview
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(160.dp)
-                                    .clip(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp))
-                                    .testTag("lobby_map_preview")
-                            ) {
-                                RideMapCanvas(
-                                    route = routePoints,
-                                    members = members,
-                                    selectedRider = null,
-                                    onSelectRider = {},
-                                    isFollowRiderMode = false,
-                                    initialStartLocation = ride.startLocation
-                                )
-                            }
+                                context.startActivity(Intent.createChooser(shareIntent, "Share ride invite"))
+                            },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("share_invite_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Share,
+                                contentDescription = "Share invite",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
                     }
                 }
 
-                // 3. Route options + stop itinerary (the plan the group rides)
-                if (routeOptions.isNotEmpty() || (routeResult != null && routeResult.legs.size > 1)) {
+                // 2. The route map — the plan the group is about to ride.
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(258.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(CardSurface)
+                            .testTag("route_overview_card")
+                    ) {
+                        RideMapCanvas(
+                            route = routePoints,
+                            members = members,
+                            selectedRider = null,
+                            onSelectRider = {},
+                            isFollowRiderMode = false,
+                            initialStartLocation = ride.startLocation,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .testTag("lobby_map_preview")
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.verticalGradient(
+                                        0.55f to Color.Transparent,
+                                        1f to SlateDark900.copy(alpha = 0.94f)
+                                    )
+                                )
+                        )
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(16.dp)
+                        ) {
+                            Text(
+                                text = "${ride.startLocationName} → ${ride.destinationName}",
+                                color = Color.White,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            // Only measured values are shown: a ride whose route
+                            // has not been planned yet has no distance or time.
+                            val stats = buildList {
+                                if (ride.totalDistanceMeters > 0) {
+                                    add(String.format(Locale.US, "%.1f km", ride.totalDistanceMeters / 1000.0))
+                                }
+                                if (ride.totalDurationSeconds > 0) {
+                                    add("${Math.round(ride.totalDurationSeconds / 60.0)} min")
+                                }
+                                val stopCount = (routeResult?.legs?.size ?: 1) - 1
+                                if (stopCount > 0) add("$stopCount stop${if (stopCount == 1) "" else "s"}")
+                            }
+                            Text(
+                                text = if (stats.isEmpty()) "Route being planned" else stats.joinToString(" · "),
+                                color = AmberPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+
+                // 3. The plan the group rides: every stop in order, then the
+                //    leader's route alternatives when the engine offered some.
+                val planStops = routeResult?.stops.orEmpty().ifEmpty {
+                    listOfNotNull(
+                        com.example.data.model.RouteStop(
+                            name = ride.startLocationName,
+                            latitude = ride.startLocation?.latitude ?: 0.0,
+                            longitude = ride.startLocation?.longitude ?: 0.0,
+                            role = com.example.data.model.RouteStopRole.ORIGIN
+                        ),
+                        ride.destinationLocation?.let {
+                            com.example.data.model.RouteStop(
+                                name = ride.destinationName,
+                                latitude = it.latitude,
+                                longitude = it.longitude,
+                                role = com.example.data.model.RouteStopRole.DESTINATION
+                            )
+                        }
+                    )
+                }
+                if (planStops.isNotEmpty() || routeOptions.size > 1) {
                     item {
                         Surface(
                             modifier = Modifier
@@ -244,18 +270,34 @@ fun RideLobbyScreen(
                             border = BorderStroke(1.dp, CardBorderColor)
                         ) {
                             Column(modifier = Modifier.padding(16.dp)) {
+                                Text(
+                                    text = "Route",
+                                    color = TextPrimary,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                planStops.forEachIndexed { index, stop ->
+                                    LobbyStopRow(
+                                        stop = stop,
+                                        index = index,
+                                        isLast = index == planStops.lastIndex
+                                    )
+                                }
+
                                 if (routeOptions.size > 1) {
+                                    Spacer(modifier = Modifier.height(14.dp))
                                     Text(
                                         text = if (isLeader) {
-                                            "CHOOSE THE ROUTE FOR THE GROUP"
+                                            "Choose the route for the group"
                                         } else {
-                                            "ROUTE CHOSEN BY THE LEADER"
+                                            "Route chosen by the leader"
                                         },
-                                        color = TextTertiary,
+                                        color = TextSecondary,
                                         fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
+                                        fontWeight = FontWeight.SemiBold
                                     )
-                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Spacer(modifier = Modifier.height(6.dp))
                                     RouteOptionSelector(
                                         options = routeOptions,
                                         selectedIndex = ride.selectedRouteIndex,
@@ -263,9 +305,6 @@ fun RideLobbyScreen(
                                         enabled = isLeader,
                                         showHeader = false
                                     )
-                                }
-                                if (routeResult != null && routeResult.legs.size > 1) {
-                                    RouteItineraryCard(route = routeResult)
                                 }
                             }
                         }
@@ -294,8 +333,8 @@ fun RideLobbyScreen(
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
                                 text = ride.inviteCode,
-                                color = AccentCyan,
-                                fontSize = 32.sp,
+                                color = AmberPrimary,
+                                fontSize = 30.sp,
                                 fontWeight = FontWeight.Black,
                                 letterSpacing = 4.sp
                             )
@@ -315,7 +354,7 @@ fun RideLobbyScreen(
                                     },
                                     modifier = Modifier
                                         .weight(1f)
-                                        .height(46.dp)
+                                        .height(48.dp)
                                         .testTag("copy_code_button"),
                                     border = BorderStroke(1.dp, CardBorderColor),
                                     colors = ButtonDefaults.outlinedButtonColors(
@@ -326,7 +365,7 @@ fun RideLobbyScreen(
                                     Icon(
                                         imageVector = Icons.Default.ContentCopy,
                                         contentDescription = "Copy Code",
-                                        tint = AccentCyan,
+                                        tint = AmberPrimary,
                                         modifier = Modifier.size(16.dp)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
@@ -346,8 +385,8 @@ fun RideLobbyScreen(
                                     },
                                     modifier = Modifier
                                         .weight(1f)
-                                        .height(46.dp)
-                                        .testTag("share_invite_button"),
+                                        .height(48.dp)
+                                        .testTag("share_invite_card_button"),
                                     border = BorderStroke(1.dp, CardBorderColor),
                                     colors = ButtonDefaults.outlinedButtonColors(
                                         contentColor = Color.White
@@ -368,65 +407,6 @@ fun RideLobbyScreen(
                     }
                 }
 
-                // 4. Pre-Ride Readiness Checklist Card
-                item {
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("preride_checklist_card"),
-                        color = CardSurface,
-                        shape = RoundedCornerShape(18.dp),
-                        border = BorderStroke(1.dp, CardBorderColor)
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(
-                                text = "PRE-RIDE READINESS CHECKLIST",
-                                color = AccentCyan,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 0.8.sp
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Default.CheckCircle,
-                                        contentDescription = null,
-                                        tint = StatusRidingGreen,
-                                        modifier = Modifier.size(15.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Permission Granted", color = Color.White, fontSize = 12.sp)
-                                }
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Default.GpsFixed,
-                                        contentDescription = null,
-                                        tint = StatusRidingGreen,
-                                        modifier = Modifier.size(15.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("GPS Fixed", color = Color.White, fontSize = 12.sp)
-                                }
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Default.CheckCircle,
-                                        contentDescription = null,
-                                        tint = StatusRidingGreen,
-                                        modifier = Modifier.size(15.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Group Sync", color = Color.White, fontSize = 12.sp)
-                                }
-                            }
-                        }
-                    }
-                }
-
                 // 5. Riders Ready Section Header
                 item {
                     Row(
@@ -435,17 +415,16 @@ fun RideLobbyScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "RIDERS READY (${members.size})",
+                            text = "RIDERS (${members.size})",
                             color = Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.8.sp
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "${members.size}/${members.size} Ready to Depart",
-                            color = StatusRidingGreen,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
+                            text = "Invite code ${ride.inviteCode}",
+                            color = TextTertiary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
                         )
                     }
                 }
@@ -579,26 +558,101 @@ fun RideLobbyScreen(
                         .height(54.dp)
                         .testTag("start_ride_button"),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = StartOrange,
-                        contentColor = Color.White
+                        containerColor = AmberPrimary,
+                        contentColor = Color(0xFF1A1205)
                     ),
-                    shape = RoundedCornerShape(16.dp)
+                    shape = RoundedCornerShape(14.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.PlayArrow,
-                        contentDescription = "Start Ride",
-                        tint = Color.White,
+                        contentDescription = null,
+                        tint = Color(0xFF1A1205),
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "START RIDE",
+                        text = "Start Ride",
                         fontSize = 16.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        letterSpacing = 1.sp
+                        fontWeight = FontWeight.Bold
                     )
                 }
             }
+        }
+    }
+}
+
+
+/**
+ * One row of the lobby's route plan: a marker, the stop name and its role.
+ * The marker colours follow the map legend (green origin, amber stops, red
+ * destination) so the list and the map read as the same plan.
+ */
+@Composable
+private fun LobbyStopRow(
+    stop: com.example.data.model.RouteStop,
+    index: Int,
+    isLast: Boolean
+) {
+    val isOrigin = stop.role == com.example.data.model.RouteStopRole.ORIGIN
+    val isDestination = stop.role == com.example.data.model.RouteStopRole.DESTINATION
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.width(24.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(18.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(
+                        when {
+                            isOrigin -> com.example.ui.theme.StatusRidingGreen
+                            isDestination -> com.example.ui.theme.StatusEmergencyRed
+                            else -> AmberPrimary
+                        }
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                if (isDestination) {
+                    Icon(
+                        imageVector = Icons.Default.Flag,
+                        contentDescription = null,
+                        tint = Color(0xFF1A1205),
+                        modifier = Modifier.size(10.dp)
+                    )
+                } else if (!isOrigin) {
+                    Text(
+                        text = "$index",
+                        color = Color(0xFF1A1205),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            if (!isLast) {
+                Box(
+                    modifier = Modifier
+                        .width(2.dp)
+                        .height(26.dp)
+                        .background(CardBorderColor)
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.padding(bottom = if (isLast) 0.dp else 4.dp)) {
+            Text(
+                text = if (isOrigin) "Starting point" else if (isDestination) "Destination" else "Stop $index",
+                color = TextTertiary,
+                fontSize = 10.sp
+            )
+            Text(
+                text = stop.name,
+                color = TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }

@@ -550,3 +550,33 @@ centres on the place).
 `AmenityIconConfigTest` (7). Full offline suite: **62 classes / 533 tests / 0
 failures / 0 errors / 0 skipped**. **Not device-verified in this pass** — the
 phone was not connected.
+
+---
+
+## Batch 9 — the 14-screen redesign
+
+**Goal:** implement the supplied premium-dark showcase (charcoal + amber) across
+the whole product without moving any domain logic.
+
+**Approach:** one token change (the palette lived behind named constants, so
+every call site restyled at once), a shared component library
+(`ui/components/DesignSystem.kt`), then screen-by-screen composition. Domain
+classes were not edited for style; the only domain-adjacent edits were the
+view-model flows needed by the new surfaces (saved places, detour metres, the
+added-stop summary, the navigation report) and their unit tests.
+
+**New functional surfaces (not restyles):**
+- the navigation menu (share status, add stop, nearby places, overview, group
+  ride, voice, report, end/leave) — screen 7;
+- the nearby-places sheet with local search, category chips, distance and
+  priced detours — screen 8;
+- the stop confirmation with the real route preview and the measured change —
+  screen 10;
+- the updated-route sheet built from the committed plan — screen 11;
+- the two-tab ride history — screen 14.
+
+**Open items:** consolidate the six map control buttons into the reference's
+three (functional change in the renderer); device-capture the place, nearby,
+confirmation and updated-route surfaces once Overpass answers; decide whether
+the default map appearance should be NIGHT for the dark product (currently
+AUTO, pinned by `MapThemeControllerTest`).

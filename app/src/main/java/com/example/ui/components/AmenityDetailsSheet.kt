@@ -21,6 +21,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -95,7 +96,8 @@ fun AmenityDetailsSheet(
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = SlateDark900
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = com.example.ui.theme.SlateDark800
     ) {
         Column(
             modifier = Modifier
@@ -122,7 +124,7 @@ fun AmenityDetailsSheet(
                         .testTag("amenity_add_as_stop"),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = AmberPrimary,
-                        contentColor = Color.Black
+                        contentColor = Color(0xFF1A1205)
                     ),
                     shape = RoundedCornerShape(14.dp)
                 ) {
@@ -141,7 +143,7 @@ fun AmenityDetailsSheet(
                         Spacer(modifier = Modifier.width(10.dp))
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
-                            color = Color.Black,
+                            color = Color(0xFF1A1205),
                             strokeWidth = 2.dp
                         )
                     }
@@ -215,23 +217,25 @@ private fun SheetAction(
 ) {
     OutlinedButton(
         onClick = onClick,
-        modifier = modifier.height(46.dp),
+        modifier = modifier.height(64.dp),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary),
         shape = RoundedCornerShape(14.dp),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp)
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            modifier = Modifier.size(16.dp)
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(
-            text = label,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1
-        )
+        Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = label,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1
+            )
+        }
     }
 }
 

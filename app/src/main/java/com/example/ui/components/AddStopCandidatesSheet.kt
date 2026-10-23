@@ -61,7 +61,7 @@ fun AddStopCandidatesSheet(
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = SlateDark900
+        containerColor = com.example.ui.theme.SlateDark800
     ) {
         Column(modifier = Modifier.fillMaxWidth().testTag("add_stop_candidates_sheet")) {
             Text(

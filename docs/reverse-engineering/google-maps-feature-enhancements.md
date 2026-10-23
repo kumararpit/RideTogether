@@ -564,3 +564,41 @@ are distinct per category, which the tests pin.
 **Not device-verified in this pass** — the phone was not connected when this
 batch was written, so the new card, the symbols, the candidate list and the
 detour badge are covered by the unit tests and the code, not by a capture.
+
+## 20. The 14-screen product redesign
+
+The showcase reference was implemented as a design system plus fourteen screens
+(see `docs/design/14-screen-redesign.md` for the full mapping).
+
+**What changed is presentation, not the domain.** The navigation engine, the
+routing provider, the plan/versioning rules, the Firestore writes, the SOS and
+chat paths and the foreground location service are untouched. The redesign
+changed the token values (one palette for the whole app), added the shared
+component library, and rebuilt the composition of each screen.
+
+**The screens that did not exist as screens were added as real surfaces**, not
+mock-ups:
+
+| Reference screen | Where it lives | The data it shows |
+|---|---|---|
+| Navigation Menu | `NavigationMenuSheet` | opens the real add-stop/nearby/overview/group/report/end actions; voice mute is the engine's own mute |
+| Nearby Places | `NearbyPlacesSheet` | the amenity cache the map already holds; rating only when OSM has one; detour only when priced |
+| Add Stop Confirmation | `AddStopConfirmSheet` | the real route geometry and the measured route change, or an explicit "not available yet" |
+| Updated Route | `UpdatedRouteSheet` | the committed stop list from the active plan and the measured deltas |
+| Ride History tabs | `RideHistorySheet` | local completed rides, and the one real upcoming ride |
+
+**Three claims were removed because they were not true:** the lobby's
+"Permission Granted / GPS Fixed / Group Sync" ticks (nothing measured them),
+the completion screen's "More options" button (it had no action) and the
+completion screen's "Sharing ride summary…" toast (it shared nothing). The
+share now builds a real text summary and hands it to the system chooser.
+
+**Deliberate divergences** (documented in the design record): the route
+alternatives stay inline where the decision is made; the map keeps its tested
+AUTO day/night default instead of being forced to night; "Discover" shows real
+saved places/recent rides rather than a curated dataset the app does not have.
+
+**Verification:** `:app:compileDebugKotlin` clean; the full offline suite is
+re-run after the redesign (numbers in §20.1); device captures on the RMX3360
+are listed in the design record. The resident phone disconnected mid-pass, so
+only the Home and Live Navigation captures exist from this session.
