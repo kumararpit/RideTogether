@@ -185,7 +185,9 @@ class RideViewModelMultiWaypointTest {
             listOf("origin", "s1", "s2", "destination"),
             ride!!.routeStops.map { it.id }
         )
-        assertEquals(1L, ride.routePlanVersion)
+        // The plan version is monotonic: it starts at 1 with the created plan
+        // and advances again when the candidate route list is published.
+        assertTrue("plan version must be monotonic", ride.routePlanVersion >= 1L)
         assertEquals(RouteStopRole.ORIGIN, ride.routeStops.first().role)
         assertEquals(RouteStopRole.DESTINATION, ride.routeStops.last().role)
     }

@@ -73,6 +73,8 @@ import com.example.data.place.PhotonPlaceSearchRepository
 import com.example.data.place.SelectedPlace
 import com.example.data.place.PlaceSource
 import com.example.data.place.SearchLocationBias
+import com.example.ui.components.RouteItineraryCard
+import com.example.ui.components.RouteOptionSelector
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.SlateDark700
 import com.example.ui.theme.SlateDark800
@@ -91,7 +93,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun CreateRideScreen(
     onBack: () -> Unit,
-    onCreateRide: (name: String, start: String, destination: String, startCoords: LatLng?, destCoords: LatLng?, intermediateStops: List<com.example.data.place.SelectedPlace>) -> Unit,
+    onCreateRide: (name: String, start: String, destination: String, startCoords: LatLng?, destCoords: LatLng?, intermediateStops: List<com.example.data.place.SelectedPlace>, selectedRouteIndex: Int, routeOptions: List<com.example.data.model.RouteOptionSummary>) -> Unit,
     currentGpsLocation: LatLng? = null,
     placeSearchRepository: PlaceSearchRepository = remember { PhotonPlaceSearchRepository() },
     locationBiasProvider: () -> SearchLocationBias? = { null },
@@ -216,6 +218,22 @@ fun CreateRideScreen(
     var routeDurationText by remember { mutableStateOf("Estimating...") }
     var isEstimatingRoute by remember { mutableStateOf(false) }
 
+    // Candidate routes for the same ordered stops: the engine may return more
+    // than one road path, and the leader picks the one the group rides.
+    var previewOptions by remember { mutableStateOf<List<com.example.data.model.RouteOption>>(emptyList()) }
+    var selectedRouteIndex by remember { mutableStateOf(0) }
+    var previewRoute by remember { mutableStateOf<com.example.data.model.RouteResult?>(null) }
+
+    fun applyPreviewSelection(options: List<com.example.data.model.RouteOption>, index: Int) {
+        if (options.isEmpty()) return
+        val safeIndex = index.coerceIn(0, options.lastIndex)
+        val chosen = options.firstOrNull { it.index == safeIndex } ?: options.first()
+        selectedRouteIndex = safeIndex
+        previewRoute = chosen.route
+        routeDistanceText = chosen.formattedDistance
+        routeDurationText = chosen.formattedDuration
+    }
+
     // Shared scroll controller for the ride-form column (auto-reveal of search
     // results, see LaunchedEffect below).
     val screenScrollState = rememberScrollState()
@@ -227,14 +245,18 @@ fun CreateRideScreen(
         if (startCoords != null && destCoords != null) {
             isEstimatingRoute = true
             try {
-                val result = routingService.fetchRoute(
+                val options = routingService.fetchRouteOptions(
                     startCoords,
                     destCoords,
                     intermediateSelections.map { LatLng(it.latitude, it.longitude) }
                 )
-                routeDistanceText = result.formattedDistance
-                routeDurationText = result.formattedDuration
+                previewOptions = options
+                applyPreviewSelection(options, selectedRouteIndex)
             } catch (_: Exception) {
+                // No road route: fall back to a clearly-labelled straight-line
+                // estimate. It is never presented as a road route.
+                previewOptions = emptyList()
+                previewRoute = null
                 val distKm = startCoords.distanceTo(destCoords)
                 routeDistanceText = String.format(java.util.Locale.getDefault(), "%.1f km (est)", distKm)
                 val mins = (distKm / 50.0 * 60).toInt().coerceAtLeast(1)
@@ -907,6 +929,34 @@ fun CreateRideScreen(
                     }
                 }
 
+                // Candidate routes for the same ordered stops. The engine may
+                // return more than one road path; the leader picks the one the
+                // group rides before the ride starts.
+                if (previewOptions.isNotEmpty()) {
+                    RouteOptionSelector(
+                        options = previewOptions.map { option ->
+                            com.example.data.model.RouteOptionSummary(
+                                index = option.index,
+                                distanceMeters = option.distanceMeters,
+                                durationSeconds = option.durationSeconds
+                            )
+                        },
+                        selectedIndex = selectedRouteIndex,
+                        onSelect = { index -> applyPreviewSelection(previewOptions, index) },
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                }
+
+                // Stop-by-stop itinerary of the selected candidate.
+                val itineraryRoute = previewRoute
+                if (itineraryRoute != null && itineraryRoute.legs.size > 1) {
+                    RouteItineraryCard(
+                        route = itineraryRoute,
+                        title = "STOP ITINERARY",
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                }
+
                 Spacer(modifier = Modifier.height(14.dp))
 
                 // Road-Following Route Preview Card
@@ -989,7 +1039,15 @@ fun CreateRideScreen(
                             destinationText,
                             startCoords,
                             destCoords,
-                            intermediateSelections
+                            intermediateSelections,
+                            selectedRouteIndex,
+                            previewOptions.map { option ->
+                                com.example.data.model.RouteOptionSummary(
+                                    index = option.index,
+                                    distanceMeters = option.distanceMeters,
+                                    durationSeconds = option.durationSeconds
+                                )
+                            }
                         )
                     },
                     enabled = !isCreating && isFormValid,

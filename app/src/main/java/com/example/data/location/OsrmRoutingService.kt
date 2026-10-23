@@ -4,6 +4,7 @@ import com.example.data.map.TileMath
 import com.example.data.model.LatLng
 import com.example.data.model.NavigationStep
 import com.example.data.model.RouteLeg
+import com.example.data.model.RouteOption
 import com.example.data.model.RouteResult
 import com.example.data.model.RouteStop
 import kotlinx.coroutines.Dispatchers
@@ -57,7 +58,48 @@ class OsrmRoutingService : RouteProvider {
         destinationName: String?,
         planVersion: Long,
         structuredStops: List<com.example.data.model.RouteStop>?
-    ): RouteResult = withContext(Dispatchers.IO) {
+    ): RouteResult {
+        val options = fetchRouteOptions(
+            start = start,
+            destination = destination,
+            intermediateStops = intermediateStops,
+            stopNames = stopNames,
+            originName = originName,
+            destinationName = destinationName,
+            planVersion = planVersion,
+            structuredStops = structuredStops
+        )
+        return options.firstOrNull()?.route
+            ?: throw RouteRequestException(null, "OSRM returned no usable route")
+    }
+
+    /**
+     * Fetches every candidate route for one ordered waypoint plan.
+     *
+     * The engine is asked for alternatives (`alternatives=true`); the response
+     * may contain one or several routes for the same ordered waypoints. The
+     * primary route is always first - the engine's own ranking - and every
+     * candidate is parsed independently, so an alternative is a complete route
+     * with its own geometry, legs and steps (never a re-associated view of the
+     * primary route).
+     *
+     * The geometry is requested in the encoded-polyline format (the same
+     * encoding the reference implementation carries), which keeps the payload
+     * compact; the parser still accepts a GeoJSON coordinate array.
+     *
+     * Behaviour is unchanged for zero intermediate stops (legacy single-destination
+     * workflow, including the marked offline fallback).
+     */
+    override suspend fun fetchRouteOptions(
+        start: LatLng,
+        destination: LatLng,
+        intermediateStops: List<LatLng>,
+        stopNames: List<String>,
+        originName: String?,
+        destinationName: String?,
+        planVersion: Long,
+        structuredStops: List<com.example.data.model.RouteStop>?
+    ): List<RouteOption> = withContext(Dispatchers.IO) {
         val waypoints = listOf(start) + intermediateStops + listOf(destination)
         try {
             validateWaypoints(waypoints)
@@ -66,7 +108,7 @@ class OsrmRoutingService : RouteProvider {
         }
 
         val coords = buildCoordinatePath(waypoints)
-        val path = "/route/v1/driving/$coords?overview=full&geometries=geojson&steps=true"
+        val path = "/route/v1/driving/$coords?overview=full&geometries=polyline&steps=true&alternatives=true"
 
         val endpoints = listOf(
             "https://router.project-osrm.org$path",
@@ -94,7 +136,7 @@ class OsrmRoutingService : RouteProvider {
                         lastFailure = RouteRequestException(null, "OSRM returned an empty body")
                         return@use
                     }
-                    parseRouteResponse(
+                    parseRouteOptions(
                         bodyString,
                         waypoints,
                         stopNames = listOf(originName ?: "Origin") +
@@ -102,7 +144,9 @@ class OsrmRoutingService : RouteProvider {
                             listOf(destinationName ?: "Destination"),
                         planVersion = planVersion,
                         structuredStops = structuredStops
-                    )?.let { return@withContext it }
+                    )?.let { options ->
+                        if (options.isNotEmpty()) return@withContext options
+                    }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -114,7 +158,7 @@ class OsrmRoutingService : RouteProvider {
 
         if (intermediateStops.isEmpty()) {
             // Legacy fallback preserved for the single-destination workflow.
-            return@withContext generateFallbackRoute(start, destination)
+            return@withContext listOf(RouteOption(index = 0, route = generateFallbackRoute(start, destination)))
         }
         throw RouteRequestException(
             lastFailure?.let { (it as? RouteRequestException)?.osrmCode },
@@ -157,13 +201,41 @@ class OsrmRoutingService : RouteProvider {
      * whole response is rejected (a silently re-associated maneuver would guide
      * the rider to the wrong stop). Visible for unit tests - no network needed.
      */
+    /**
+     * Parses an OSRM response into a single [RouteResult] (the primary route).
+     *
+     * Kept for callers and tests that only need one route; the multi-candidate
+     * entry point is [parseRouteOptions].
+     */
     internal fun parseRouteResponse(
         body: String,
         waypoints: List<LatLng>,
         stopNames: List<String> = emptyList(),
         planVersion: Long = 0L,
         structuredStops: List<com.example.data.model.RouteStop>? = null
-    ): RouteResult? {
+    ): RouteResult? = parseRouteOptions(
+        body = body,
+        waypoints = waypoints,
+        stopNames = stopNames,
+        planVersion = planVersion,
+        structuredStops = structuredStops
+    )?.firstOrNull()?.route
+
+    /**
+     * Parses every candidate route in an OSRM response.
+     *
+     * Strict leg contract: `legs.size == waypoints.size - 1` must hold for every
+     * candidate, or the whole response is rejected (a silently re-associated
+     * maneuver would guide the rider to the wrong stop). Visible for unit tests -
+     * no network needed.
+     */
+    internal fun parseRouteOptions(
+        body: String,
+        waypoints: List<LatLng>,
+        stopNames: List<String> = emptyList(),
+        planVersion: Long = 0L,
+        structuredStops: List<com.example.data.model.RouteStop>? = null
+    ): List<RouteOption>? {
         val json = JSONObject(body)
         val code = json.optString("code")
 
@@ -181,17 +253,59 @@ class OsrmRoutingService : RouteProvider {
         if (routesArray.length() == 0) {
             throw RouteRequestException(code, "OSRM returned no routes")
         }
-        val routeObj = routesArray.getJSONObject(0)
+
+        val options = mutableListOf<RouteOption>()
+        for (i in 0 until routesArray.length()) {
+            options.add(
+                RouteOption(
+                    index = i,
+                    route = parseSingleRoute(
+                        routeObj = routesArray.getJSONObject(i),
+                        waypoints = waypoints,
+                        stopNames = stopNames,
+                        planVersion = planVersion,
+                        structuredStops = structuredStops
+                    )
+                )
+            )
+        }
+        return options
+    }
+
+    /**
+     * Parses one route object into a [RouteResult].
+     *
+     * The geometry is accepted in either shape the engine can return: an
+     * encoded polyline string (the requested format) or a GeoJSON coordinate
+     * array. Leg start vertices are derived from the cumulative leg distance
+     * (see [LegBoundaryMath]), which places a leg boundary on the exact vertex
+     * the engine produced instead of on the vertex nearest to the waypoint.
+     */
+    private fun parseSingleRoute(
+        routeObj: JSONObject,
+        waypoints: List<LatLng>,
+        stopNames: List<String>,
+        planVersion: Long,
+        structuredStops: List<com.example.data.model.RouteStop>?
+    ): RouteResult {
+        val code = "Ok"
         val totalDistance = routeObj.optDouble("distance", 0.0)
         val totalDuration = routeObj.optDouble("duration", 0.0)
 
         // Parse full overview geometry (one continuous polyline).
-        val geometryObj = routeObj.getJSONObject("geometry")
-        val coordsArray = geometryObj.getJSONArray("coordinates")
-        val points = mutableListOf<LatLng>()
-        for (i in 0 until coordsArray.length()) {
-            val pair = coordsArray.getJSONArray(i)
-            points.add(LatLng(pair.getDouble(1), pair.getDouble(0)))
+        val geometryRaw = routeObj.opt("geometry")
+        val points: List<LatLng> = when {
+            geometryRaw is JSONObject && geometryRaw.has("coordinates") -> {
+                val coordsArray = geometryRaw.getJSONArray("coordinates")
+                val parsed = mutableListOf<LatLng>()
+                for (i in 0 until coordsArray.length()) {
+                    val pair = coordsArray.getJSONArray(i)
+                    parsed.add(LatLng(pair.getDouble(1), pair.getDouble(0)))
+                }
+                parsed
+            }
+            geometryRaw is String -> PolylineCodec.decode(geometryRaw)
+            else -> emptyList()
         }
         if (points.isEmpty()) {
             throw RouteRequestException(code, "OSRM route has empty geometry")
@@ -207,9 +321,18 @@ class OsrmRoutingService : RouteProvider {
             )
         }
 
-        // Locate each leg's start vertex inside the merged overview polyline, in
-        // order: waypoint k is matched to a vertex at-or-after waypoint k-1's
-        // vertex so the walk stays ordered and unambiguous.
+        // Leg boundaries are derived from the cumulative leg distance the engine
+        // reports; the nearest-point search stays as a fallback for responses
+        // whose leg distances do not reconcile with the geometry.
+        val legDistances = (0 until legsArray.length()).map { k ->
+            legsArray.getJSONObject(k).optDouble("distance", 0.0)
+        }
+        val computedBoundaries = LegBoundaryMath.legStartVertexIndices(
+            points = points,
+            legDistancesMeters = legDistances,
+            waypoints = waypoints
+        )
+
         val flatSteps = mutableListOf<NavigationStep>()
         val legs = mutableListOf<RouteLeg>()
         var searchFrom = 0
@@ -218,12 +341,20 @@ class OsrmRoutingService : RouteProvider {
             val legDistance = legObj.optDouble("distance", 0.0)
             val legDuration = legObj.optDouble("duration", 0.0)
 
-            val startVertex = if (k == 0) 0 else {
-                val idx = RouteGeometry.findClosestPointIndex(
-                    waypoints[k],
-                    points.subList(searchFrom, points.size)
-                ) + searchFrom
-                idx
+            val startVertex = if (k == 0) {
+                0
+            } else {
+                val computed = computedBoundaries.getOrNull(k)
+                if (computed != null) {
+                    computed
+                } else {
+                    // Fallback: waypoint k is matched to a vertex at-or-after
+                    // waypoint k-1's vertex so the walk stays ordered.
+                    RouteGeometry.findClosestPointIndex(
+                        waypoints[k],
+                        points.subList(searchFrom, points.size)
+                    ) + searchFrom
+                }
             }
 
             val legSteps = mutableListOf<NavigationStep>()

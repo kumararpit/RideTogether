@@ -55,7 +55,12 @@ class RideCompletionAndChatSyncTest {
 
     @Test
     fun `send adds a local echo with a stable unique id`() = runBlocking {
-        val repo = RideRepository(context, LocationTracker(context))
+        val repo = RideRepository(
+            locationTracker = LocationTracker(context),
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("user_chat_1", "Chat Leader")
         repo.createRide("Chat Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
 
@@ -71,7 +76,12 @@ class RideCompletionAndChatSyncTest {
 
     @Test
     fun `server echo of the same message id does not duplicate display`() = runBlocking {
-        val repo = RideRepository(context, LocationTracker(context))
+        val repo = RideRepository(
+            locationTracker = LocationTracker(context),
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("user_chat_2", "Echo Rider")
         repo.createRide("Echo Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
         repo.sendQuickMessage(QuickMessageType.REGROUP)
@@ -86,7 +96,12 @@ class RideCompletionAndChatSyncTest {
 
     @Test
     fun `rapid burst keeps every message - no silent overwrite of earlier messages`() = runBlocking {
-        val repo = RideRepository(context, LocationTracker(context))
+        val repo = RideRepository(
+            locationTracker = LocationTracker(context),
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("user_chat_3", "Burst Sender")
         repo.createRide("Burst Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
 
@@ -134,7 +149,12 @@ class RideCompletionAndChatSyncTest {
 
     @Test
     fun `unauthorized member cannot complete the ride`() = runBlocking {
-        val repo = RideRepository(context, LocationTracker(context))
+        val repo = RideRepository(
+            locationTracker = LocationTracker(context),
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("com_leader_1", "Leader One")
         repo.createRide("Leader Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
         repo.applySharedRideStatusForTest(RideStatus.ACTIVE)
@@ -151,7 +171,12 @@ class RideCompletionAndChatSyncTest {
 
     @Test
     fun `leader completion writes canonical shared status exactly once`() = runBlocking {
-        val repo = RideRepository(context, LocationTracker(context))
+        val repo = RideRepository(
+            locationTracker = LocationTracker(context),
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("com_leader_2", "Leader Two")
         repo.createRide("Complete Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
         repo.applySharedRideStatusForTest(RideStatus.ACTIVE)
@@ -194,7 +219,12 @@ class RideCompletionAndChatSyncTest {
 
     @Test
     fun `stale ACTIVE snapshot cannot reactivate a completed ride`() = runBlocking {
-        val repo = RideRepository(context, LocationTracker(context))
+        val repo = RideRepository(
+            locationTracker = LocationTracker(context),
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("com_leader_3", "Leader Three")
         repo.createRide("Stale Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
         repo.applySharedRideStatusForTest(RideStatus.ACTIVE)

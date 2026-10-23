@@ -167,8 +167,11 @@ fun RideTogetherApp(viewModel: RideViewModel) {
             }
             CreateRideScreen(
                 onBack = { viewModel.navigateTo(AppScreen.WELCOME) },
-                onCreateRide = { name, start, dest, startCoords, destCoords, intermediateStops ->
-                    viewModel.createRide(name, start, dest, startCoords, destCoords, intermediateStops)
+                onCreateRide = { name, start, dest, startCoords, destCoords, intermediateStops, selectedRouteIndex, routeOptions ->
+                    viewModel.createRide(
+                        name, start, dest, startCoords, destCoords, intermediateStops,
+                        selectedRouteIndex, routeOptions
+                    )
                 },
                 currentGpsLocation = viewModel.locationTracker.currentLocation.value?.latLng,
                 placeSearchRepository = viewModel.placeSearchRepository,
@@ -204,6 +207,17 @@ fun RideTogetherApp(viewModel: RideViewModel) {
                     ride = ride!!,
                     members = members,
                     routePoints = viewModel.getRoutePoints(),
+                    routeResult = viewModel.routeResult.value,
+                    routeOptions = ride!!.routeOptions.ifEmpty {
+                        viewModel.routeOptions.value.map { option ->
+                            com.example.data.model.RouteOptionSummary(
+                                index = option.index,
+                                distanceMeters = option.distanceMeters,
+                                durationSeconds = option.durationSeconds
+                            )
+                        }
+                    },
+                    onSelectRouteOption = { index -> viewModel.selectRouteOption(index) },
                     onStartRide = { viewModel.startRide() },
                     onBack = { viewModel.navigateTo(AppScreen.WELCOME) }
                 )

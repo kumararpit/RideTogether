@@ -276,7 +276,12 @@ class RiderStatusAndSyncAuditTest {
     fun `test 11 - map and member list state remain consistent after rider update`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val tracker = LocationTracker(context)
-        val repo = RideRepository(context, tracker)
+        val repo = RideRepository(
+            locationTracker = tracker,
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
 
         repo.addPackMember("Vikram", 0.010, 0.010)
         val membersList = repo.members.value

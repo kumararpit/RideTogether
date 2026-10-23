@@ -84,11 +84,23 @@ service cloud.firestore {
       // leader-only. Non-status field updates (distance telemetry, leader transfer
       // inside the same doc) keep working for any authenticated rider; the ride leader
       // check uses the server-side document's leaderId, not client-supplied data.
-      allow update: if (!('status' in request.resource.data)
+      //
+      // The route PLAN is leader-authoritative as well: the ordered stops, the
+      // plan version, the candidate route list and the leader's selected
+      // candidate may only be changed by the ride leader. `diff(...).affectedKeys()`
+      // is used deliberately: a member updating distance telemetry must stay
+      // allowed even though the document already carries the plan fields.
+      allow update: if (
+            !request.resource.data.diff(resource.data).affectedKeys()
+              .hasAny(['routeStops', 'routePlanVersion', 'selectedRouteIndex', 'routeOptions'])
+            || (request.auth != null && request.auth.uid == resource.data.leaderId)
+          ) && (
+            !('status' in request.resource.data)
             || request.resource.data.status == resource.data.status
             || (request.resource.data.status in ['ACTIVE', 'COMPLETED', 'CANCELLED']
                 && request.auth != null
-                && request.auth.uid == resource.data.leaderId));
+                && request.auth.uid == resource.data.leaderId)
+          );
 
       // Riders subcollection
       match /riders/{riderId} {

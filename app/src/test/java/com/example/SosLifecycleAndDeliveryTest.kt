@@ -25,7 +25,12 @@ class SosLifecycleAndDeliveryTest {
     fun `test 1 - SOS creation unique UUID and location freshness classification`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val tracker = LocationTracker(context)
-        val repo = RideRepository(context, tracker)
+        val repo = RideRepository(
+            locationTracker = tracker,
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("rider_sos_1", "Arpit Test")
 
         val ride = repo.createRide("SOS Test Convoy", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
@@ -46,7 +51,12 @@ class SosLifecycleAndDeliveryTest {
     fun `test 2 - idempotency - duplicate trigger returns existing SOS without creating new alert`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val tracker = LocationTracker(context)
-        val repo = RideRepository(context, tracker)
+        val repo = RideRepository(
+            locationTracker = tracker,
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("rider_sos_2", "Rohan Test")
 
         repo.createRide("Idempotency Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
@@ -69,7 +79,12 @@ class SosLifecycleAndDeliveryTest {
     fun `test 3 - acknowledgeSos appends rider ID without resolving SOS`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val tracker = LocationTracker(context)
-        val repo = RideRepository(context, tracker)
+        val repo = RideRepository(
+            locationTracker = tracker,
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("rider_sos_3", "Priya Test")
 
         repo.createRide("Ack Test Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
@@ -93,7 +108,12 @@ class SosLifecycleAndDeliveryTest {
     fun `test 4 - resolveSos clears active alert and restores rider status to RIDING`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val tracker = LocationTracker(context)
-        val repo = RideRepository(context, tracker)
+        val repo = RideRepository(
+            locationTracker = tracker,
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("rider_sos_4", "Karan Test")
 
         repo.createRide("Resolve Test Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
@@ -114,7 +134,12 @@ class SosLifecycleAndDeliveryTest {
     fun `test 5 - leaving ride auto-resolves pending unresolved SOS`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val tracker = LocationTracker(context)
-        val repo = RideRepository(context, tracker)
+        val repo = RideRepository(
+            locationTracker = tracker,
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("rider_sos_5", "Sneha Test")
 
         repo.createRide("Departure Test Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
@@ -146,7 +171,12 @@ class SosLifecycleAndDeliveryTest {
     fun `test 7 - missing location yields LOCATION_UNAVAILABLE without hardcoded Pune fallback coordinates`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val tracker = LocationTracker(context)
-        val repo = RideRepository(context, tracker)
+        val repo = RideRepository(
+            locationTracker = tracker,
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("rider_sos_no_loc", "No Loc Test")
 
         repo.createRide("No Loc Ride", "Start", "Dest", LatLng(0.0, 0.0), LatLng(0.0, 0.0))
@@ -168,7 +198,12 @@ class SosLifecycleAndDeliveryTest {
     fun `test 8 - future dated GPS timestamp is rejected as fresh location`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val tracker = LocationTracker(context)
-        val repo = RideRepository(context, tracker)
+        val repo = RideRepository(
+            locationTracker = tracker,
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("rider_sos_future", "Future TS Test")
 
         repo.createRide("Future TS Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
@@ -219,20 +254,67 @@ class SosLifecycleAndDeliveryTest {
     }
 
     @Test
-    fun `test 10 - triggerSos returns success only after Firestore write completes`() = runBlocking {
+    fun `test 10 - triggerSos returns success only after the delivery write completes`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val tracker = LocationTracker(context)
-        val repo = RideRepository(context, tracker)
+        val delivered = mutableListOf<String>()
+        val backend = object : com.example.data.firebase.SosDeliveryBackend {
+            override suspend fun deliver(rideId: String, sosId: String, doc: Map<String, Any>) {
+                delivered.add(sosId)
+            }
+
+            override suspend fun resolve(rideId: String, sosId: String, fields: Map<String, Any>) = Unit
+        }
+        val repo = RideRepository(
+            locationTracker = tracker,
+            firestore = null,
+            context = context,
+            sosBackend = backend
+        )
         repo.initCurrentUser("rider_sos_success", "Arpit Success")
 
         val ride = repo.createRide("SOS Success Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
         assertNotNull(ride)
 
         val result = repo.triggerSos()
-        assertTrue("triggerSos must return success containing the SosEvent when Firestore write succeeds", result.isSuccess)
+        assertTrue("triggerSos must return success containing the SosEvent when the delivery write succeeds", result.isSuccess)
         assertNotNull("triggerSos must return the created SosEvent", result.getOrNull())
+        assertEquals("The SOS event must have been handed to the delivery sink", 1, delivered.size)
 
         repo.resolveSos()
+        repo.cleanup()
+    }
+
+    @Test
+    fun `test 11 - a failed delivery rolls the local alert back`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val tracker = LocationTracker(context)
+        val backend = object : com.example.data.firebase.SosDeliveryBackend {
+            override suspend fun deliver(rideId: String, sosId: String, doc: Map<String, Any>) {
+                throw IllegalStateException("backend unavailable")
+            }
+
+            override suspend fun resolve(rideId: String, sosId: String, fields: Map<String, Any>) = Unit
+        }
+        val repo = RideRepository(
+            locationTracker = tracker,
+            firestore = null,
+            context = context,
+            sosBackend = backend
+        )
+        repo.initCurrentUser("rider_sos_delivery_fail", "Arpit Fail")
+
+        repo.createRide("SOS Delivery Fail Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))
+
+        val result = repo.triggerSos()
+        assertTrue("triggerSos must fail when the delivery write fails", result.isFailure)
+        assertNull("A failed delivery must not leave a local alert behind", repo.activeSos.value)
+        assertEquals(
+            "A failed delivery must restore the rider status",
+            MemberStatus.RIDING,
+            repo.currentRiderStatus.value
+        )
+
         repo.cleanup()
     }
 }

@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
@@ -45,6 +46,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.components.ActiveSosBar
@@ -60,6 +62,7 @@ import com.example.ui.components.TurnByTurnNavHeader
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.StatusRidingGreen
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.TextTertiary
 import com.example.ui.viewmodel.RideViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -84,6 +87,7 @@ fun LiveRideScreen(
 
     // Navigation & Routing states
     val navProgress by viewModel.navEngine.progress.collectAsState()
+    val routeResult by viewModel.routeResult.collectAsState()
     val isRerouting by viewModel.isRerouting.collectAsState()
     val isFollowMode by viewModel.isFollowRiderMode.collectAsState()
     val currentStep = viewModel.navEngine.getCurrentStep()
@@ -462,6 +466,63 @@ fun LiveRideScreen(
                                 fontWeight = FontWeight.Black
                             )
                         }
+                    }
+                }
+            }
+
+            // Next-stop strip: which stop of the ordered plan the group is
+            // heading to, and how far it is. Only shown for multi-stop plans.
+            val activeRoute = routeResult
+            val nextStop = remember(activeRoute, navProgress.currentLegIndex) {
+                activeRoute?.stops?.getOrNull(navProgress.currentLegIndex + 1)
+            }
+            if (activeRoute != null && activeRoute.legs.size > 1 && nextStop != null) {
+                val legIndex = navProgress.currentLegIndex.coerceIn(0, activeRoute.legs.lastIndex)
+                val legDistance = viewModel.getRemainingLegDistanceMeters()
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp)
+                        .testTag("next_stop_strip"),
+                    color = Color(0xFF101318),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, CardBorderColor)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Flag,
+                            contentDescription = null,
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "NEXT STOP",
+                            color = TextTertiary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = nextStop.name,
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "${viewModel.getFormattedRemainingDistance(legDistance)} · Leg ${legIndex + 1}/${activeRoute.legs.size}",
+                            color = AmberPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
                 }
             }

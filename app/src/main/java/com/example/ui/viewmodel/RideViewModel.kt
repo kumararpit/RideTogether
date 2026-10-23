@@ -17,6 +17,8 @@ import com.example.data.model.MemberStatus
 import com.example.data.model.QuickMessageType
 import com.example.data.model.Ride
 import com.example.data.model.RiderMember
+import com.example.data.model.RouteOption
+import com.example.data.model.RouteOptionSummary
 import com.example.data.model.RouteResult
 import com.example.data.model.RouteStop
 import com.example.data.model.RouteStopRole
@@ -247,6 +249,21 @@ class RideViewModel(
 
     /** Monotonic plan identity; bumped on every leader plan edit/publication. */
     private var routePlanVersionCounter = 0L
+
+    /**
+     * Candidate routes for the current plan, as returned by the routing engine
+     * for the same ordered waypoints. The first entry is the engine's primary
+     * route; further entries are the alternatives the leader can choose from.
+     * Empty while no route has been fetched.
+     */
+    private val _routeOptions = MutableStateFlow<List<RouteOption>>(emptyList())
+    val routeOptions: StateFlow<List<RouteOption>> = _routeOptions.asStateFlow()
+
+    /**
+     * Index of the candidate route the current plan uses. The leader owns this
+     * choice; members adopt it from the shared plan.
+     */
+    private var selectedRouteIndex = 0
 
     /**
      * Explicit route-planning outcomes to surface in the UI (Phase B states):
@@ -623,7 +640,9 @@ class RideViewModel(
         destination: String,
         startCoords: LatLng? = null,
         destCoords: LatLng? = null,
-        intermediateStops: List<com.example.data.place.SelectedPlace> = emptyList()
+        intermediateStops: List<com.example.data.place.SelectedPlace> = emptyList(),
+        selectedRouteIndex: Int = 0,
+        routeOptions: List<RouteOptionSummary> = emptyList()
     ) {
         // Validate incoming coordinates: non-finite or out-of-range values are
         // rejected rather than forwarded to Firestore/OSRM.
@@ -671,13 +690,17 @@ class RideViewModel(
                     destName = destination.ifBlank { "Lonavala" },
                     startLoc = resolvedStart,
                     destLoc = resolvedDest,
-                    routeStops = plannedStops
+                    routeStops = plannedStops,
+                    selectedRouteIndex = selectedRouteIndex,
+                    routeOptions = routeOptions
                 )
                 // A new ride starts a fresh route-plan history: stale responses
                 // from a previous ride are invalidated by version + request id.
                 routePlanVersionCounter = 1L
                 _routePlanStops.value = plannedStops
                 _routeResult.value = null
+                _routeOptions.value = emptyList()
+                this@RideViewModel.selectedRouteIndex = selectedRouteIndex.coerceAtLeast(0)
                 _routePlanError.value = null
                 _currentScreen.value = AppScreen.RIDE_LOBBY
                 fetchRouteForRide(resolvedStart, resolvedDest, plannedStops)
@@ -702,6 +725,9 @@ class RideViewModel(
                 routePlanVersionCounter = ride.routePlanVersion
                 _routePlanStops.value = ride.routeStops
                 _routeResult.value = null
+                _routeOptions.value = emptyList()
+                // Members adopt the leader's chosen candidate route.
+                selectedRouteIndex = ride.selectedRouteIndex.coerceAtLeast(0)
                 _routePlanError.value = null
                 fetchRouteForRide(ride.startLocation, ride.destinationLocation, ride.routeStops)
             }
@@ -723,7 +749,7 @@ class RideViewModel(
             _isRerouting.value = true
             try {
                 val intermediatesOnly = plannedStops.filter { it.role == RouteStopRole.INTERMEDIATE }
-                val result = osrmRoutingService.fetchRoute(
+                val options = osrmRoutingService.fetchRouteOptions(
                     start = start,
                     destination = destination,
                     intermediateStops = intermediatesOnly.map { it.latLng },
@@ -733,7 +759,11 @@ class RideViewModel(
                     planVersion = routePlanVersionCounter,
                     structuredStops = plannedStops
                 )
-                if (reqId == routeRequestId && result.coordinates.isNotEmpty() && isActive) {
+                if (reqId == routeRequestId && options.isNotEmpty() && isActive) {
+                    // The plan's selected candidate wins when it exists in this
+                    // response; otherwise the engine's primary route is used.
+                    val chosenIndex = selectedRouteIndex.coerceIn(0, options.lastIndex)
+                    val result = options[chosenIndex].route
                     // Structural validation: the response must contain exactly
                     // (waypoint count − 1) legs, matching the requested plan.
                     val expectedLegs = plannedStops.size - 1
@@ -747,6 +777,8 @@ class RideViewModel(
                         )
                     }
                     currentRouteRideId = repository.currentRide.value?.id
+                    _routeOptions.value = options
+                    selectedRouteIndex = chosenIndex
                     _routeResult.value = result
                     _routePlanError.value = null
                     navEngine.setRoute(result)
@@ -758,6 +790,9 @@ class RideViewModel(
                         result.totalDurationSeconds,
                         result.steps
                     )
+                    // Publish the candidate list and the leader's selection as
+                    // part of the plan (leader-only; members adopt the plan).
+                    publishRoutePlan(chosenIndex, options)
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -773,6 +808,74 @@ class RideViewModel(
                 _isRerouting.value = false
             }
         }
+    }
+
+    /**
+     * Chooses one of the candidate routes for the current plan.
+     *
+     * Only the ride leader may change the plan: the selection, the candidate
+     * list and the ordered stops are published together with a bumped plan
+     * version, so every member adopts the same route and a stale publication
+     * can never win.
+     */
+    fun selectRouteOption(index: Int) {
+        val options = _routeOptions.value
+        if (options.isEmpty()) return
+        if (!currentUserIsLeader()) return
+        val safeIndex = index.coerceIn(0, options.lastIndex)
+        if (safeIndex == selectedRouteIndex && _routeResult.value != null) return
+
+        val result = options[safeIndex].route
+        selectedRouteIndex = safeIndex
+        _routeResult.value = result
+        navEngine.setRoute(result)
+        navAudioGuidance.resetAnnounceHistory()
+        repository.updateRoute(
+            result.coordinates,
+            result.totalDistanceMeters,
+            result.totalDurationSeconds,
+            result.steps
+        )
+        publishRoutePlan(safeIndex, options)
+    }
+
+    /**
+     * True when the signed-in rider owns the current ride's plan. The ride's
+     * member entry is the authority (it carries the role), with the ride
+     * document's leader id as the fallback.
+     */
+    private fun currentUserIsLeader(): Boolean {
+        val ride = repository.currentRide.value ?: return false
+        val me = repository.members.value.firstOrNull { it.isCurrentUser }
+        if (me != null) return me.role == com.example.data.model.RideRole.LEADER
+        return ride.leaderId == _userId.value
+    }
+
+    /**
+     * Publishes the leader's plan (stops + candidate list + selection) and
+     * bumps the plan version. No-op for members: the plan is leader-owned.
+     *
+     * The version is only bumped when the plan actually changes, so repeated
+     * fetches of the same plan do not churn the shared document.
+     */
+    private fun publishRoutePlan(selectedIndex: Int, options: List<RouteOption>) {
+        if (!currentUserIsLeader()) return
+        val ride = repository.currentRide.value ?: return
+        val summaries = options.map { option ->
+            RouteOptionSummary(
+                index = option.index,
+                distanceMeters = option.distanceMeters,
+                durationSeconds = option.durationSeconds
+            )
+        }
+        if (ride.selectedRouteIndex == selectedIndex && ride.routeOptions == summaries) return
+        routePlanVersionCounter += 1
+        repository.updateRoutePlan(
+            routeStops = _routePlanStops.value,
+            planVersion = routePlanVersionCounter,
+            selectedRouteIndex = selectedIndex,
+            routeOptions = summaries
+        )
     }
 
     fun rerouteFromCurrentLocation() {
@@ -820,6 +923,10 @@ class RideViewModel(
                     }
                     _routeResult.value = result
                     _routePlanError.value = null
+                    // The candidate list describes the plan's routes from the
+                    // original origin; after a reroute the road ahead is a
+                    // different path, so the list no longer applies.
+                    _routeOptions.value = emptyList()
                     navEngine.setRoute(result)
                     // B-02: a reroute installs a NEW route — its first maneuvers
                     // must be announced, so the previous route's announcement
@@ -845,6 +952,20 @@ class RideViewModel(
                 _isRerouting.value = false
             }
         }
+    }
+
+    /**
+     * Distance still to ride on the current leg (i.e. to the next stop).
+     *
+     * The remaining route distance minus the legs that come after the current
+     * one gives the part of the road ahead that belongs to this leg.
+     */
+    fun getRemainingLegDistanceMeters(): Double {
+        val route = _routeResult.value ?: return 0.0
+        if (route.legs.isEmpty()) return 0.0
+        val legIndex = navEngine.progress.value.currentLegIndex.coerceIn(0, route.legs.lastIndex)
+        val laterLegs = route.legs.drop(legIndex + 1).sumOf { it.distanceMeters }
+        return (navEngine.progress.value.remainingRouteDistanceMeters - laterLegs).coerceAtLeast(0.0)
     }
 
     fun setUserName(name: String) {
@@ -940,6 +1061,8 @@ class RideViewModel(
         currentRouteRideId = null
         routeRequestId++
         _routeResult.value = null
+        _routeOptions.value = emptyList()
+        selectedRouteIndex = 0
         navEngine.reset()
         _currentScreen.value = AppScreen.WELCOME
     }

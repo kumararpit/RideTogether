@@ -222,6 +222,60 @@ data class RouteResult(
         }
 }
 
+/**
+ * One candidate route for the same ordered waypoint plan.
+ *
+ * The routing engine can return several road paths for one ordered set of
+ * stops (the reference implementation shows them as candidate routes with a
+ * "best route" preset). Each candidate is a complete [RouteResult]: its own
+ * geometry, legs and steps - a candidate is never a partial or re-associated
+ * view of another candidate's route.
+ */
+data class RouteOption(
+    val index: Int,
+    val route: RouteResult
+) {
+    val distanceMeters: Double get() = route.totalDistanceMeters
+    val durationSeconds: Double get() = route.totalDurationSeconds
+    val formattedDistance: String get() = route.formattedDistance
+    val formattedDuration: String get() = route.formattedDuration
+    val isFallback: Boolean get() = route.isFallback
+}
+
+/**
+ * Lightweight description of a candidate route - distance and duration only,
+ * without the geometry.
+ *
+ * This is the part that is shared with the group: every member sees the same
+ * list of candidate routes (so the leader's choice is meaningful), while the
+ * geometry itself stays per-device because each member re-fetches the route
+ * for the candidate that was selected.
+ */
+data class RouteOptionSummary(
+    val index: Int,
+    val distanceMeters: Double,
+    val durationSeconds: Double
+) {
+    val formattedDistance: String
+        get() = if (distanceMeters >= 1000) {
+            String.format(java.util.Locale.getDefault(), "%.1f km", distanceMeters / 1000.0)
+        } else {
+            "${kotlin.math.round(distanceMeters).toInt()} m"
+        }
+
+    val formattedDuration: String
+        get() {
+            val mins = kotlin.math.round(durationSeconds / 60.0).toInt()
+            return if (mins >= 60) {
+                val hours = mins / 60
+                val remMins = mins % 60
+                if (remMins > 0) "${hours} hr ${remMins} min" else "${hours} hr"
+            } else {
+                "$mins min"
+            }
+        }
+}
+
 data class Ride(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
@@ -246,6 +300,17 @@ data class Ride(
     val routeStops: List<RouteStop> = emptyList(),
     /** Monotonic plan version; stale (older) snapshots never overwrite newer. */
     val routePlanVersion: Long = 0L,
+    /**
+     * Index of the candidate route the leader selected for this plan.
+     * 0 is the engine's primary route; a larger index selects an alternative.
+     * Always clamped to the available candidate list when the plan is applied.
+     */
+    val selectedRouteIndex: Int = 0,
+    /**
+     * Candidate routes published with the plan (summaries only). Empty for
+     * legacy rides and for plans where the engine returned a single route.
+     */
+    val routeOptions: List<RouteOptionSummary> = emptyList(),
     val actualRecordedDistanceMeters: Double = 0.0,
     val elapsedDurationSeconds: Double = 0.0,
     val startedAtMs: Long = 0L,

@@ -73,7 +73,12 @@ class SosAckDeliveryAndDismissalTest {
     @Test
     fun `member dismissal removes the popup locally without resolving the emergency`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val repo = RideRepository(context, LocationTracker(context))
+        val repo = RideRepository(
+            locationTracker = LocationTracker(context),
+            firestore = null,
+            context = context,
+            sosBackend = InMemorySosBackend()
+        )
         repo.initCurrentUser("rider_dism_1", "Dismiss Tester")
 
         repo.createRide("Dismiss Ride", "Pune", "Lonavala", LatLng(18.52, 73.85), LatLng(18.75, 73.40))

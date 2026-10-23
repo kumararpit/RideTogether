@@ -136,6 +136,58 @@ async function main() {
     assertSucceeds(memberDb.collection("rides").doc("ride-1").collection("messages").doc("m-1").get())
   );
 
+  // ---------------------------------------------------------------------
+  // Route plan authority (feature: route alternatives + per-leg itinerary).
+  // The ordered stops, the plan version, the candidate route list and the
+  // leader's selected candidate are ONE leader-authoritative plan.
+  // ---------------------------------------------------------------------
+  const planStops = [
+    { id: "s-origin", name: "Pune", role: "ORIGIN", lat: 18.52, lng: 73.85, order: 0 },
+    { id: "s-dest", name: "Lonavala", role: "DESTINATION", lat: 18.75, lng: 73.40, order: 1 },
+  ];
+  const planOptions = [{ index: 0, distanceMeters: 8300, durationSeconds: 540 }];
+
+  await record(
+    "member CANNOT change the ordered route stops",
+    assertFails(memberDb.collection("rides").doc("ride-1").update({ routeStops: planStops }))
+  );
+
+  await record(
+    "member CANNOT change the route plan version",
+    assertFails(memberDb.collection("rides").doc("ride-1").update({ routePlanVersion: 99 }))
+  );
+
+  await record(
+    "member CANNOT change the selected candidate route",
+    assertFails(memberDb.collection("rides").doc("ride-1").update({ selectedRouteIndex: 1 }))
+  );
+
+  await record(
+    "member CANNOT change the candidate route list",
+    assertFails(
+      memberDb.collection("rides").doc("ride-1").update({ routeOptions: planOptions })
+    )
+  );
+
+  await record(
+    "leader CAN publish the plan (stops, version, selection and candidates together)",
+    assertSucceeds(
+      leaderDb.collection("rides").doc("ride-1").update({
+        routeStops: planStops,
+        routePlanVersion: 2,
+        selectedRouteIndex: 0,
+        routeOptions: planOptions,
+      })
+    )
+  );
+
+  await record(
+    "member CAN still update telemetry on a document that carries plan fields",
+    assertSucceeds(
+      memberDb.collection("rides").doc("ride-1").update({ totalDistanceMeters: 4321, updatedAt: new Date() })
+    )
+  );
+
   console.log(`\nRules tests: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exitCode = 1;
   await env.cleanup();
