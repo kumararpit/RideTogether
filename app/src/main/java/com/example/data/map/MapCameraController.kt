@@ -10,6 +10,8 @@ import com.example.data.model.LatLng
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.cos
+import kotlin.math.sin
 
 enum class MapCameraMode {
     FOLLOWING,
@@ -110,6 +112,14 @@ class MapCameraController {
     /** Conservative upper-bound heading error, in degrees (mirrors Google Maps' conservativeHeadingErrorDegrees). */
     private var lastConservativeHeadingErrorDeg: Float? = null
 
+    // GPS position smoothing for FOLLOWING mode — absorbs GPS jitter so the
+    // camera target moves smoothly between fixes instead of jumping.
+    // Mirrors Google Maps' native camera animation which interpolates toward a goal.
+    private var smoothedCenterLat: Double = 0.0
+    private var smoothedCenterLng: Double = 0.0
+    private var lastSmoothTimeMs: Long = 0L
+    private var hasSmoothedPosition: Boolean = false
+
     /**
      * Consumes one location fix.
      *
@@ -187,8 +197,28 @@ class MapCameraController {
             calculateAdaptiveZoom(speedKmh, distanceToNextManeuverMeters)
         }
 
+        // Google Maps pattern: smooth the GPS position in follow mode so the
+        // camera target moves smoothly between fixes instead of jumping.
+        // Absorbs GPS jitter (1–4 Hz fixes) before the frame loop interpolates.
+        val smoothedCenter = if (hasSmoothedPosition && lastSmoothTimeMs > 0L) {
+            val dtSeconds = (nowMs - lastSmoothTimeMs).coerceAtLeast(0L) / 1000.0
+            val alpha = 1f - kotlin.math.exp(-dtSeconds.toFloat() / FOLLOW_POSITION_SMOOTH_TAU_SECONDS)
+            val smoothLat = smoothedCenterLat + (location.latLng.latitude - smoothedCenterLat) * alpha
+            val smoothLng = smoothedCenterLng + (location.latLng.longitude - smoothedCenterLng) * alpha
+            smoothedCenterLat = smoothLat
+            smoothedCenterLng = smoothLng
+            lastSmoothTimeMs = nowMs
+            LatLng(smoothLat, smoothLng)
+        } else {
+            smoothedCenterLat = location.latLng.latitude
+            smoothedCenterLng = location.latLng.longitude
+            lastSmoothTimeMs = nowMs
+            hasSmoothedPosition = true
+            location.latLng
+        }
+
         _state.value = currentState.copy(
-            center = location.latLng,
+            center = smoothedCenter,
             heading = targetHeading,
             zoom = targetZoom,
             headingValid = headingValid,
@@ -362,6 +392,13 @@ class MapCameraController {
             ?: calculateAdaptiveZoom(lastSpeedKmh, lastDistanceToNextManeuverMeters)
         isUserZoomOverride = false
 
+        // Reset GPS position smoothing so the first post-recenter fix seeds
+        // the smoothed position directly instead of interpolating from a stale baseline.
+        smoothedCenterLat = newCenter.latitude
+        smoothedCenterLng = newCenter.longitude
+        lastSmoothTimeMs = System.currentTimeMillis()
+        hasSmoothedPosition = true
+
         if (acceptedHeading != null) {
             headingStabilizer.reset()
             headingStabilizer.update(acceptedHeading)
@@ -457,6 +494,95 @@ class MapCameraController {
     }
 
     /**
+     * Sets the camera heading directly, normalised to [0, 360).
+     * Used by gesture-driven rotation and by the compass fallback.
+     */
+    fun setHeading(newHeading: Float) {
+        val normalized = ((newHeading % 360f) + 360f) % 360f
+        _state.value = _state.value.copy(
+            heading = normalized,
+            mode = MapCameraMode.FREE_EXPLORE,
+            tiltDegrees = 0f
+        )
+    }
+
+    /**
+     * Rotates the camera by [deltaDeg] degrees around the gesture centroid [anchorScreenX, anchorScreenY],
+     * keeping the map point under the fingers pinned to the same screen position.
+     *
+     * The unrotated projection is:
+     *   screenX = anchorX + (tileX(point, zoom) - tileX(center, zoom)) * tileSizePx
+     *   screenY = anchorY + (tileY(point, zoom) - tileY(center, zoom)) * tileSizePx
+     *
+     * Rotation is applied around [anchorX, anchorY] via the graphics layer. To keep the
+     * centroid-fixed world point on screen after both bearing and zoom change, we:
+     *   1. Unrotate the centroid by the current bearing to get its unrotated position.
+     *   2. Find the world point under that unrotated position at the current zoom/center.
+     *   3. Rotate that unrotated position by -deltaDeg around the anchor (because a
+     *      +deltaDeg map rotation moves unrotated content by -deltaDeg).
+     *   4. Solve for the new center at the new zoom so the world point projects there.
+     */
+    fun rotateBy(
+        deltaDeg: Float,
+        anchorScreenX: Float,
+        anchorScreenY: Float,
+        displayZoom: Float,
+        newZoom: Float,
+        tileSizePx: Float,
+        anchorX: Float,
+        anchorY: Float,
+        currentCenterLat: Double,
+        currentCenterLng: Double
+    ) {
+        val currentState = _state.value
+        val newHeading = ((currentState.heading + deltaDeg) % 360f + 360f) % 360f
+
+        // Step 1: unrotate the centroid by the current bearing → unrotated position.
+        val headingRad = Math.toRadians(-currentState.effectiveHeading.toDouble())
+        val cosH = cos(headingRad).toFloat()
+        val sinH = sin(headingRad).toFloat()
+        val dx = anchorScreenX - anchorX
+        val dy = anchorScreenY - anchorY
+        val unrotatedCx = anchorX + dx * cosH - dy * sinH
+        val unrotatedCy = anchorY + dx * sinH + dy * cosH
+
+        // Step 2: find the world point under the unrotated centroid at current zoom/center.
+        val currentTileX = TileMath.lonToTileX(currentCenterLng, displayZoom)
+        val currentTileY = TileMath.latToTileY(currentCenterLat, displayZoom)
+        val anchorTileX = currentTileX + (unrotatedCx - anchorX) / tileSizePx
+        val anchorTileY = currentTileY + (unrotatedCy - anchorY) / tileSizePx
+        val anchorLat = TileMath.tileYToLat(anchorTileY, displayZoom)
+        val anchorLng = TileMath.tileXToLon(anchorTileX, displayZoom)
+
+        // Step 3: rotate the unrotated centroid by -deltaDeg around the anchor.
+        // A +deltaDeg map rotation moves unrotated content by -deltaDeg around the anchor.
+        val deltaRad = Math.toRadians(-deltaDeg.toDouble())
+        val cosD = cos(deltaRad).toFloat()
+        val sinD = sin(deltaRad).toFloat()
+        val ux = unrotatedCx - anchorX
+        val uy = unrotatedCy - anchorY
+        val rotatedUx = anchorX + ux * cosD - uy * sinD
+        val rotatedUy = anchorY + ux * sinD + uy * cosD
+
+        // Step 4: solve for new center at newZoom so the anchor world point projects
+        // to the rotated unrotated centroid position.
+        val newTileScale = tileSizePx  // tileSizePx is already scaled for newZoom by the caller
+        val newCenterTileX = TileMath.lonToTileX(anchorLng, newZoom) - (rotatedUx - anchorX) / newTileScale
+        val newCenterTileY = TileMath.latToTileY(anchorLat, newZoom) - (rotatedUy - anchorY) / newTileScale
+
+        val newCenterLat = TileMath.tileYToLat(newCenterTileY, newZoom)
+        val newCenterLng = TileMath.tileXToLon(newCenterTileX, newZoom)
+
+        _state.value = currentState.copy(
+            center = LatLng(newCenterLat, newCenterLng),
+            heading = newHeading,
+            zoom = newZoom.coerceIn(3f, 18f),
+            mode = MapCameraMode.FREE_EXPLORE,
+            tiltDegrees = 0f
+        )
+    }
+
+    /**
      * Pinch zoom outside FOLLOWING (FREE_EXPLORE / OVERVIEW): applies the new zoom
      * AND moves the center so the map point under the gesture centroid stays there
      * (center pre-computed from [ZoomAnchorMath.anchoredCenter] by the gesture layer).
@@ -480,6 +606,8 @@ class MapCameraController {
         const val MAX_TILT_DEGREES: Float = 60f
         /** Default tilt for navigation follow mode (degrees) — Google Maps uses ~30–45°. */
         const val DEFAULT_FOLLOW_TILT_DEGREES: Float = 35f
+        /** Time constant (seconds) for exponential smoothing of GPS position in follow mode. */
+        const val FOLLOW_POSITION_SMOOTH_TAU_SECONDS: Float = 0.5f
         fun calculateAdaptiveZoom(speedKmh: Double, distanceToNextManeuverMeters: Double? = null): Float {
             if (distanceToNextManeuverMeters != null && distanceToNextManeuverMeters in 0.0..150.0) {
                 return 17.5f

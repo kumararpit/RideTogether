@@ -135,6 +135,13 @@ private val RouteStreak = Color(0xFFFFE0A3)  // pale amber centre accent
 /** How often the map publishes its frame statistics (5 s). */
 private const val STATS_LOG_INTERVAL_NANOS = 5_000_000_000L
 
+// Epsilon thresholds for camera animation settling (Google Maps pattern:
+// the animated position converges to the goal and then snaps, eliminating
+// endless micro-adjustments that read as jitter).
+private const val SETTLE_EPSILON_LAT_LNG = 0.00001f   // ~1 meter
+private const val SETTLE_EPSILON_ZOOM = 0.001f
+private const val SETTLE_EPSILON_HEADING_DEG = 0.5f
+
 @SuppressLint("UnusedBoxWithConstraintsScope")
 @Composable
 fun RideMapCanvas(
@@ -374,6 +381,18 @@ fun RideMapCanvas(
     var displayCenterLng by remember { mutableFloatStateOf(initialCenter.longitude.toFloat()) }
     var displayZoom by remember { mutableFloatStateOf(if (isFollowRiderMode) 17f else if (route.isNotEmpty()) 16f else 14f) }
     var displayHeading by remember { mutableFloatStateOf(0f) }
+    // Gesture-state tracking for detectTransformGestures (cumulative since gesture start).
+    // Declared in composable scope so remember() is valid; read inside pointerInput.
+    var lastCumulativeZoom by remember { mutableFloatStateOf(1f) }
+    var lastCumulativeRotation by remember { mutableFloatStateOf(0f) }
+    var gestureStarted by remember { mutableStateOf(false) }
+    // True while a transform gesture is actively driving the camera. While true,
+    // the frame-paced interpolation loop skips writing to display* values so a
+    // gesture immediately cancels any ongoing camera animation (INV-C).
+    var gestureInProgress by remember { mutableStateOf(false) }
+    // True while the camera is actively interpolating toward a target.
+    // Set false when the display has converged to within epsilon of the goal.
+    var isCameraAnimating by remember { mutableStateOf(false) }
     var panOffsetX by remember { mutableFloatStateOf(0f) }
     var panOffsetY by remember { mutableFloatStateOf(0f) }
     var displayAnchorY by remember { mutableFloatStateOf(0f) }
@@ -481,14 +500,43 @@ fun RideMapCanvas(
                         // frame budget allows a draw. Publishing it is what
                         // invalidates the canvas, so this is the render rate.
                         val mayRender = frameBudget.shouldRender(frameTimeNanos)
-                        if (mayRender) {
-                            displayCenterLat += (targetState.center.latitude.toFloat() - displayCenterLat) * alpha
-                            displayCenterLng += (targetState.center.longitude.toFloat() - displayCenterLng) * alpha
-                            displayZoom += (targetState.zoom - displayZoom) * alpha
+                        if (mayRender && !gestureInProgress) {
+                            // Animation cancellation: while a gesture is driving the camera,
+                            // the gesture handler owns display* values. Skipping interpolation
+                            // here lets the gesture immediately cancel any ongoing camera
+                            // animation without the frame loop fighting it.
+                            val targetState2 = cameraController.state.value
+                            val latDiff = kotlin.math.abs(targetState2.center.latitude.toFloat() - displayCenterLat)
+                            val lngDiff = kotlin.math.abs(targetState2.center.longitude.toFloat() - displayCenterLng)
+                            val zoomDiff = kotlin.math.abs(targetState2.zoom - displayZoom)
+                            val headingDelta = ((targetState2.effectiveHeading - displayHeading + 540f) % 360f) - 180f
+                            val headingDiff = kotlin.math.abs(headingDelta)
 
-                            val targetHeading = targetState.effectiveHeading
-                            val deltaH = ((targetHeading - displayHeading + 540f) % 360f) - 180f
-                            displayHeading = (displayHeading + deltaH * alpha + 360f) % 360f
+                            val settled = latDiff < SETTLE_EPSILON_LAT_LNG &&
+                                          lngDiff < SETTLE_EPSILON_LAT_LNG &&
+                                          zoomDiff < SETTLE_EPSILON_ZOOM &&
+                                          headingDiff < SETTLE_EPSILON_HEADING_DEG
+
+                            val wasAnimating = isCameraAnimating
+                            isCameraAnimating = !settled
+                            if (wasAnimating != isCameraAnimating) {
+                                android.util.Log.d("RideMapCanvas",
+                                    "Camera animation ${if (isCameraAnimating) "started" else "settled"}")
+                            }
+
+                            if (settled) {
+                                // Google Maps pattern: snap exactly to goal once converged,
+                                // eliminating endless micro-adjustments that read as jitter.
+                                displayCenterLat = targetState2.center.latitude.toFloat()
+                                displayCenterLng = targetState2.center.longitude.toFloat()
+                                displayZoom = targetState2.zoom
+                                displayHeading = targetState2.effectiveHeading
+                            } else {
+                                displayCenterLat += (targetState2.center.latitude.toFloat() - displayCenterLat) * alpha
+                                displayCenterLng += (targetState2.center.longitude.toFloat() - displayCenterLng) * alpha
+                                displayZoom += (targetState2.zoom - displayZoom) * alpha
+                                displayHeading = (displayHeading + headingDelta * alpha + 360f) % 360f
+                            }
                         }
 
                         if (mayRender && (targetState.mode == MapCameraMode.FOLLOWING || targetState.mode == MapCameraMode.OVERVIEW)) {
@@ -773,21 +821,6 @@ fun RideMapCanvas(
                 centerTileYDouble = centerTileYAtTileZoom,
                 zoomLevel = tileZoom,
                 tileSizePx = scaledTileSizePx
-            )
-
-            // TEMPORARY D7 DIAGNOSTIC LOGGING (remove after root cause confirmed):
-            // one line per stable range change: camera geometry + composed row bounds.
-            val d7Slice = mutableListOf<Int>()
-            for (tyx in tileRange.minY..tileRange.maxY) {
-                val yUn = anchorY + ((tyx - centerTileYAtTileZoom) * scaledTileSizePx).toFloat()
-                d7Slice.add((yUn + scaledTileSizePx).roundToInt())
-            }
-            android.util.Log.d(
-                "RT-D7",
-                "range z=%d disp=%.6f anchor=(%.1f,%.1f) cXY=(%.4f,%.4f) S=%.4f rowsY(top..bot)=%s lighting=%s phColor=%s".format(
-                    tileZoom, displayZoom, anchorX, anchorY, centerTileXAtTileZoom, centerTileYAtTileZoom,
-                    scaledTileSizePx, d7Slice, effectiveLighting, tilePlaceholderColor
-                )
             )
 
             LaunchedEffect(tileRange, tileZoom) {
@@ -1130,45 +1163,78 @@ fun RideMapCanvas(
                     // finger-placement drift that otherwise sabotages every pinch
                     // (the first finger's few-px micro-pan must not exit follow).
                     var microPanAccumPx = 0f
-                    detectTransformGestures { centroid, pan, zoom, _ ->
-                        val zoomDeltaLog2 = kotlin.math.log2(zoom)
+                    detectTransformGestures { centroid, pan, zoom, rotation ->
+                        val isInitial = zoom == 1f && rotation == 0f && pan == Offset.Zero
+                        if (isInitial && gestureStarted) {
+                            // Gesture just ended — reset baselines, release animation cancellation.
+                            gestureStarted = false
+                            gestureInProgress = false
+                            lastCumulativeZoom = 1f
+                            lastCumulativeRotation = 0f
+                        } else if (!isInitial && !gestureStarted) {
+                            // New gesture just started — reset baselines, cancel any ongoing animation.
+                            gestureStarted = true
+                            gestureInProgress = true
+                            lastCumulativeZoom = 1f
+                            lastCumulativeRotation = 0f
+                        }
+
+                        // Per-frame deltas from cumulative values.
+                        val zoomDeltaLog2 = kotlin.math.log2((zoom / lastCumulativeZoom).toDouble()).toFloat()
                         val hasPinchZoom = kotlin.math.abs(zoomDeltaLog2) >= com.example.data.map.ZoomAnchorMath.PINCH_ZOOM_DELTA_LOG2
-                        if (hasPinchZoom) {
+                        val rotationDeltaDeg = (rotation - lastCumulativeRotation) * 180f / Math.PI.toFloat()
+                        val hasRotation = kotlin.math.abs(rotationDeltaDeg) >= 0.5f
+
+                        lastCumulativeZoom = zoom
+                        lastCumulativeRotation = rotation
+
+                        if (hasPinchZoom || hasRotation) {
                             microPanAccumPx = 0f
-                            val newZoom = (displayZoom + zoomDeltaLog2).coerceIn(3f, 18f)
-                            if (newZoom != displayZoom) {
-                                val following = cameraController.state.value.mode == MapCameraMode.FOLLOWING
-                                if (following) {
-                                    // Defect D2 fix: a pinch inside FOLLOWING only changes the
-                                    // zoom level. The camera stays in FOLLOWING (rider stays
-                                    // anchored at the camera anchor) and the user's zoom
-                                    // override persists until the next recenter.
-                                    cameraController.setZoom(newZoom)
-                                } else {
-                                    // Defect D3 fix: outside FOLLOWING, zoom pivots on the
-                                    // pinch centroid — the map point under the fingers stays
-                                    // under the fingers instead of flying around the anchor.
-                                    val unrotated = rotatedToUnrotatedScreen(centroid)
-                                    val anchorLatLng = unrotatedScreenToLatLng(unrotated.x, unrotated.y)
-                                    val anchoredCenter = com.example.data.map.ZoomAnchorMath.anchoredCenter(
-                                        currentCenterLat = displayCenterLat.toDouble(),
-                                        currentCenterLng = displayCenterLng.toDouble(),
-                                        currentZoom = displayZoom,
-                                        newZoom = newZoom,
-                                        anchorLatLng = anchorLatLng,
-                                        anchorUnrotatedX = unrotated.x,
-                                        anchorUnrotatedY = unrotated.y,
-                                        anchorX = anchorX,
-                                        anchorY = anchorY,
-                                        tileSizePx = baseTileSizePx
-                                    )
-                                    cameraController.setZoomFree(newZoom, anchoredCenter)
-                                    displayCenterLat = anchoredCenter.latitude.toFloat()
-                                    displayCenterLng = anchoredCenter.longitude.toFloat()
-                                    onFollowRiderChange(false)
-                                }
-                                displayZoom = newZoom
+
+                            val newZoom = if (hasPinchZoom) {
+                                (displayZoom + zoomDeltaLog2).coerceIn(3f, 18f)
+                            } else {
+                                displayZoom
                             }
+                            val newHeading = if (hasRotation) {
+                                ((effectiveHeading + rotationDeltaDeg) % 360f + 360f) % 360f
+                            } else {
+                                effectiveHeading
+                            }
+
+                            val following = cameraController.state.value.mode == MapCameraMode.FOLLOWING
+                            if (following && !hasRotation) {
+                                // FOLLOWING: zoom-only stays in follow mode (rider anchored).
+                                if (newZoom != displayZoom) {
+                                    cameraController.setZoom(newZoom)
+                                }
+                            } else if (newZoom != displayZoom || newHeading != effectiveHeading) {
+                                // Outside FOLLOWING, or rotation present: centroid-anchored
+                                // zoom + rotation. The map point under the fingers stays put.
+                                val unrotated = rotatedToUnrotatedScreen(centroid)
+                                val anchorLatLng = unrotatedScreenToLatLng(unrotated.x, unrotated.y)
+                                val anchoredCenter = com.example.data.map.ZoomAnchorMath.anchoredCenterWithRotation(
+                                    currentCenterLat = displayCenterLat.toDouble(),
+                                    currentCenterLng = displayCenterLng.toDouble(),
+                                    currentZoom = displayZoom,
+                                    newZoom = newZoom,
+                                    currentHeading = effectiveHeading,
+                                    newHeading = newHeading,
+                                    anchorLatLng = anchorLatLng,
+                                    anchorRotatedX = centroid.x,
+                                    anchorRotatedY = centroid.y,
+                                    anchorX = anchorX,
+                                    anchorY = anchorY,
+                                    tileSizePx = baseTileSizePx
+                                )
+                                cameraController.setZoomFree(newZoom, anchoredCenter)
+                                cameraController.setHeading(newHeading)
+                                displayCenterLat = anchoredCenter.latitude.toFloat()
+                                displayCenterLng = anchoredCenter.longitude.toFloat()
+                                displayHeading = newHeading
+                                onFollowRiderChange(false)
+                            }
+                            displayZoom = newZoom
                         }
                         if (pan != Offset.Zero && !hasPinchZoom) {
                             val followingMode = cameraController.state.value.mode == MapCameraMode.FOLLOWING
