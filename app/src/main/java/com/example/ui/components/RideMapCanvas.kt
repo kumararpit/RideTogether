@@ -570,7 +570,7 @@ fun RideMapCanvas(
                             animatedMarkerFrame = riderMarkerAnimator.frameVersion
                             // Phase B (B-18): the frame's work is timed against the
                             // budget so "frames over budget" is a real measurement.
-                            frameBudget.recordFrameDuration((frameTimeNanos - lastTime) * 1_000_000L)
+                            frameBudget.recordFrameDuration(frameTimeNanos - lastTime)
                             // The statistics are published periodically so they are
                             // observable in the field (logcat) instead of being
                             // collected and never read.
