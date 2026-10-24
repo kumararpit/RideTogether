@@ -5,6 +5,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -29,6 +30,9 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Navigation
+import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.Route
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -48,6 +52,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -484,52 +489,109 @@ fun LiveRideScreen(
                 (currentRide?.actualRecordedDistanceMeters ?: 0.0) / 1000.0
             )
 
-            // Arrival latch banner — prominent call-to-action when destination reached
+            // Arrival overlay — Google Maps-style arrival card that slides up
+            // when the destination is reached. Shows destination, trip summary,
+            // and the primary call-to-action to finish the ride.
             if (navProgress.isArrived) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp)
-                        .testTag("arrived_banner"),
-                    color = Color(0xFF123C22),
-                    shape = RoundedCornerShape(18.dp),
-                    border = BorderStroke(1.5.dp, StatusRidingGreen.copy(alpha = 0.6f)),
-                    tonalElevation = 8.dp,
-                    shadowElevation = 8.dp
+                AnimatedVisibility(
+                    visible = true,
+                    enter = slideInVertically(
+                        initialOffsetY = { it },
+                        animationSpec = tween(300)
+                    ) + fadeIn(animationSpec = tween(300)),
+                    exit = slideOutVertically(
+                        targetOffsetY = { it },
+                        animationSpec = tween(300)
+                    ) + fadeOut(animationSpec = tween(300))
                 ) {
-                    Row(
+                    Surface(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                            .testTag("arrival_overlay"),
+                        color = Color(0xFF0E2716),
+                        shape = RoundedCornerShape(20.dp),
+                        border = BorderStroke(1.5.dp, StatusRidingGreen.copy(alpha = 0.5f)),
+                        tonalElevation = 12.dp,
+                        shadowElevation = 12.dp
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Arrived at Destination",
-                                color = StatusRidingGreen,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Black
-                            )
-                            Text(
-                                text = "Complete Ride",
-                                color = Color.White.copy(alpha = 0.8f),
-                                fontSize = 12.sp
-                            )
-                        }
-                        Button(
-                            onClick = { viewModel.endRide() },
-                            modifier = Modifier.height(46.dp).testTag("finish_ride_button"),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = StatusRidingGreen,
-                                contentColor = Color(0xFF062513)
-                            ),
-                            shape = RoundedCornerShape(14.dp)
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 18.dp, vertical = 16.dp)
                         ) {
-                            Text(
-                                text = "Finish Ride",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Black
-                            )
+                            // Header row: flag icon + title
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Flag,
+                                    contentDescription = "Arrived",
+                                    tint = StatusRidingGreen,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Text(
+                                    text = "You've arrived at ${currentRide?.destinationName ?: "Destination"}",
+                                    color = Color.White,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Black,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            // Trip summary strip
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                TripSummaryChip(
+                                    icon = Icons.Default.Navigation,
+                                    label = "Distance",
+                                    value = String.format(
+                                        Locale.US,
+                                        "%.1f km",
+                                        (currentRide?.actualRecordedDistanceMeters ?: 0.0) / 1000.0
+                                    )
+                                )
+                                TripSummaryChip(
+                                    icon = Icons.Default.Timer,
+                                    label = "Duration",
+                                    value = formatDuration(currentRide?.elapsedDurationSeconds ?: 0.0)
+                                )
+                                TripSummaryChip(
+                                    icon = Icons.Default.Route,
+                                    label = "Route",
+                                    value = "${navProgress.legCount} leg${if (navProgress.legCount != 1) "s" else ""}"
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(20.dp))
+
+                            // Primary call-to-action
+                            Button(
+                                onClick = { showEndRideConfirm = true },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(52.dp)
+                                    .testTag("arrival_finish_ride_button"),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = StatusRidingGreen,
+                                    contentColor = Color(0xFF062513)
+                                ),
+                                shape = RoundedCornerShape(14.dp)
+                            ) {
+                                Text(
+                                    text = "Finish Ride",
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Black
+                                )
+                            }
                         }
                     }
                 }
@@ -1015,5 +1077,44 @@ fun LiveRideScreen(
                 }
             )
         }
+    }
+}
+
+/** Formats a duration in seconds as "X min" or "X hr Y min". */
+private fun formatDuration(seconds: Double): String {
+    val totalMins = (seconds / 60.0).toInt()
+    val hours = totalMins / 60
+    val mins = totalMins % 60
+    return if (hours > 0) "$hours hr $mins min" else "$mins min"
+}
+
+/** Single stat chip inside the arrival overlay trip summary row. */
+@Composable
+private fun TripSummaryChip(
+    icon: ImageVector,
+    label: String,
+    value: String
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = StatusRidingGreen.copy(alpha = 0.8f),
+            modifier = Modifier.size(16.dp)
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = value,
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1
+        )
+        Text(
+            text = label,
+            color = Color.White.copy(alpha = 0.6f),
+            fontSize = 10.sp,
+            maxLines = 1
+        )
     }
 }

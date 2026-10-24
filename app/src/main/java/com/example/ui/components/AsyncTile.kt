@@ -10,6 +10,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Paint
@@ -81,9 +82,9 @@ fun AsyncTile(
                 val bmp = androidBitmapState.value
                 if (bmp != null) {
                     val paint = Paint().apply { this@apply.colorFilter = colorFilter }
-                    drawRect(
-                        color = Color(0xFF4A5568),
-                        size = size
+                    drawImage(
+                        image = bmp.asImageBitmap(),
+                        colorFilter = colorFilter
                     )
                 }
             },

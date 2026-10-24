@@ -12,6 +12,93 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Records TTS latency for a single utterance: the elapsed time from the speak()
+ * call to the onStart callback (voice onset) and to the onDone callback
+ * (utterance complete). Mirrors Google Maps' VoiceGuidanceClearcutLogger.
+ */
+data class TtsLatencyRecord(
+    val maneuverIndex: Int,
+    val requestTimeMs: Long,
+    val onsetTimeMs: Long = 0L,
+    val doneTimeMs: Long = 0L,
+    val spoken: Boolean = false
+) {
+    /** Voice-onset latency in ms (0 if not yet spoken). */
+    val onsetLatencyMs: Long
+        get() = if (spoken) onsetTimeMs - requestTimeMs else 0L
+    /** Full utterance latency in ms (0 if not yet done). */
+    val utteranceLatencyMs: Long
+        get() = if (spoken && doneTimeMs > 0L) doneTimeMs - requestTimeMs else 0L
+}
+
+/**
+ * Rolling window of TTS latency records — tracks the most recent N utterances
+ * so the product team can detect voice guidance regressions (slow TTS onset,
+ * dropped utterances).
+ */
+class TtsLatencyTracker(private val maxRecords: Int = 50) {
+
+    private val records = java.util.concurrent.CopyOnWriteArrayList<TtsLatencyRecord>()
+
+    /** Call when speak() is issued for a maneuver. */
+    fun recordRequest(maneuverIndex: Int, timeMs: Long) {
+        records.add(TtsLatencyRecord(maneuverIndex = maneuverIndex, requestTimeMs = timeMs))
+        while (records.size > maxRecords) records.removeAt(0)
+    }
+
+    /** Call when TTS onStart fires for an utterance. */
+    fun recordOnset(utteranceId: String?, timeMs: Long) {
+        val index = utteranceId?.let { extractManeuverIndex(it) } ?: -1
+        val rec = records.asSequence().firstOrNull { it.maneuverIndex == index && !it.spoken }
+        if (rec != null) {
+            val pos = records.indexOf(rec)
+            records[pos] = rec.copy(onsetTimeMs = timeMs, spoken = true)
+        }
+    }
+
+    /** Call when TTS onDone fires for an utterance. */
+    fun recordDone(utteranceId: String?, timeMs: Long) {
+        val index = utteranceId?.let { extractManeuverIndex(it) } ?: -1
+        val rec = records.asSequence().firstOrNull { it.maneuverIndex == index && it.spoken && recDoneTime(it) == 0L }
+        if (rec != null) {
+            val pos = records.indexOf(rec)
+            records[pos] = rec.copy(doneTimeMs = timeMs)
+        }
+    }
+
+    private fun recDoneTime(rec: TtsLatencyRecord): Long = rec.doneTimeMs
+
+    private fun extractManeuverIndex(utteranceId: String?): Int {
+        val suffix = utteranceId?.removePrefix("maneuver_") ?: return -1
+        return suffix.toIntOrNull() ?: -1
+    }
+
+    /** Average voice-onset latency across spoken utterances (ms). */
+    val averageOnsetLatencyMs: Double
+        get() {
+            val spoken = records.filter { it.spoken && it.onsetLatencyMs > 0L }
+            return if (spoken.isEmpty()) 0.0 else spoken.map { it.onsetLatencyMs.toDouble() }.average()
+        }
+
+    /** Average full-utterance latency across completed utterances (ms). */
+    val averageUtteranceLatencyMs: Double
+        get() {
+            val done = records.filter { it.spoken && it.utteranceLatencyMs > 0L }
+            return if (done.isEmpty()) 0.0 else done.map { it.utteranceLatencyMs.toDouble() }.average()
+        }
+
+    /** Count of utterances requested but never spoken (dropped). */
+    val droppedCount: Int
+        get() = records.count { !it.spoken }
+
+    /** Total number of recorded requests. */
+    val totalRequests: Int get() = records.size
+
+    fun clear() { records.clear() }
+}
 
 /**
  * Pure announcement-suppression state (Phase B, audit F1-D3 / backlog B-02).
@@ -79,6 +166,12 @@ class NavAudioGuidance(context: Context) : TextToSpeech.OnInitListener {
     private val _isMuted = MutableStateFlow(false)
     val isMuted: StateFlow<Boolean> = _isMuted.asStateFlow()
 
+    /** TTS latency tracker (VoiceGuidanceClearcutLogger equivalent). */
+    private val ttsLatencyTracker = TtsLatencyTracker()
+
+    /** Read-only view of TTS latency stats (for diagnostics / telemetry). */
+    val ttsLatencyStats: TtsLatencyTracker get() = ttsLatencyTracker
+
     /** No-op focus listener (informational focus changes are not acted on). */
     private val focusListener = AudioManager.OnAudioFocusChangeListener { }
 
@@ -113,14 +206,17 @@ class NavAudioGuidance(context: Context) : TextToSpeech.OnInitListener {
                 // background music restores volume immediately after speaking.
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {
+                        ttsLatencyTracker.recordOnset(utteranceId, System.currentTimeMillis())
                         // Focus already requested before speak(); nothing to do.
                     }
 
                     override fun onDone(utteranceId: String?) {
+                        ttsLatencyTracker.recordDone(utteranceId, System.currentTimeMillis())
                         abandonDuckFocus()
                     }
 
                     override fun onError(utteranceId: String?) {
+                        ttsLatencyTracker.recordDone(utteranceId, System.currentTimeMillis())
                         abandonDuckFocus()
                     }
                 })
@@ -175,12 +271,16 @@ class NavAudioGuidance(context: Context) : TextToSpeech.OnInitListener {
             else -> instruction
         }
 
+        val utteranceId = "maneuver_$maneuverIndex"
+        val requestTimeMs = System.currentTimeMillis()
+        ttsLatencyTracker.recordRequest(maneuverIndex, requestTimeMs)
+
         // Duck helmet music for the duration of the prompt; the UtteranceProgressListener
         // registered in onInit() abandons focus in onDone()/onError().
         requestDuckFocus()
 
         try {
-            tts?.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, null, "maneuver_$maneuverIndex")
+            tts?.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
             announcementHistory.markSpoken(maneuverIndex)
             Log.d("NavAudioGuidance", "Spoke maneuver [$maneuverIndex]: $textToSpeak")
         } catch (e: Exception) {
@@ -208,6 +308,7 @@ class NavAudioGuidance(context: Context) : TextToSpeech.OnInitListener {
 
     fun resetAnnounceHistory() {
         announcementHistory.reset()
+        ttsLatencyTracker.clear()
     }
 
     fun shutdown() {

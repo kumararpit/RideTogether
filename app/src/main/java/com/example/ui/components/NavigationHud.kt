@@ -1,6 +1,9 @@
 package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -133,8 +136,19 @@ fun TurnByTurnNavHeader(
     distanceToNextManeuverMeters: Double = 0.0,
     isAudioMuted: Boolean = false,
     onToggleAudioMute: () -> Unit = {},
+    /**
+     * Distance (meters) beyond which the turn card is hidden. Mirrors Google Maps'
+     * CheckThresholds(meters=) — when the next maneuver is farther than this, the
+     * banner is suppressed so the map isn't cluttered with a turn the rider
+     * cannot act on yet. Default 1000 m.
+     */
+    showThresholdMeters: Double = 1000.0,
     modifier: Modifier = Modifier
 ) {
+    // Distance-based show/hide: hide the card when the maneuver is beyond the
+    // threshold. The card fades in/out so the appearance isn't jarring.
+    val shouldShowCard = currentStep != null && distanceToNextManeuverMeters <= showThresholdMeters
+
     val cardBg = when {
         isOffRoute -> Color(0xFF4A1717)
         isRerouting -> Color(0xFF3A2A0E)
@@ -146,6 +160,12 @@ fun TurnByTurnNavHeader(
         else -> RideGuidanceGreenDark
     }
 
+    AnimatedVisibility(
+        visible = shouldShowCard,
+        enter = fadeIn(animationSpec = tween(200)),
+        exit = fadeOut(animationSpec = tween(200)),
+        modifier = modifier
+    ) {
     Surface(
         modifier = modifier
             .fillMaxWidth()
@@ -333,6 +353,7 @@ fun TurnByTurnNavHeader(
                 }
             }
         }
+    }
     }
 }
 
