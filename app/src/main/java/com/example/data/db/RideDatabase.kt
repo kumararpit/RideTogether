@@ -21,7 +21,7 @@ import com.example.data.map.tile.TileEntity
         SavedPlaceEntity::class,
         TileEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 @TypeConverters(com.example.data.amenities.AmenityTypeConverter::class)
@@ -148,6 +148,15 @@ abstract class RideDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Schema now matches TileEntity (DEFAULT 0 on cached_at_ms / expires_at_ms /
+                // priority / is_empty). Empty migration bumps the version so Room's
+                // identity hash stays in sync after the @ColumnInfo(defaultValue = "0")
+                // additions on TileEntity fields.
+            }
+        }
+
         fun getInstance(context: Context): RideDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -155,7 +164,7 @@ abstract class RideDatabase : RoomDatabase() {
                     RideDatabase::class.java,
                     "ridetogether.db"
                 )
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

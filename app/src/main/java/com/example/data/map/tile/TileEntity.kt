@@ -24,8 +24,8 @@ data class TileEntity(
     @ColumnInfo(name = "y") val y: Int,
     @ColumnInfo(name = "data") val data: ByteArray,           // PNG bytes
     @ColumnInfo(name = "etag") val etag: String? = null,
-    @ColumnInfo(name = "cached_at_ms") val cachedAtMs: Long = 0,
-    @ColumnInfo(name = "expires_at_ms") val expiresAtMs: Long = 0, // 0 = never expire
-    @ColumnInfo(name = "priority") val priority: Long = 0,
-    @ColumnInfo(name = "is_empty") val isEmpty: Boolean = false // true = confirmed missing, don't re-fetch
+    @ColumnInfo(name = "cached_at_ms", defaultValue = "0") val cachedAtMs: Long = 0,
+    @ColumnInfo(name = "expires_at_ms", defaultValue = "0") val expiresAtMs: Long = 0, // 0 = never expire
+    @ColumnInfo(name = "priority", defaultValue = "0") val priority: Long = 0,
+    @ColumnInfo(name = "is_empty", defaultValue = "0") val isEmpty: Boolean = false // true = confirmed missing, don't re-fetch
 )
