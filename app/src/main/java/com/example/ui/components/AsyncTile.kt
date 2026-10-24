@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -9,11 +10,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.Paint
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.layout.ContentScale
 import com.example.data.map.tile.TileKey
 import com.example.data.map.tile.TileRepository
 import kotlinx.coroutines.CancellationException
@@ -54,7 +55,7 @@ fun AsyncTile(
 ) {
     val coroutineScope = rememberCoroutineScope()
 
-    val androidBitmapState = mutableStateOf<android.graphics.Bitmap?>(null)
+    val androidBitmapState = remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var loadJob: Job? = null
 
     // Cancel any previous load for this key when entering this effect.
@@ -78,15 +79,16 @@ fun AsyncTile(
         modifier = modifier
             .fillMaxSize()
             .background(if (placeholderColor != Color.Unspecified) placeholderColor else Color.Unspecified)
-            .drawBehind {
-                val bmp = androidBitmapState.value
-                if (bmp != null) {
-                    val paint = Paint().apply { this@apply.colorFilter = colorFilter }
-                    drawImage(
-                        image = bmp.asImageBitmap(),
-                        colorFilter = colorFilter
-                    )
-                }
-            },
-    )
+    ) {
+        val bmp = androidBitmapState.value
+        if (bmp != null) {
+            Image(
+                painter = BitmapPainter(bmp.asImageBitmap()),
+                contentDescription = contentDescription,
+                modifier = Modifier.fillMaxSize(),
+                colorFilter = colorFilter,
+                contentScale = ContentScale.Crop
+            )
+        }
+    }
 }
