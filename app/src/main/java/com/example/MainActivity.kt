@@ -47,6 +47,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             RideTogetherTheme(darkTheme = true) {
+                val context = LocalContext.current
                 val locationPermissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestMultiplePermissions()
                 ) { permissions ->
@@ -54,6 +55,11 @@ class MainActivity : ComponentActivity() {
                     val coarseLocationGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
                     if (fineLocationGranted || coarseLocationGranted) {
                         viewModel.locationTracker.startTracking()
+                    }
+                    // Optional accelerator: only affects how low the heading gate
+                    // may drop. Denial degrades to speed-only gating, never breaks.
+                    if (permissions[Manifest.permission.ACTIVITY_RECOGNITION] == true) {
+                        com.example.data.location.ActivityRecognitionMonitor.start(context)
                     }
                 }
 
@@ -63,15 +69,28 @@ class MainActivity : ComponentActivity() {
                         Manifest.permission.ACCESS_FINE_LOCATION
                     ) == PackageManager.PERMISSION_GRANTED
 
+                    val hasActivityRecognition =
+                        com.example.data.location.ActivityRecognitionMonitor
+                            .isPermitted(this@MainActivity)
+
+                    val missing = mutableListOf<String>()
                     if (!hasFine) {
-                        locationPermissionLauncher.launch(
-                            arrayOf(
-                                Manifest.permission.ACCESS_FINE_LOCATION,
-                                Manifest.permission.ACCESS_COARSE_LOCATION
-                            )
-                        )
-                    } else {
+                        missing += Manifest.permission.ACCESS_FINE_LOCATION
+                        missing += Manifest.permission.ACCESS_COARSE_LOCATION
+                    }
+                    if (!hasActivityRecognition) {
+                        missing += Manifest.permission.ACTIVITY_RECOGNITION
+                    }
+
+                    if (missing.isNotEmpty()) {
+                        locationPermissionLauncher.launch(missing.toTypedArray())
+                    }
+                    if (hasFine) {
                         viewModel.locationTracker.startTracking()
+                    }
+                    if (hasActivityRecognition) {
+                        com.example.data.location.ActivityRecognitionMonitor
+                            .start(this@MainActivity)
                     }
                 }
 

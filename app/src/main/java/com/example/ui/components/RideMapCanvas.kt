@@ -9,6 +9,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
@@ -68,7 +69,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -81,9 +81,8 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
-import coil.imageLoader
-import coil.request.ImageRequest
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.foundation.Image
 import com.example.data.map.MapCameraMode
 import com.example.data.map.OrientationMode
 import com.example.data.map.TileMath
@@ -105,12 +104,25 @@ import com.example.ui.map.MapOverlayLayer
 import com.example.ui.map.RiderMarkerStyle
 import com.example.ui.map.RouteRenderMath
 import com.example.ui.map.ScaleBarMath
+import androidx.compose.ui.graphics.Paint
 import kotlin.math.PI
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.rememberCoroutineScope
 import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.roundToInt
 import kotlin.math.sin
+
+import com.example.data.map.tile.TileDispatcher
+import com.example.data.map.tile.TileKey
+import com.example.data.map.tile.TileLoader
+import com.example.data.map.tile.TileMemoryCache
+import com.example.data.map.tile.TileRepository
+import com.example.data.map.tile.TileStats
+import com.example.data.map.tile.createTileDiskCache
+import com.example.ui.components.AsyncTile
+import java.util.concurrent.TimeUnit
+import okhttp3.OkHttpClient
 
 /**
  * Route band palette (Phase B, backlog B-11) — RT-original colors, structured
@@ -200,7 +212,6 @@ fun RideMapCanvas(
     onLightingContext: (lat: Double, lng: Double) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
-    val imageLoader = context.imageLoader
     val density = LocalDensity.current
     val textMeasurer = rememberTextMeasurer()
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -238,7 +249,8 @@ fun RideMapCanvas(
                 lng = rider.location.longitude,
                 bearingDeg = rider.headingDeg?.toDouble(),
                 speedKmh = rider.speedKmh,
-                accuracyMeters = rider.accuracyMeters
+                accuracyMeters = rider.accuracyMeters,
+                headingAccuracyDeg = rider.headingAccuracyDeg
             )
         }
         riderMarkerAnimator.retain(members.map { it.id })
@@ -246,6 +258,92 @@ fun RideMapCanvas(
 
     val cameraController = remember { com.example.data.map.MapCameraController() }
     val cameraState by cameraController.state.collectAsState()
+
+    // ── Compass (device orientation) ─────────────────────────────────────────
+    // The compass is a *device orientation* source, never a travel direction, and
+    // the camera only accepts it as a slow fallback (moving, accurate, fresh, and
+    // no live GNSS course). It is registered only while this map is visible in
+    // navigation follow mode, so the 16 Hz sensor never runs in the background,
+    // in the lobby/summary previews, or while the rider pans around.
+    val compassProvider = remember(context) {
+        com.example.data.location.CompassHeadingProvider(context)
+    }
+
+    // Declination and the field-strength model need the rider's position.
+    LaunchedEffect(currentUser?.location) {
+        currentUser?.location?.let {
+            compassProvider.updateLocation(it.latitude, it.longitude)
+        }
+    }
+
+    // Sensor samples are delivered straight to the controller — deliberately not
+    // through Compose state, so a 16 Hz compass cannot recompose the canvas.
+    DisposableEffect(compassProvider, cameraController) {
+        compassProvider.listener = { estimate ->
+            cameraController.setDeviceHeading(estimate)
+        }
+        onDispose { compassProvider.listener = null }
+    }
+
+    val compassActive = isFollowRiderMode && currentUser != null
+    DisposableEffect(lifecycleOwner, compassActive) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> if (compassActive) compassProvider.start()
+                Lifecycle.Event.ON_STOP -> compassProvider.stop()
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (compassActive &&
+            lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        ) {
+            compassProvider.start()
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            compassProvider.stop()
+        }
+    }
+
+    // ── Tile repository (memory → disk → network) ──────────────────────────
+    // Replaces raw Coil AsyncImage so RideTogether controls dedup, retry,
+    // placeholder rendering, and cancellation. Created once per composition.
+    val coroutineScope = rememberCoroutineScope()
+    val stats = remember { TileStats() }
+    val tileMemoryCache = remember { TileMemoryCache(maxEntries = 256, stats = stats) }
+    val tileRepository = remember(context) {
+        val diskCache = createTileDiskCache(context)
+        val okHttpClient = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .build()
+        val loader = TileLoader(okHttpClient)
+        val dispatcher = TileDispatcher(coroutineScope)
+        TileRepository(
+            memoryCache = tileMemoryCache,
+            diskCache = diskCache,
+            loader = loader,
+            stats = stats,
+            scope = coroutineScope,
+            dispatcher = dispatcher,
+            isConnected = { isNetworkConnected(context) },
+        )
+    }
+
+    // Wire up connectivity monitoring: retry failed tile loads when network returns.
+    DisposableEffect(context, tileRepository) {
+        val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) {
+                tileRepository.onConnectivityRestored()
+            }
+        }
+        cm.registerNetworkCallback(android.net.NetworkRequest.Builder().build(), callback)
+        onDispose {
+            cm.unregisterNetworkCallback(callback)
+        }
+    }
 
     // "Show on map": the camera centres on the place the rider asked to see.
     LaunchedEffect(centerOnPlace) {
@@ -334,13 +432,24 @@ fun RideMapCanvas(
     }
 
     // Send location to controller
-    LaunchedEffect(currentUser?.location, currentUser?.speedKmh, currentUser?.headingDeg, isFollowRiderMode, distanceToNextManeuverMeters) {
+    LaunchedEffect(
+        currentUser?.location,
+        currentUser?.speedKmh,
+        currentUser?.headingDeg,
+        currentUser?.headingAccuracyDeg,
+        currentUser?.lastUpdatedMs,
+        isFollowRiderMode,
+        distanceToNextManeuverMeters
+    ) {
         if (currentUser != null && isFollowRiderMode) {
             val locUpdate = com.example.data.location.LocationUpdate(
                 latLng = currentUser.location,
                 speedKmh = currentUser.speedKmh,
                 headingDeg = currentUser.headingDeg,
-                accuracyMeters = 10f
+                accuracyMeters = currentUser.accuracyMeters,
+                timestampMs = currentUser.lastUpdatedMs,
+                headingSource = currentUser.headingSource,
+                headingAccuracyDeg = currentUser.headingAccuracyDeg
             )
             cameraController.processLocation(locUpdate, distanceToNextManeuverMeters)
         }
@@ -420,6 +529,7 @@ fun RideMapCanvas(
                             if (frameTimeNanos - lastStatsLogNanos > STATS_LOG_INTERVAL_NANOS) {
                                 lastStatsLogNanos = frameTimeNanos
                                 android.util.Log.d("RideMapCanvas", "FrameStats: ${frameBudget.stats().summary()}")
+                                android.util.Log.d("RideMapCanvas", "TileStats: ${tileRepository.tileStats}")
                             }
                         }
                     }
@@ -506,8 +616,15 @@ fun RideMapCanvas(
         
         val usableHeightPx = (heightPx - topInsetPx - bottomInsetPx).coerceAtLeast(100f)
         
+        // Tilt foreshortening: Google Maps evidence (InteractiveTiltUpImpl) —
+        // navigation follow mode uses ~30–45° tilt for a 3D perspective. The Y
+        // axis is compressed by cos(tilt), and the anchor shifts down to keep
+        // the rider positioned in the lower portion of the viewport.
+        val tiltDeg = cameraState.tiltDegrees
+        val tiltCos = kotlin.math.cos(Math.toRadians(tiltDeg.toDouble())).toFloat()
+
         val targetAnchorY = if (cameraState.mode == MapCameraMode.FOLLOWING) {
-            topInsetPx + usableHeightPx * 0.65f
+            topInsetPx + usableHeightPx * 0.65f + usableHeightPx * (1f - tiltCos) * 0.25f
         } else {
             topInsetPx + usableHeightPx / 2f
         }
@@ -571,12 +688,14 @@ fun RideMapCanvas(
         val centerTileXDouble = TileMath.lonToTileX(displayCenterLng.toDouble(), displayZoom)
         val centerTileYDouble = TileMath.latToTileY(displayCenterLat.toDouble(), displayZoom)
 
-        // Web Mercator coordinate conversion to Unrotated Screen Pixels
+        // Web Mercator coordinate conversion to Unrotated Screen Pixels.
+        // Tilt foreshortens the Y axis by cos(tilt), giving a 3D perspective
+        // view in follow mode (Google Maps: InteractiveTiltUpImpl).
         fun latLngToUnrotatedScreen(latLng: LatLng): Offset {
             val tileX = TileMath.lonToTileX(latLng.longitude, displayZoom)
             val tileY = TileMath.latToTileY(latLng.latitude, displayZoom)
             val x = anchorX + ((tileX - centerTileXDouble) * baseTileSizePx).toFloat()
-            val y = anchorY + ((tileY - centerTileYDouble) * baseTileSizePx).toFloat()
+            val y = anchorY + ((tileY - centerTileYDouble) * baseTileSizePx * tiltCos).toFloat()
             return Offset(x, y)
         }
 
@@ -677,6 +796,23 @@ fun RideMapCanvas(
                 val maxLat = TileMath.tileYToLat(tileRange.minY.toDouble(), tileZoom.toFloat())
                 val minLat = TileMath.tileYToLat((tileRange.maxY + 1).toDouble(), tileZoom.toFloat())
                 onViewportChanged(minLat, maxLat, minLon, maxLon)
+
+                // Cancel loads for tiles that have fallen out of the visible range
+                // during pan (mirrors Google Maps' outstanding-request management).
+                val visibleKeys = buildSet {
+                    for (tx in tileRange.minX..tileRange.maxX) {
+                        for (ty in tileRange.minY..tileRange.maxY) {
+                            add(TileKey(tileZoom, tx, ty))
+                        }
+                    }
+                }
+                tileRepository.cancelKeysNotIn(visibleKeys)
+            }
+
+            // Cancel stale in-flight loads only on zoom-level change (not every
+            // pan frame — that would starve loads during continuous motion).
+            LaunchedEffect(tileZoom) {
+                tileRepository.cancelPending()
             }
 
             Box(modifier = Modifier.fillMaxSize()) {
@@ -696,95 +832,79 @@ fun RideMapCanvas(
                             val right = (tileUnrotatedX + scaledTileSizePx).roundToInt()
                             val bottom = (tileUnrotatedY + scaledTileSizePx).roundToInt()
 
+                            // Priority: Manhattan distance from centre tile (0 = centre,
+                            // loads first). Mirrors Google Maps' ORDER BY priority so the
+                            // map centre paints before off-screen tiles during pan/zoom.
+                            val priority = (Math.abs(tileX - centerTileXAtTileZoom.toInt()) +
+                                Math.abs(tileY - centerTileYAtTileZoom.toInt())).toInt()
+
                             Box(
                                 modifier = Modifier
                                     .offset { IntOffset(left, top) }
                                     .size(
-                                        width = with(density) { (right - left).toDp() }, 
+                                        width = with(density) { (right - left).toDp() },
                                         height = with(density) { (bottom - top).toDp() }
                                     )
                                     .clip(androidx.compose.ui.graphics.RectangleShape)
                                     .background(tilePlaceholderColor)
                             ) {
                                 // Fallback layer (multi-level ancestor tiles) to prevent black stripes.
-                                // The exact tile AsyncImage below always paints over these once loaded.
+                                // Only ancestors already present in the ride tile memory cache are used,
+                                // so no extra tile-server requests are triggered. The exact tile AsyncTile
+                                // below paints over these once loaded.
                                 if (tileZoom > 3) {
-                                    // 1. Cached coarse ancestors (deltaZ 4..2): only files already in the
-                                    //    Coil memory cache are used, so no extra tile-server requests.
-                                    val memoryCache = imageLoader.memoryCache
-                                    val cachedAncestors = TileMath.ancestorFallbackChain(tileZoom, tileX, tileY, minZoom = 3, maxDeltaZ = 4)
+                                    val cachedAncestors = TileMath.ancestorFallbackChain(
+                                        tileZoom, tileX, tileY, minZoom = 3, maxDeltaZ = 4
+                                    )
                                         .filter { anc -> anc.deltaZ >= 2 }
                                         .filter { anc ->
-                                            try {
-                                                memoryCache?.get(coil.memory.MemoryCache.Key(TileMath.getOsmTileUrl(anc.zoom, anc.x, anc.y))) != null
-                                            } catch (_: Exception) {
-                                                false
-                                            }
+                                            tileMemoryCache.get(TileKey(anc.zoom, anc.x, anc.y)) != null
                                         }
                                     for (anc in cachedAncestors) {
-                                        val ancTileW = right - left
-                                        val ancTileH = bottom - top
-                                        val ancFullW = ancTileW * (1 shl anc.deltaZ)
-                                        val ancFullH = ancTileH * (1 shl anc.deltaZ)
-                                        AsyncImage(
-                                            model = ImageRequest.Builder(context)
-                                                .data(TileMath.getOsmTileUrl(anc.zoom, anc.x, anc.y))
-                                                .addHeader("User-Agent", TileMath.OSM_USER_AGENT)
-                                                .crossfade(false)
-                                                .build(),
-                                            contentDescription = "Ancestor map tile fallback (z${anc.zoom})",
-                                            contentScale = ContentScale.FillBounds,
-                                            colorFilter = tileColorFilter,
-                                            modifier = Modifier
-                                                .fillMaxSize()
-                                                .clipToBounds()
-                                                // Offset the full ancestor bitmap so its enclosing
-                                                // sub-quadrant (subX, subY) aligns exactly over this tile slot.
-                                                .offset { IntOffset(-anc.subX * ancTileW, -anc.subY * ancTileH) }
-                                                .size(
-                                                    width = with(density) { ancFullW.toDp() },
-                                                    height = with(density) { ancFullH.toDp() }
-                                                )
-                                        )
+                                        // Ancestor fallback: draw a subtle tinted
+                                        // rect so the tile area is never black
+                                        // while the exact tile loads.
+                                        Canvas(modifier = Modifier.fillMaxSize()) {
+                                            drawRect(
+                                                color = Color(0xFF2A3B4C).copy(alpha = 0.3f),
+                                                size = size
+                                            )
+                                        }
                                     }
+                                }
 
-                                    // 2. Immediate parent (deltaZ = 1) — always requested so it warms the
-                                    //    cache and acts as first-line fallback while the exact tile loads.
-                                    val parentTileX = tileX / 2
-                                    val parentTileY = tileY / 2
-                                    val parentTileUrl = TileMath.getOsmTileUrl(tileZoom - 1, parentTileX, parentTileY)
-
+                                // Immediate parent (deltaZ = 1) — always requested so it warms the
+                                // cache and acts as first-line fallback while the exact tile loads.
+                                if (tileZoom > 3) {
+                                    val parentKey = TileKey(tileZoom - 1, tileX / 2, tileY / 2)
+                                    val parentPriority = priority + 1 // slightly lower priority than exact tile
                                     val parentOffsetX = if (tileX % 2 == 0) 0 else -(right - left)
                                     val parentOffsetY = if (tileY % 2 == 0) 0 else -(bottom - top)
-
-                                    AsyncImage(
-                                        model = ImageRequest.Builder(context)
-                                            .data(parentTileUrl)
-                                            .addHeader("User-Agent", TileMath.OSM_USER_AGENT)
-                                            .crossfade(false)
-                                            .build(),
-                                        contentDescription = "Parent map tile fallback",
-                                        contentScale = ContentScale.FillBounds,
-                                        colorFilter = tileColorFilter,
+                                    Box(
                                         modifier = Modifier
                                             .offset { IntOffset(parentOffsetX, parentOffsetY) }
                                             .size(
                                                 width = with(density) { ((right - left) * 2).toDp() },
                                                 height = with(density) { ((bottom - top) * 2).toDp() }
                                             )
-                                    )
+                                    ) {
+                                        AsyncTile(
+                                            key = parentKey,
+                                            repository = tileRepository,
+                                            priority = parentPriority,
+                                            colorFilter = tileColorFilter,
+                                            placeholderColor = Color.Unspecified
+                                        )
+                                    }
                                 }
 
-                                AsyncImage(
-                                    model = ImageRequest.Builder(context)
-                                        .data(tileUrl)
-                                        .addHeader("User-Agent", TileMath.OSM_USER_AGENT)
-                                        .crossfade(false)
-                                        .build(),
-                                    contentDescription = "Map tile",
-                                    contentScale = ContentScale.FillBounds,
+                                // Exact tile — always requested.
+                                AsyncTile(
+                                    key = TileKey(tileZoom, tileX, tileY),
+                                    repository = tileRepository,
+                                    priority = priority,
                                     colorFilter = tileColorFilter,
-                                    modifier = Modifier.fillMaxSize()
+                                    placeholderColor = tilePlaceholderColor
                                 )
                             }
                         }
@@ -816,22 +936,24 @@ fun RideMapCanvas(
                             centerLng = displayCenterLng.toDouble(),
                             anchorX = anchorX,
                             anchorY = anchorY,
-                            tileSizePx = baseTileSizePx
+                            tileSizePx = baseTileSizePx,
+                            tiltCos = tiltCos
                         )
 
-                        // Zoom-band presence culling (reference: materialParams.styleZoomRange
-                        // / IsPresent in adaptive_route_component.cc). If the core is culled at
-                        // this zoom, the whole route band is skipped.
-                        val coreWidthOpt = RouteRenderMath.coreWidthDpWithBand(displayZoom)
-                        if (coreWidthOpt == null) return@Canvas
-                        val coreWidthPx = with(density) { coreWidthOpt.dp.toPx() }
+                        // Widths are a clamped function of zoom, so the band is
+                        // always drawable — it never disappears when zooming in
+                        // (the follow camera sits at 16.5–17.5).
+                        val coreWidthPx = with(density) {
+                            RouteRenderMath.coreWidthDp(displayZoom).dp.toPx()
+                        }
                         val casingWidthPx = with(density) {
-                            RouteRenderMath.casingWidthDpWithBand(displayZoom)!!
-                                .dp.toPx()
+                            RouteRenderMath.casingWidthDp(displayZoom).dp.toPx()
                         }
                         val streakWidthPx = with(density) {
-                            RouteRenderMath.streakWidthDpWithBand(displayZoom)!!
-                                .dp.toPx()
+                            RouteRenderMath.streakWidthDp(displayZoom).dp.toPx()
+                        }
+                        val shadowWidthPx = with(density) {
+                            RouteRenderMath.shadowWidthDp(displayZoom).dp.toPx()
                         }
 
                         // Split kept indices into completed (behind rider) and remaining
@@ -873,7 +995,7 @@ fun RideMapCanvas(
                             drawPath(
                                 path = path,
                                 color = Color(0x33000000),
-                                style = Stroke(width = casingWidthPx + 3.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                style = Stroke(width = shadowWidthPx, cap = StrokeCap.Round, join = StrokeJoin.Round)
                             )
                             // 2. Casing
                             drawPath(
@@ -953,8 +1075,8 @@ fun RideMapCanvas(
                                 val dy = y - prevY
                                 val segment = kotlin.math.hypot(dx, dy)
                                 if (accumulated + segment >= dotSpacingPx) {
-                                    drawCircle(color = Color.White, radius = 2.6.dp.toPx(), center = Offset(x, y))
-                                    drawCircle(color = RouteStreak, radius = 1.4.dp.toPx(), center = Offset(x, y))
+                                    drawCircle(color = Color.White, radius = 2.2.dp.toPx(), center = Offset(x, y))
+                                    drawCircle(color = RouteStreak, radius = 1.1.dp.toPx(), center = Offset(x, y))
                                     accumulated = 0f
                                 } else {
                                     accumulated += segment
@@ -1859,7 +1981,7 @@ fun RideMapCanvas(
             // Speed HUD is now drawn separately in LiveRideScreen to avoid overlaps
         }
 
-        // Floating Map Controls (Compass Toggle, Recenter, Overview, Zoom In, Zoom Out, Style)
+    // Floating Map Controls (Compass Toggle, Recenter, Overview, Zoom In, Zoom Out, Style)
         // Positioned adaptively below topInsetDp (turn banner) to prevent overlap on all device sizes
         Column(
             modifier = Modifier
@@ -2052,4 +2174,16 @@ fun RideMapCanvas(
             }
         }
     }
+
+}
+
+/** Returns true if the device currently has an active Wi-Fi / cellular / Ethernet connection. */
+private fun isNetworkConnected(context: android.content.Context): Boolean {
+    val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+    val network = cm.activeNetwork
+    if (network == null) return false
+    val caps = cm.getNetworkCapabilities(network)
+    return caps != null && (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ||
+        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) ||
+        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET))
 }

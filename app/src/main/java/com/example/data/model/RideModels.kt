@@ -64,6 +64,10 @@ data class RiderMember(
      * contract shared by the camera, the marker animator, and Firestore sync.
      */
     val headingDeg: Float? = null,
+    /** Which estimator produced [headingDeg]; UNAVAILABLE when there is none. */
+    val headingSource: HeadingSource = HeadingSource.UNAVAILABLE,
+    /** Expected angular error of [headingDeg] in degrees, or null when unknown. */
+    val headingAccuracyDeg: Float? = null,
     val accuracyMeters: Float = 10f,
     val sequenceNumber: Long = 0L,
     val lastUpdatedMs: Long = System.currentTimeMillis(),

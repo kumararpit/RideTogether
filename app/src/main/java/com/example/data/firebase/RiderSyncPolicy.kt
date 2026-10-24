@@ -2,6 +2,7 @@ package com.example.data.firebase
 
 import com.example.data.model.ConnectionStatus
 import com.example.data.model.EmergencyState
+import com.example.data.model.HeadingSource
 import com.example.data.model.LatLng
 import com.example.data.model.MemberStatus
 import com.example.data.model.MovementState
@@ -164,6 +165,8 @@ object RiderSyncPolicy {
         prevSeq: Long,
         isCurrentUser: Boolean,
         isGpsAvailable: Boolean,
+        headingSource: HeadingSource = HeadingSource.UNAVAILABLE,
+        headingAccuracyDeg: Float? = null,
         currentTimeMs: Long = System.currentTimeMillis()
     ): RiderMember? {
         val isCoordValid = validateCoordinates(rawLat, rawLng)
@@ -216,6 +219,8 @@ object RiderSyncPolicy {
             location = LatLng(latVal, lngVal),
             speedKmh = speedKmh,
             headingDeg = headingDeg,
+            headingSource = headingSource,
+            headingAccuracyDeg = headingAccuracyDeg,
             accuracyMeters = accuracyMeters,
             sequenceNumber = sequenceNumber,
             lastUpdatedMs = riderTs.eventTimestampMs, // Strictly event-generation timestamp!

@@ -5,8 +5,10 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.location.Location
+import android.os.Build
 import android.os.Looper
 import androidx.core.content.ContextCompat
+import com.example.data.model.HeadingSource
 import com.example.data.model.LatLng
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
@@ -30,15 +32,45 @@ data class LocationUpdate(
     val speedKmh: Double,
 
     /**
-     * Qualified heading (0..360) when available: GPS bearing, else course over
-     * ground derived from the preceding fix. Null means "no reliable heading" —
-     * consumers must preserve their previous heading, never substitute 0°.
+     * Qualified heading (0..360) when available: a GNSS course that passed the
+     * speed / accuracy / age gate, or a course derived from the preceding fix.
+     *
+     * Null means "no reliable heading" — consumers must preserve their previous
+     * heading, never substitute 0° (north). Google Maps deletes the bearing at
+     * the source in exactly this situation (`aizg.k()`).
      */
     val headingDeg: Float?,
 
     val accuracyMeters: Float,
-    val timestampMs: Long = System.currentTimeMillis()
-)
+    val timestampMs: Long = System.currentTimeMillis(),
+
+    /** Which estimator produced [headingDeg]. */
+    val headingSource: HeadingSource =
+        if (headingDeg != null) HeadingSource.GNSS_COURSE else HeadingSource.UNAVAILABLE,
+
+    /** Expected angular error in degrees, or null when the source cannot report one. */
+    val headingAccuracyDeg: Float? = null,
+
+    /** Speed uncertainty reported by the provider (m/s), when available. */
+    val speedAccuracyMps: Float? = null,
+
+    /**
+     * Independent activity-recognition "moving" signal. Google Maps uses this to
+     * lower the 3.0 m/s course floor to ~1.0 m/s for walking/pushing.
+     */
+    val activityMoving: Boolean = false
+) {
+    /** Convenience view of the heading with its provenance. */
+    fun toHeadingEstimate(): com.example.data.model.HeadingEstimate? =
+        headingDeg?.let {
+            com.example.data.model.HeadingEstimate(
+                degrees = it,
+                source = headingSource,
+                accuracyDeg = headingAccuracyDeg,
+                timestampMs = timestampMs
+            )
+        }
+}
 
 class LocationTimeoutException(message: String = "GPS location request timed out") : Exception(message)
 
@@ -80,43 +112,146 @@ class LocationTracker(private val context: Context) {
             // Convert m/s to km/h (1 m/s = 3.6 km/h)
             val speedKmh = if (loc.hasSpeed()) (loc.speed * 3.6).coerceAtLeast(0.0) else 0.0
 
-            // Qualified Bearing: GPS bearing first; otherwise derive course over
-            // ground from the preceding fix — never substitute 0° when missing.
-            val prev = lastFixForCourse
-            val prevTime = lastFixWallClockMs
             val nowMs = System.currentTimeMillis()
-            val derivedHeading: Float? = if (prev == null) {
-                null
-            } else {
-                val displacedEnough = prev.distanceTo(loc) >= CourseOverGround.MIN_DERIVATION_DISTANCE_METERS
-                val elapsedEnough = (nowMs - prevTime) >= CourseOverGround.MIN_DERIVATION_INTERVAL_MS
-                if (displacedEnough && elapsedEnough) {
-                    CourseOverGround.derive(
-                        prev = LatLng(prev.latitude, prev.longitude),
-                        prevTimestampMs = prevTime,
-                        current = LatLng(loc.latitude, loc.longitude),
-                        currentTimestampMs = nowMs
-                    )
-                } else {
-                    null
-                }
-            }
-            val heading: Float? = when {
-                loc.hasBearing() -> ((loc.bearing % 360f) + 360f) % 360f
-                derivedHeading != null -> derivedHeading
-                else -> null
-            }
+            val previous = lastFixForCourse
+            val previousTime = lastFixWallClockMs
+            val activityMoving = ActivityRecognitionMonitor.isMoving
+            val resolved = resolveHeading(
+                loc = loc,
+                previous = previous,
+                previousTimeMs = previousTime,
+                nowMs = nowMs,
+                activityMoving = activityMoving
+            )
+
             lastFixForCourse = loc
             lastFixWallClockMs = nowMs
 
             _currentLocation.value = LocationUpdate(
                 latLng = LatLng(loc.latitude, loc.longitude),
                 speedKmh = speedKmh,
-                headingDeg = heading,
+                headingDeg = resolved.headingDeg,
                 accuracyMeters = if (loc.hasAccuracy()) loc.accuracy else 10f,
-                timestampMs = loc.time
+                timestampMs = if (loc.time > 0L) loc.time else nowMs,
+                headingSource = resolved.source,
+                headingAccuracyDeg = resolved.accuracyDeg,
+                speedAccuracyMps = resolved.speedAccuracyMps,
+                activityMoving = activityMoving
             )
         }
+    }
+
+    /**
+     * Resolves the qualified heading for one fix.
+     *
+     * Order matches Google Maps: a GNSS course that passes the gate wins;
+     * otherwise a course derived from the previous fix is used if it also passes
+     * the gate; otherwise the heading is *absent* (never 0°/north).
+     */
+    private fun resolveHeading(
+        loc: Location,
+        previous: Location?,
+        previousTimeMs: Long,
+        nowMs: Long,
+        activityMoving: Boolean = false
+    ): ResolvedHeading {
+        val speedMps = if (loc.hasSpeed()) loc.speed else 0f
+        val speedAccuracy = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            loc.hasSpeedAccuracy()
+        ) {
+            loc.speedAccuracyMetersPerSecond
+        } else {
+            null
+        }
+        val bearingAccuracy = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            loc.hasBearingAccuracy()
+        ) {
+            loc.bearingAccuracyDegrees
+        } else {
+            null
+        }
+        val fixAgeMs = if (loc.time > 0L) (nowMs - loc.time).coerceAtLeast(0L) else 0L
+        val bearing = if (loc.hasBearing()) loc.bearing else null
+
+        val gnssQualified = BearingGate.qualifiesCourse(
+            headingDeg = bearing,
+            speedMps = speedMps,
+            bearingAccuracyDeg = bearingAccuracy,
+            speedAccuracyMps = speedAccuracy,
+            activityMoving = activityMoving,
+            ageMs = fixAgeMs
+        )
+        if (gnssQualified && bearing != null) {
+            return ResolvedHeading(
+                headingDeg = HeadingMath.normalize360(bearing),
+                source = HeadingSource.GNSS_COURSE,
+                accuracyDeg = bearingAccuracy,
+                speedAccuracyMps = speedAccuracy,
+                activityMoving = activityMoving
+            )
+        }
+
+        if (previous != null && BearingGate.qualifiesDerived(speedMps, fixAgeMs)) {
+            val distanceMeters = previous.distanceTo(loc).toDouble()
+            val derived = CourseOverGround.derive(
+                prev = LatLng(previous.latitude, previous.longitude),
+                prevTimestampMs = previousTimeMs,
+                current = LatLng(loc.latitude, loc.longitude),
+                currentTimestampMs = nowMs
+            )
+            if (derived != null) {
+                return ResolvedHeading(
+                    headingDeg = derived,
+                    source = HeadingSource.DERIVED_COURSE,
+                    accuracyDeg = CourseOverGround.estimatedBearingAccuracyDeg(
+                        positionAccuracyMeters = if (loc.hasAccuracy()) loc.accuracy else 10f,
+                        distanceMeters = distanceMeters
+                    ),
+                    speedAccuracyMps = speedAccuracy,
+                    activityMoving = activityMoving
+                )
+            }
+        }
+
+        return ResolvedHeading(
+            headingDeg = null,
+            source = HeadingSource.UNAVAILABLE,
+            accuracyDeg = null,
+            speedAccuracyMps = speedAccuracy,
+            activityMoving = activityMoving
+        )
+    }
+
+    private data class ResolvedHeading(
+        val headingDeg: Float?,
+        val source: HeadingSource,
+        val accuracyDeg: Float?,
+        val speedAccuracyMps: Float?,
+        val activityMoving: Boolean = false
+    )
+
+    /** Single-shot fix used by the "use my location" flows. Same gate as tracking. */
+    private fun buildSingleFixUpdate(loc: Location): LocationUpdate {
+        val nowMs = System.currentTimeMillis()
+        val activityMoving = ActivityRecognitionMonitor.isMoving
+        val resolved = resolveHeading(
+            loc = loc,
+            previous = null,
+            previousTimeMs = 0L,
+            nowMs = nowMs,
+            activityMoving = activityMoving
+        )
+        return LocationUpdate(
+            latLng = LatLng(loc.latitude, loc.longitude),
+            speedKmh = if (loc.hasSpeed()) (loc.speed * 3.6).coerceAtLeast(0.0) else 0.0,
+            headingDeg = resolved.headingDeg,
+            accuracyMeters = if (loc.hasAccuracy()) loc.accuracy else 10f,
+            timestampMs = if (loc.time > 0L) loc.time else nowMs,
+            headingSource = resolved.source,
+            headingAccuracyDeg = resolved.accuracyDeg,
+            speedAccuracyMps = resolved.speedAccuracyMps,
+            activityMoving = activityMoving
+        )
     }
 
     fun updateLocationForTesting(loc: LocationUpdate) {
@@ -126,6 +261,9 @@ class LocationTracker(private val context: Context) {
     @SuppressLint("MissingPermission")
     fun startTracking(updateIntervalMs: Long = 4000L) {
         if (_isTracking.value) return
+        // Optional accelerator: without the ACTIVITY_RECOGNITION permission this
+        // silently no-ops and the heading gate falls back to speed alone.
+        ActivityRecognitionMonitor.start(context)
         try {
             val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, updateIntervalMs)
                 .setMinUpdateIntervalMillis(3000L)
@@ -151,6 +289,7 @@ class LocationTracker(private val context: Context) {
         try {
             fusedClient.removeLocationUpdates(locationCallback)
         } catch (_: Exception) {}
+        ActivityRecognitionMonitor.stop(context)
         _isTracking.value = false
     }
 
@@ -210,13 +349,7 @@ class LocationTracker(private val context: Context) {
                         cts.token
                     ).addOnSuccessListener { location ->
                         if (location != null) {
-                            val update = LocationUpdate(
-                                latLng = LatLng(location.latitude, location.longitude),
-                                speedKmh = if (location.hasSpeed()) (location.speed * 3.6).coerceAtLeast(0.0) else 0.0,
-                                headingDeg = if (location.hasBearing()) ((location.bearing % 360f) + 360f) % 360f else null,
-                                accuracyMeters = if (location.hasAccuracy()) location.accuracy else 10f,
-                                timestampMs = location.time
-                            )
+                            val update = buildSingleFixUpdate(location)
                             if (continuation.isActive) {
                                 continuation.resume(Result.success(update))
                             }
@@ -232,13 +365,7 @@ class LocationTracker(private val context: Context) {
                                         client.removeLocationUpdates(this)
                                     } catch (_: Exception) {}
                                     if (loc != null) {
-                                        val up = LocationUpdate(
-                                            latLng = LatLng(loc.latitude, loc.longitude),
-                                            speedKmh = if (loc.hasSpeed()) (loc.speed * 3.6).coerceAtLeast(0.0) else 0.0,
-                                            headingDeg = if (loc.hasBearing()) ((loc.bearing % 360f) + 360f) % 360f else null,
-                                            accuracyMeters = if (loc.hasAccuracy()) loc.accuracy else 10f,
-                                            timestampMs = loc.time
-                                        )
+                                        val up = buildSingleFixUpdate(loc)
                                         if (continuation.isActive) continuation.resume(Result.success(up))
                                     } else {
                                         if (continuation.isActive) continuation.resume(Result.failure(Exception("Null location fix")))

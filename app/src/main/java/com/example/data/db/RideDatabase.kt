@@ -7,6 +7,8 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.example.data.map.tile.TileDao
+import com.example.data.map.tile.TileEntity
 
 @Database(
     entities = [
@@ -16,9 +18,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         com.example.data.amenities.AmenityQueryCacheEntity::class,
         ActiveRideTelemetryEntity::class,
         RecentPlaceEntity::class,
-        SavedPlaceEntity::class
+        SavedPlaceEntity::class,
+        TileEntity::class
     ],
-    version = 6,
+    version = 8,
     exportSchema = false
 )
 @TypeConverters(com.example.data.amenities.AmenityTypeConverter::class)
@@ -30,6 +33,7 @@ abstract class RideDatabase : RoomDatabase() {
     abstract fun activeRideTelemetryDao(): ActiveRideTelemetryDao
     abstract fun recentPlaceDao(): RecentPlaceDao
     abstract fun savedPlaceDao(): SavedPlaceDao
+    abstract fun tileDao(): TileDao
 
     companion object {
         @Volatile
@@ -114,6 +118,36 @@ abstract class RideDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Additive migration: on-disk tile cache (TQL store).
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `tile_cache` (
+                        `zoom` INTEGER NOT NULL,
+                        `x` INTEGER NOT NULL,
+                        `y` INTEGER NOT NULL,
+                        `data` BLOB NOT NULL,
+                        `etag` TEXT,
+                        `cached_at_ms` INTEGER NOT NULL DEFAULT 0,
+                        `expires_at_ms` INTEGER NOT NULL DEFAULT 0,
+                        `priority` INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(`zoom`, `x`, `y`)
+                    )
+                """.trimIndent())
+                db.execSQL("""
+                    CREATE INDEX IF NOT EXISTS `ix_tile_cache_expiration`
+                    ON `tile_cache` (`expires_at_ms`)
+                """.trimIndent())
+            }
+        }
+
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Additive migration: empty-tile marker for the disk cache.
+                db.execSQL("ALTER TABLE `tile_cache` ADD COLUMN `is_empty` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getInstance(context: Context): RideDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -121,7 +155,7 @@ abstract class RideDatabase : RoomDatabase() {
                     RideDatabase::class.java,
                     "ridetogether.db"
                 )
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

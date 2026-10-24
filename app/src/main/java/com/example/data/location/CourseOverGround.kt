@@ -1,6 +1,8 @@
 package com.example.data.location
 
+import com.example.data.model.HeadingPolicy
 import com.example.data.model.LatLng
+import kotlin.math.atan
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -22,6 +24,16 @@ object CourseOverGround {
 
     /** Minimum elapsed time between fixes for derivation. */
     const val MIN_DERIVATION_INTERVAL_MS = 500L
+
+    /**
+     * Minimum *implied* speed for a derived course.
+     *
+     * Displacement and elapsed time alone are not enough: 3 m over 2 s is
+     * 1.5 m/s, which sits inside the band where Google Maps deletes the GNSS
+     * bearing (`aizh.x`, 3.0 m/s floor). Deriving a bearing there would rebuild
+     * exactly the noise the OS threshold rejects, so the same floor applies.
+     */
+    const val MIN_DERIVATION_SPEED_MPS = HeadingPolicy.MIN_DERIVATION_SPEED_MPS
 
     /**
      * Initial (great-circle) bearing from [from] to [to] in normalized 0..360,
@@ -49,7 +61,8 @@ object CourseOverGround {
     /**
      * Derives a course heading from a consecutive pair of fixes, or null when the
      * pair is too close together (too little displacement, too little elapsed time,
-     * or invalid coordinates) for direction to be meaningful.
+     * too little implied speed, or invalid coordinates) for direction to be
+     * meaningful.
      */
     fun derive(
         prev: LatLng?,
@@ -62,6 +75,26 @@ object CourseOverGround {
         if (dtMs < MIN_DERIVATION_INTERVAL_MS) return null
         val distanceMeters = prev.distanceTo(current) * 1000.0
         if (distanceMeters < MIN_DERIVATION_DISTANCE_METERS) return null
+        val impliedSpeedMps = distanceMeters / (dtMs / 1000.0)
+        if (!impliedSpeedMps.isFinite() || impliedSpeedMps < MIN_DERIVATION_SPEED_MPS) return null
         return bearingBetween(prev, current)
+    }
+
+    /**
+     * First-order angular uncertainty for a derived course.
+     *
+     * Two positions each carry a horizontal error of roughly
+     * [positionAccuracyMeters]; the bearing between them is therefore uncertain
+     * by about `atan(σ / d)`. Returns `null` for degenerate inputs so callers can
+     * report "unknown accuracy" instead of a fabricated number.
+     */
+    fun estimatedBearingAccuracyDeg(
+        positionAccuracyMeters: Float,
+        distanceMeters: Double
+    ): Float? {
+        if (!positionAccuracyMeters.isFinite() || positionAccuracyMeters < 0f) return null
+        if (!distanceMeters.isFinite() || distanceMeters <= 0.0) return null
+        val ratio = (positionAccuracyMeters.toDouble() / distanceMeters).coerceIn(0.0, 1.0)
+        return Math.toDegrees(atan(ratio)).toFloat().coerceIn(0f, 180f)
     }
 }

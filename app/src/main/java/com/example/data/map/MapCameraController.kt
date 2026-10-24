@@ -1,6 +1,11 @@
 package com.example.data.map
 
+import com.example.data.location.BearingGate
+import com.example.data.location.CourseHeadingStabilizer
 import com.example.data.location.LocationUpdate
+import com.example.data.model.HeadingEstimate
+import com.example.data.model.HeadingPolicy
+import com.example.data.model.HeadingSource
 import com.example.data.model.LatLng
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -9,7 +14,11 @@ import kotlinx.coroutines.flow.asStateFlow
 enum class MapCameraMode {
     FOLLOWING,
     FREE_EXPLORE,
-    OVERVIEW
+    OVERVIEW,
+    /** Inspecting a specific route section — camera locked to that segment. */
+    INSPECT_ROUTE_SECTION,
+    /** Inspecting a single point on the route — camera centred on that point. */
+    INSPECT_POINT_ON_ROUTE
 }
 
 enum class OrientationMode {
@@ -23,7 +32,36 @@ data class MapCameraState(
     val heading: Float = 0f,
     val mode: MapCameraMode = MapCameraMode.FOLLOWING,
     val orientationMode: OrientationMode = OrientationMode.HEADING_UP,
-    val bounds: Pair<LatLng, LatLng>? = null
+    val bounds: Pair<LatLng, LatLng>? = null,
+    /**
+     * False when no heading has qualified within [HeadingPolicy.MAX_HEADING_AGE_MS].
+     * The [heading] value is still frozen at the last qualified direction — it is
+     * never reset to 0° — but the UI can use this to avoid claiming a live heading.
+     */
+    val headingValid: Boolean = false,
+    /** Which estimator produced [heading]. */
+    val headingSource: HeadingSource = HeadingSource.UNAVAILABLE,
+    /** Expected angular error of [heading] in degrees, or null when unknown. */
+    val headingAccuracyDeg: Float? = null,
+    /**
+     * Camera tilt in degrees: 0 = straight down (top-down), larger = more oblique.
+     * Google Maps evidence (InteractiveTiltUpImpl): navigation follow mode uses a
+     * modest tilt (~30–45°) for a 3D perspective, while overview/north-up uses 0.
+     * The UI applies this as a vertical foreshortening of the tile layer.
+     */
+    val tiltDegrees: Float = 0f,
+    /**
+     * Reported angular error of the heading source, in degrees. Null when the
+     * source cannot report one. Mirrors Google Maps' headingErrorDegrees.
+     */
+    val headingErrorDeg: Float? = null,
+    /**
+     * Conservative (upper-bound) angular error of the heading source, in degrees.
+     * Mirrors Google Maps' conservativeHeadingErrorDegrees — always >= headingErrorDeg
+     * when both are present. Used by the UI to decide whether to show a "heading
+     * uncertain" indicator instead of rotating the map.
+     */
+    val conservativeHeadingErrorDeg: Float? = null
 ) {
     val effectiveHeading: Float
         get() = if (orientationMode == OrientationMode.NORTH_UP) 0f else heading
@@ -56,22 +94,90 @@ class MapCameraController {
         _state.value = _state.value.copy(orientationMode = newMode)
     }
 
-    fun processLocation(location: LocationUpdate, distanceToNextManeuverMeters: Double? = null) {
+    // Target-level heading damping for the GNSS cadence (1–4 s between fixes).
+    private val headingStabilizer = CourseHeadingStabilizer()
+    private var lastQualifiedHeadingMs: Long = 0L
+    private var hasQualifiedHeading: Boolean = false
+
+    /** Last fix whose course qualified; used to hand over to the compass. */
+    private var lastCourseQualifiedMs: Long = 0L
+
+    /** Timestamp of the most recent fix, used to age out stale speed context. */
+    private var lastLocationMs: Long = 0L
+
+    /** Last reported heading error from the source, in degrees (mirrors Google Maps' headingErrorDegrees). */
+    private var lastHeadingErrorDeg: Float? = null
+    /** Conservative upper-bound heading error, in degrees (mirrors Google Maps' conservativeHeadingErrorDegrees). */
+    private var lastConservativeHeadingErrorDeg: Float? = null
+
+    /**
+     * Consumes one location fix.
+     *
+     * Heading policy (evidence: Google Maps 26.42.01):
+     *  - a heading rotates the camera only when it passes [BearingGate]
+     *    (3.0 m/s floor, optional activity motion, accuracy + 5 s freshness);
+     *  - a rejected heading FREEZES the last qualified direction — it never
+     *    falls back to 0° (north), which is what caused the old "map spins to
+     *    north while stopped" behaviour;
+     *  - after 5 s without a qualified heading, [MapCameraState.headingValid]
+     *    goes false but the displayed heading stays frozen.
+     */
+    fun processLocation(
+        location: LocationUpdate,
+        distanceToNextManeuverMeters: Double? = null,
+        nowMs: Long = location.timestampMs
+    ) {
         val currentState = _state.value
         lastSpeedKmh = location.speedKmh
         lastDistanceToNextManeuverMeters = distanceToNextManeuverMeters
+        lastLocationMs = nowMs
         if (currentState.mode != MapCameraMode.FOLLOWING) return
 
         val speedKmh = location.speedKmh
-        // Gate low-speed heading updates (< 5.4 km/h == 1.5 m/s)
-        // Qualified Bearing: null heading means "no reliable bearing". It is
-        // TREATED AS MISSING — the previous heading is preserved. Never fabricate
-        // 0° (north) and never let non-finite/negative garbage rotate the map.
-        val targetHeading = if (speedKmh >= 5.4) {
-            location.headingDeg?.takeIf { it.isFinite() && it >= 0f }
-                ?: currentState.heading
+        val speedMps = (speedKmh / 3.6).toFloat()
+        val ageMs = if (nowMs >= location.timestampMs) nowMs - location.timestampMs else 0L
+
+        val qualified = BearingGate.qualifiesCourse(
+            headingDeg = location.headingDeg,
+            speedMps = speedMps,
+            bearingAccuracyDeg = location.headingAccuracyDeg,
+            speedAccuracyMps = location.speedAccuracyMps,
+            activityMoving = location.activityMoving,
+            ageMs = ageMs
+        )
+
+        var targetHeading = currentState.heading
+        var headingValid = currentState.headingValid
+        var headingSource = currentState.headingSource
+        var headingAccuracy = currentState.headingAccuracyDeg
+
+        val rawHeading = location.headingDeg
+        if (qualified && rawHeading != null) {
+            // A new qualified heading after a long gap is adopted directly (the
+            // 60 fps render loop animates it); otherwise it is damped at fix rate.
+            val gapMs = if (hasQualifiedHeading) nowMs - lastQualifiedHeadingMs else Long.MAX_VALUE
+            if (gapMs > HeadingPolicy.MAX_HEADING_AGE_MS) headingStabilizer.reset()
+
+            targetHeading = headingStabilizer.update(rawHeading)
+            headingValid = true
+            headingSource = location.headingSource
+            headingAccuracy = location.headingAccuracyDeg
+            // Track heading error from the source (Google Maps: headingErrorDegrees).
+            lastHeadingErrorDeg = location.headingAccuracyDeg
+            lastConservativeHeadingErrorDeg = location.headingAccuracyDeg?.let { acc ->
+                acc * 1.5f // conservative bound: 1.5x the reported 1-sigma error
+            }
+            lastQualifiedHeadingMs = nowMs
+            lastCourseQualifiedMs = nowMs
+            hasQualifiedHeading = true
         } else {
-            currentState.heading
+            val expired = hasQualifiedHeading &&
+                (nowMs - lastQualifiedHeadingMs) > HeadingPolicy.MAX_HEADING_AGE_MS
+            if (expired) {
+                headingValid = false
+                headingStabilizer.reset()
+            }
+            // Freeze: targetHeading stays at the last qualified direction.
         }
 
         // Target zoom preserves user zoom override or calculates adaptive zoom
@@ -84,13 +190,128 @@ class MapCameraController {
         _state.value = currentState.copy(
             center = location.latLng,
             heading = targetHeading,
-            zoom = targetZoom
+            zoom = targetZoom,
+            headingValid = headingValid,
+            headingSource = headingSource,
+            headingAccuracyDeg = headingAccuracy,
+            headingErrorDeg = lastHeadingErrorDeg,
+            conservativeHeadingErrorDeg = lastConservativeHeadingErrorDeg,
+            tiltDegrees = DEFAULT_FOLLOW_TILT_DEGREES
+        )
+    }
+
+    /**
+     * Feeds a *device orientation* estimate (compass).
+     *
+     * Google Maps keeps this strictly separate from travel direction. It is used
+     * here only as a slow fallback, and only when **all** hold:
+     *
+     *  - the camera is in FOLLOWING;
+     *  - the estimate is a valid, fresh COMPASS reading within
+     *    [HeadingPolicy.MAX_COMPASS_ACCURACY_DEG];
+     *  - the rider is actually moving (>= [HeadingPolicy.MIN_ACTIVITY_MOVING_SPEED_MPS]),
+     *    so the map can never spin while parked in traffic;
+     *  - no course has qualified for [HeadingPolicy.COMPASS_TAKEOVER_DELAY_MS],
+     *    so a momentary magnetic disturbance cannot outrank a live course.
+     */
+    fun setDeviceHeading(estimate: HeadingEstimate?, nowMs: Long = System.currentTimeMillis()) {
+        if (estimate == null) return
+        if (estimate.source != HeadingSource.COMPASS) return
+
+        val currentState = _state.value
+        if (currentState.mode != MapCameraMode.FOLLOWING) return
+        if (!estimate.isValid) return
+        if (!estimate.isFresh(nowMs, HeadingPolicy.MAX_COMPASS_AGE_MS)) return
+
+        val accuracy = estimate.accuracyDeg
+        if (accuracy != null &&
+            (!accuracy.isFinite() || accuracy > HeadingPolicy.MAX_COMPASS_ACCURACY_DEG)
+        ) {
+            return
+        }
+
+        val speedMps = (lastSpeedKmh / 3.6).toFloat()
+        if (!speedMps.isFinite() || speedMps < HeadingPolicy.MIN_ACTIVITY_MOVING_SPEED_MPS) return
+
+        // The speed input must itself be recent: during a GPS outage a stale
+        // "moving" speed must not let a parked bike spin the map.
+        if (lastLocationMs <= 0L ||
+            nowMs - lastLocationMs > HeadingPolicy.COMPASS_MAX_FIX_AGE_MS
+        ) {
+            return
+        }
+
+        if (hasQualifiedHeading &&
+            nowMs - lastCourseQualifiedMs < HeadingPolicy.COMPASS_TAKEOVER_DELAY_MS
+        ) {
+            return
+        }
+
+        val targetHeading = headingStabilizer.update(estimate.degrees)
+        lastQualifiedHeadingMs = nowMs
+        hasQualifiedHeading = true
+        // Track compass heading error (Google Maps: conservativeHeadingErrorDegrees).
+        lastHeadingErrorDeg = accuracy
+        lastConservativeHeadingErrorDeg = accuracy?.let { acc -> acc * 1.5f }
+
+        _state.value = currentState.copy(
+            heading = targetHeading,
+            headingValid = true,
+            headingSource = HeadingSource.COMPASS,
+            headingAccuracyDeg = accuracy,
+            headingErrorDeg = lastHeadingErrorDeg,
+            conservativeHeadingErrorDeg = lastConservativeHeadingErrorDeg,
+            tiltDegrees = DEFAULT_FOLLOW_TILT_DEGREES
+        )
+    }
+
+    /** Sets the camera tilt (0 = straight down, up to [MAX_TILT_DEGREES]). */
+    fun setTilt(degrees: Float) {
+        val clamped = degrees.coerceIn(0f, MAX_TILT_DEGREES)
+        _state.value = _state.value.copy(tiltDegrees = clamped)
+    }
+
+    /** Adjusts the camera tilt by [deltaDeg] degrees, clamped to [0, MAX_TILT_DEGREES]. */
+    fun adjustTilt(deltaDeg: Float) {
+        val current = _state.value.tiltDegrees
+        setTilt(current + deltaDeg)
+    }
+
+    /**
+     * Enters INSPECT_ROUTE_SECTION mode: the camera locks onto a route section,
+     * with a reduced tilt so the section is viewed from a higher, flatter angle.
+     * The rider can still pan/zoom within this mode; tapping recenter returns to
+     * FOLLOWING.
+     */
+    fun enterInspectRouteSection(center: LatLng, zoom: Float = 16f) {
+        _state.value = _state.value.copy(
+            center = center,
+            zoom = zoom.coerceIn(3f, 18f),
+            heading = 0f,
+            mode = MapCameraMode.INSPECT_ROUTE_SECTION,
+            tiltDegrees = 15f,
+            bounds = null
+        )
+    }
+
+    /**
+     * Enters INSPECT_POINT_ON_ROUTE mode: the camera centres on a single point
+     * on the route, with minimal tilt for a clear top-down view of that point.
+     */
+    fun enterInspectPointOnRoute(point: LatLng, zoom: Float = 17f) {
+        _state.value = _state.value.copy(
+            center = point,
+            zoom = zoom.coerceIn(3f, 18f),
+            heading = 0f,
+            mode = MapCameraMode.INSPECT_POINT_ON_ROUTE,
+            tiltDegrees = 5f,
+            bounds = null
         )
     }
 
     fun onUserGesture() {
         if (_state.value.mode != MapCameraMode.FREE_EXPLORE) {
-            _state.value = _state.value.copy(mode = MapCameraMode.FREE_EXPLORE)
+            _state.value = _state.value.copy(mode = MapCameraMode.FREE_EXPLORE, tiltDegrees = 0f)
         }
     }
     
@@ -115,7 +336,8 @@ class MapCameraController {
         
         _state.value = currentState.copy(
             center = LatLng(newLat.toDouble(), newLng.toDouble()),
-            mode = MapCameraMode.FREE_EXPLORE
+            mode = MapCameraMode.FREE_EXPLORE,
+            tiltDegrees = 0f
         )
     }
 
@@ -134,15 +356,25 @@ class MapCameraController {
     fun recenter(riderLocation: LatLng?, headingDeg: Float? = null, requestedZoom: Float? = null) {
         val currentState = _state.value
         val newCenter = riderLocation ?: currentState.center
-        val newHeading = headingDeg?.takeIf { it in 0f..360f } ?: currentState.heading
+        val acceptedHeading = headingDeg?.takeIf { it.isFinite() && it in 0f..360f }
+        val newHeading = acceptedHeading ?: currentState.heading
         val targetZoom = requestedZoom
             ?: calculateAdaptiveZoom(lastSpeedKmh, lastDistanceToNextManeuverMeters)
         isUserZoomOverride = false
+
+        if (acceptedHeading != null) {
+            headingStabilizer.reset()
+            headingStabilizer.update(acceptedHeading)
+            lastQualifiedHeadingMs = System.currentTimeMillis()
+            hasQualifiedHeading = true
+        }
+
         _state.value = currentState.copy(
             center = newCenter,
             zoom = targetZoom,
             heading = newHeading,
             mode = MapCameraMode.FOLLOWING,
+            tiltDegrees = DEFAULT_FOLLOW_TILT_DEGREES,
             bounds = null
         )
     }
@@ -194,6 +426,7 @@ class MapCameraController {
             zoom = calculatedZoom,
             heading = 0f,
             mode = MapCameraMode.OVERVIEW,
+            tiltDegrees = 0f,
             bounds = Pair(LatLng(minLat, minLng), LatLng(maxLat, maxLng))
         )
     }
@@ -212,6 +445,7 @@ class MapCameraController {
             center = point,
             zoom = zoom.coerceIn(3f, 18f),
             mode = MapCameraMode.FREE_EXPLORE,
+            tiltDegrees = 0f,
             bounds = null
         )
     }
@@ -235,11 +469,17 @@ class MapCameraController {
             zoom = newZoom.coerceIn(3f, 18f),
             center = center,
             mode = MapCameraMode.FREE_EXPLORE,
+            tiltDegrees = 0f,
             bounds = null
         )
     }
 
     companion object {
+
+        /** Maximum tilt the camera supports (degrees, 0 = straight down). */
+        const val MAX_TILT_DEGREES: Float = 60f
+        /** Default tilt for navigation follow mode (degrees) — Google Maps uses ~30–45°. */
+        const val DEFAULT_FOLLOW_TILT_DEGREES: Float = 35f
         fun calculateAdaptiveZoom(speedKmh: Double, distanceToNextManeuverMeters: Double? = null): Float {
             if (distanceToNextManeuverMeters != null && distanceToNextManeuverMeters in 0.0..150.0) {
                 return 17.5f

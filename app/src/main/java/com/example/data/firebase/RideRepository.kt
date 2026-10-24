@@ -443,6 +443,8 @@ class RideRepository(
                     "longitude" to loc.latLng.longitude,
                     "speedKmh" to loc.speedKmh,
                     "headingDeg" to loc.headingDeg,
+                    "headingSource" to loc.headingSource.name,
+                    "headingAccuracyDeg" to loc.headingAccuracyDeg,
                     "accuracyMeters" to loc.accuracyMeters,
                     "sequenceNumber" to seq,
                     "batteryPct" to 90,
@@ -1019,6 +1021,13 @@ class RideRepository(
         val headingDeg = doc.getDouble("headingDeg")
             ?.toFloat()
             ?.takeIf { it.isFinite() && it >= 0f }
+        val headingSource = doc.getString("headingSource")
+            ?.let { raw -> runCatching { com.example.data.model.HeadingSource.valueOf(raw) }.getOrNull() }
+            ?: if (headingDeg != null) com.example.data.model.HeadingSource.GNSS_COURSE
+            else com.example.data.model.HeadingSource.UNAVAILABLE
+        val headingAccuracyDeg = doc.getDouble("headingAccuracyDeg")
+            ?.toFloat()
+            ?.takeIf { it.isFinite() && it >= 0f }
         val stoppedSec = doc.getLong("stoppedDurationSec") ?: 0L
         val rawLastUpdated = doc.getLong("lastUpdatedMs") ?: doc.getDouble("lastUpdatedMs")?.toLong()
         val serverTimestampMs = doc.getTimestamp("updatedAt")?.toDate()?.time
@@ -1058,6 +1067,8 @@ class RideRepository(
             defaultLng = defaultLng,
             speedKmh = speedKmh,
             headingDeg = headingDeg,
+            headingSource = headingSource,
+            headingAccuracyDeg = headingAccuracyDeg,
             accuracyMeters = accuracy,
             sequenceNumber = seq,
             rawLastUpdatedMs = rawLastUpdated,

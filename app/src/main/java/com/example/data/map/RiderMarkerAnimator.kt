@@ -1,5 +1,6 @@
 package com.example.data.map
 
+import com.example.data.model.HeadingPolicy
 import com.example.data.model.LatLng
 
 /**
@@ -212,13 +213,20 @@ class RiderMarkerAnimator {
         lng: Double,
         bearingDeg: Double?,
         speedKmh: Double? = null,
-        accuracyMeters: Float? = null
+        accuracyMeters: Float? = null,
+        headingAccuracyDeg: Float? = null
     ) {
         if (!MarkerSmoothingMath.isValidGeoCoordinate(lat, lng)) return
         val anim = riders.getOrPut(riderId) { RiderAnim() }
-        // Qualified Bearing: null bearing means "unknown this fix" — keep the
-        // previous target bearing instead of gliding to a fabricated value.
-        val resolvedBearing = bearingDeg
+        // Qualified Bearing: null or explicitly inaccurate bearing means "unknown
+        // this fix" — keep the previous target bearing instead of gliding to a
+        // fabricated value.
+        val qualifiedBearing = bearingDeg?.takeIf {
+            headingAccuracyDeg == null ||
+                (headingAccuracyDeg.isFinite() &&
+                    headingAccuracyDeg <= HeadingPolicy.MAX_BEARING_ACCURACY_DEG)
+        }
+        val resolvedBearing = qualifiedBearing
             ?.let { MarkerSmoothingMath.normalizeBearingDeg(it) }
             ?: anim.target?.bearingDeg
             ?: 0.0
@@ -241,7 +249,7 @@ class RiderMarkerAnimator {
         // and a qualified bearing. Missing bearing/speed or coarse accuracy -> no
         // prediction (target stays put between fixes, like the legacy behavior).
         anim.deadReckoning = if (
-            bearingDeg != null &&
+            qualifiedBearing != null &&
             speedKmh != null && speedKmh >= DEAD_RECKONING_MIN_SPEED_KMH &&
             (accuracyMeters == null || accuracyMeters <= DEAD_RECKONING_MAX_ACCURACY_METERS)
         ) {

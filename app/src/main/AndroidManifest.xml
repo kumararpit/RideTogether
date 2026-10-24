@@ -11,6 +11,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!--
+      Optional accelerator for the heading gate. Google Maps lowers its 3.0 m/s
+      GNSS-course floor when an activity-recognition signal says the rider is
+      moving (walking / pushing the bike). Runtime permission from API 29.
+    -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
 
     <application
         android:name=".RideTogetherApplication"
@@ -29,6 +35,15 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="location" />
+
+        <!--
+          Receives Play services activity updates. Not exported: only the system
+          delivers this broadcast, and it carries no user data.
+        -->
+        <receiver
+            android:name=".data.location.ActivityRecognitionReceiver"
+            android:enabled="true"
+            android:exported="false" />
 
         <activity
             android:name=".MainActivity"

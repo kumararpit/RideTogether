@@ -196,21 +196,72 @@ class RouteRenderMathTest {
     }
 
     @Test
-    fun `core width is monotonic and clamped to the measured band`() {
-        val far = RouteRenderMath.coreWidthDp(11f)
+    fun `core width decreases with zoom and clamps at both ends`() {
+        val panorama = RouteRenderMath.coreWidthDp(4f)
         val mid = RouteRenderMath.coreWidthDp(14f)
-        val near = RouteRenderMath.coreWidthDp(17f)
+        val street = RouteRenderMath.coreWidthDp(18f)
 
-        assertTrue("width must not grow while zooming in", far >= mid && mid >= near)
-        assertEquals(RouteRenderMath.CORE_WIDTH_NEAR_DP, near, 0.001f)
-        assertEquals(RouteRenderMath.CORE_WIDTH_FAR_DP, far, 0.001f)
-
-        // Casing always encloses the core by the fixed margin on both sides.
+        assertTrue("width must not grow while zooming in", panorama >= mid && mid >= street)
+        assertEquals(RouteRenderMath.CORE_WIDTH_NEAR_DP, street, 0.001f)
         assertEquals(
-            RouteRenderMath.coreWidthDp(14f) + 2f * RouteRenderMath.CASING_MARGIN_DP,
-            RouteRenderMath.casingWidthDp(14f),
+            "width must clamp (not cull) above street zoom",
+            RouteRenderMath.CORE_WIDTH_NEAR_DP,
+            RouteRenderMath.coreWidthDp(25f),
             0.001f
         )
+        assertEquals(
+            "width must clamp (not cull) below the panorama anchor",
+            RouteRenderMath.coreWidthDp(8f),
+            panorama,
+            0.001f
+        )
+
+        // Casing always encloses the core by the fixed margin on both sides.
+        for (zoom in listOf(3f, 8f, 13f, 16f, 17.5f, 18f, 25f)) {
+            assertEquals(
+                RouteRenderMath.coreWidthDp(zoom) + 2f * RouteRenderMath.CASING_MARGIN_DP,
+                RouteRenderMath.casingWidthDp(zoom),
+                0.001f
+            )
+        }
+        // Shadow encloses the casing by the fixed margin on both sides.
+        assertEquals(
+            RouteRenderMath.casingWidthDp(16f) + 2f * RouteRenderMath.SHADOW_MARGIN_DP,
+            RouteRenderMath.shadowWidthDp(16f),
+            0.001f
+        )
+    }
+
+    @Test
+    fun `route band stays visible across the whole navigation zoom range`() {
+        // Regression: the band used to be culled outside [13..16], which made the
+        // route vanish at the follow-camera zoom (16.5–17.5) — i.e. for the whole
+        // ride — and also at long-route overview zooms below 13.
+        for (zoom in listOf(3f, 5f, 8f, 12.9f, 13f, 16f, 16.5f, 17f, 17.5f, 18f, 25f)) {
+            assertTrue(
+                "core must be drawable at zoom $zoom",
+                RouteRenderMath.coreWidthDp(zoom).isFinite() && RouteRenderMath.coreWidthDp(zoom) > 0f
+            )
+            assertTrue(
+                "casing must be drawable at zoom $zoom",
+                RouteRenderMath.casingWidthDp(zoom).isFinite() && RouteRenderMath.casingWidthDp(zoom) > 0f
+            )
+            assertTrue(
+                "streak must be drawable at zoom $zoom",
+                RouteRenderMath.streakWidthDp(zoom).isFinite() && RouteRenderMath.streakWidthDp(zoom) > 0f
+            )
+        }
+    }
+
+    @Test
+    fun `street route band is thin enough not to swallow the road`() {
+        // Follow-camera zooms: the total painted band (shadow = casing + margin)
+        // must stay in a readable range rather than the old ~25 dp slab.
+        for (zoom in listOf(16.5f, 17f, 17.5f, 18f)) {
+            val total = RouteRenderMath.shadowWidthDp(zoom)
+            assertTrue("band $total dp at zoom $zoom is too thin", total >= 10f)
+            assertTrue("band $total dp at zoom $zoom is too thick", total <= 18f)
+        }
     }
 
     @Test
@@ -224,57 +275,13 @@ class RouteRenderMathTest {
     }
 
     @Test
-    fun `style band is present inside its zoom range and culled outside`() {
-        val band = RouteRenderMath.RouteStyleBand(
-            minZoom = 13f, maxZoom = 16f,
-            valueMin = 18.0f, valueMax = 17.0f
-        )
-
-        assertTrue("below minZoom is not present", !band.isPresent(12.9f))
-        assertTrue("at minZoom is present", band.isPresent(13.0f))
-        assertTrue("at maxZoom is present", band.isPresent(16.0f))
-        assertTrue("above maxZoom is not present", !band.isPresent(16.1f))
-        assertTrue("mid-band is present", band.isPresent(14.5f))
-    }
-
-    @Test
-    fun `style band interpolates linearly between anchors`() {
-        val band = RouteRenderMath.RouteStyleBand(
-            minZoom = 13f, maxZoom = 16f,
-            valueMin = 18.0f, valueMax = 17.0f
-        )
-
-        // At minZoom → valueMin; at maxZoom → valueMax; midpoint → average.
-        assertEquals(18.0f, band.valueAt(13.0f)!!, 0.001f)
-        assertEquals(17.0f, band.valueAt(16.0f)!!, 0.001f)
-        assertEquals(17.5f, band.valueAt(14.5f)!!, 0.001f)
-
-        // Outside the band → null (culled).
-        assertEquals(null, band.valueAt(12.0f))
-        assertEquals(null, band.valueAt(17.0f))
-    }
-
-    @Test
-    fun `coreWidthDpWithBand returns null outside the zoom band`() {
-        assertEquals(null, RouteRenderMath.coreWidthDpWithBand(12.0f))
-        assertEquals(null, RouteRenderMath.coreWidthDpWithBand(17.0f))
-        assertEquals(RouteRenderMath.CORE_WIDTH_FAR_DP, RouteRenderMath.coreWidthDpWithBand(13.0f)!!, 0.001f)
-        assertEquals(RouteRenderMath.CORE_WIDTH_NEAR_DP, RouteRenderMath.coreWidthDpWithBand(16.0f)!!, 0.001f)
-    }
-
-    @Test
-    fun `casingWidthDpWithBand equals core plus margin on both sides`() {
-        for (zoom in listOf(13.0f, 14.0f, 15.0f, 16.0f)) {
-            val core = RouteRenderMath.coreWidthDpWithBand(zoom)!!
-            val casing = RouteRenderMath.casingWidthDpWithBand(zoom)!!
-            assertEquals(core + 2f * RouteRenderMath.CASING_MARGIN_DP, casing, 0.001f)
+    fun `streak width is constant across zooms`() {
+        for (zoom in listOf(3f, 13f, 16f, 17.5f, 25f)) {
+            assertEquals(
+                RouteRenderMath.STREAK_WIDTH_DP,
+                RouteRenderMath.streakWidthDp(zoom),
+                0.001f
+            )
         }
-    }
-
-    @Test
-    fun `streakWidthDpWithBand is constant across the band`() {
-        assertEquals(RouteRenderMath.STREAK_WIDTH_DP, RouteRenderMath.streakWidthDpWithBand(13.0f)!!, 0.001f)
-        assertEquals(RouteRenderMath.STREAK_WIDTH_DP, RouteRenderMath.streakWidthDpWithBand(16.0f)!!, 0.001f)
-        assertEquals(null, RouteRenderMath.streakWidthDpWithBand(12.0f))
     }
 }
