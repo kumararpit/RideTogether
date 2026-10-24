@@ -9,6 +9,45 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.abs
 import kotlin.math.max
 
+/**
+ * Alert severity when the rider deviates from the route.
+ * Mirrors Google Maps' AFTER_OFF_ROUTE_ALERTS_* telemetry levels
+ * (NO_USAGE / LOW_USAGE / MEDIUM_USAGE / HIGH_USAGE).
+ */
+enum class OffRouteAlertLevel {
+    /** On-route, no deviation alert needed. */
+    NO_USAGE,
+    /** Slight deviation (30–60 m). */
+    LOW_USAGE,
+    /** Moderate deviation (60–90 m). */
+    MEDIUM_USAGE,
+    /** Severe deviation but still within off-route threshold (90–120 m). */
+    HIGH_USAGE,
+}
+
+/**
+ * Navigation state machine.
+ * Mirrors Google Maps' guided / off-nav / cruising state publishing
+ * (publishGuidedNavState, publishOffNavState, publishCruisingNavState).
+ */
+enum class NavigationState {
+    /** Actively being guided toward an upcoming maneuver. */
+    GUIDED,
+    /** Rider is off-route (beyond the off-route threshold). */
+    OFF_NAV,
+    /** On-route but cruising — no active maneuver guidance needed. */
+    CRUISING,
+}
+
+/**
+ * A measured deviation point from the pathfinder, in meters.
+ * Mirrors Google Maps' DeviationPoint(pathfinderDeviationPointMeters=).
+ */
+data class DeviationPoint(
+    val pathfinderDeviationPointMeters: Double,
+    val lapDeviationPointThresholdMeters: Double = 120.0
+)
+
 data class NavigationProgress(
     val currentSegmentIndex: Int = 0,
     /**
@@ -42,7 +81,23 @@ data class NavigationProgress(
      */
     val currentLegIndex: Int = 0,
     /** Total number of legs on the active route (1 for legacy routes). */
-    val legCount: Int = 1
+    val legCount: Int = 1,
+    /** Snapped position on the route polyline (map-matched location, not raw GPS). */
+    val projectedLocation: LatLng? = null,
+    /** Distance in meters from raw GPS to the nearest point on the route polyline. */
+    val deviationMeters: Double = 0.0,
+    /** Off-route alert severity level (Google Maps: AFTER_OFF_ROUTE_ALERTS_*). */
+    val offRouteAlertLevel: OffRouteAlertLevel = OffRouteAlertLevel.NO_USAGE,
+    /** Navigation state machine (Google Maps: guided/off-nav/cruising). */
+    val navigationState: NavigationState = NavigationState.GUIDED,
+    /** Whether a reroute is currently in progress. */
+    val isRerouting: Boolean = false,
+    /** Whether a reroute has ever occurred in this session. */
+    val hasRerouted: Boolean = false,
+    /** Route distance traveled before the last reroute (meters). */
+    val distanceTraveledBeforeLastRerouteMeters: Double = 0.0,
+    /** Cumulative distance traveled along the route in this session (meters). */
+    val distanceTraveledMeters: Double = 0.0,
 )
 
 class NavEngine {
@@ -69,6 +124,8 @@ class NavEngine {
 
     private var stepVertexIndices: List<Int> = emptyList()
     private var emaSpeedMps: Double = 0.0
+    /** Previous location used to accumulate distance traveled. */
+    private var lastLocation: LatLng? = null
 
     private val _progress = MutableStateFlow(NavigationProgress())
     val progress: StateFlow<NavigationProgress> = _progress.asStateFlow()
@@ -114,9 +171,15 @@ class NavEngine {
             isStaleGps = false,
             emaSpeedKmh = 0.0,
             currentLegIndex = 0,
-            legCount = max(1, adjustedRoute.legs.size)
+            legCount = max(1, adjustedRoute.legs.size),
+            projectedLocation = points.first(),
+            deviationMeters = 0.0,
+            offRouteAlertLevel = OffRouteAlertLevel.NO_USAGE,
+            navigationState = NavigationState.GUIDED,
+            distanceTraveledMeters = 0.0
         )
         completedLegs = 0
+        lastLocation = null
     }
 
     fun processLocation(location: LocationUpdate): NavigationProgress {
@@ -127,6 +190,13 @@ class NavEngine {
         val userLoc = location.latLng
         val prevProgress = _progress.value
         val isAccuracyReliable = location.accuracyMeters <= 30f
+
+        // Track cumulative distance traveled (Google Maps: distanceTraveledMeters)
+        var distanceTraveled = prevProgress.distanceTraveledMeters
+        lastLocation?.let { prevLoc ->
+            distanceTraveled += userLoc.distanceTo(prevLoc) * 1000.0
+        }
+        lastLocation = userLoc
 
         // 0. Arrival latch check — within 35 m of the final destination coordinate or
         //    with <= 25 m of route remaining, permanently latch arrival.
@@ -148,7 +218,12 @@ class NavEngine {
                 remainingDurationSeconds = 0.0,
                 distanceToNextManeuverMeters = 0.0,
                 isStaleGps = !isAccuracyReliable,
-                routeVersion = routeVersion
+                routeVersion = routeVersion,
+                projectedLocation = points.last(),
+                deviationMeters = distToDestinationMeters,
+                offRouteAlertLevel = OffRouteAlertLevel.NO_USAGE,
+                navigationState = NavigationState.GUIDED,
+                distanceTraveledMeters = distanceTraveled
             )
             _progress.value = arrivedProgress
             return arrivedProgress
@@ -157,12 +232,18 @@ class NavEngine {
         // 1. Off-route detection
         val distToPolylineM = RouteGeometry.distanceToPolylineMeters(userLoc, points)
         val isOffRoute = isAccuracyReliable && distToPolylineM > 120.0
+        val deviationMeters = distToPolylineM
+        val offRouteAlertLevel = computeOffRouteAlertLevel(deviationMeters)
 
         if (isOffRoute) {
             val updated = prevProgress.copy(
                 isOffRoute = true,
                 isStaleGps = !isAccuracyReliable,
-                routeVersion = routeVersion
+                routeVersion = routeVersion,
+                deviationMeters = deviationMeters,
+                offRouteAlertLevel = offRouteAlertLevel,
+                navigationState = NavigationState.OFF_NAV,
+                distanceTraveledMeters = distanceTraveled
             )
             _progress.value = updated
             return updated
@@ -193,6 +274,9 @@ class NavEngine {
         } else {
             globalClosest
         }
+
+        // Projected (map-matched) location on the route polyline (Google Maps: projectedLocation)
+        val projectedLocation = points[closestIdx]
 
         val remDistMeters = RouteGeometry.remainingDistanceMeters(closestIdx, points)
 
@@ -253,6 +337,9 @@ class NavEngine {
         // told (banner text, maneuver icon, spoken prompt) and the distance that
         // is counted down all refer to this single step.
         val upcomingManeuverIdx = computeUpcomingManeuverIndex(closestIdx, steps.size)
+
+        // Navigation state machine (Google Maps: guided/off-nav/cruising)
+        val navigationState = computeNavigationState(isOffRoute, upcomingManeuverIdx, steps.size)
 
         // Distance along the polyline to the upcoming maneuver's vertex. When every
         // maneuver vertex has been passed, the distance is to the destination.
@@ -322,7 +409,15 @@ class NavEngine {
             isStaleGps = !isAccuracyReliable,
             emaSpeedKmh = (emaSpeedMps * 3600.0) / 1000.0,
             currentLegIndex = completedLegs.coerceIn(0, max(0, route.legs.size - 1)),
-            legCount = max(1, route.legs.size)
+            legCount = max(1, route.legs.size),
+            projectedLocation = projectedLocation,
+            deviationMeters = deviationMeters,
+            offRouteAlertLevel = offRouteAlertLevel,
+            navigationState = navigationState,
+            isRerouting = prevProgress.isRerouting,
+            hasRerouted = prevProgress.hasRerouted,
+            distanceTraveledBeforeLastRerouteMeters = prevProgress.distanceTraveledBeforeLastRerouteMeters,
+            distanceTraveledMeters = distanceTraveled
         )
 
         _progress.value = newProgress
@@ -380,6 +475,53 @@ class NavEngine {
             if (vertices[i] > closestIdx) return i
         }
         return (stepCount - 1).coerceAtLeast(0)
+    }
+
+    /**
+     * Computes the off-route alert severity from the measured deviation distance.
+     * Mirrors Google Maps' AFTER_OFF_ROUTE_ALERTS_* levels (NO_USAGE / LOW_USAGE /
+     * MEDIUM_USAGE / HIGH_USAGE).
+     */
+    private fun computeOffRouteAlertLevel(deviationMeters: Double): OffRouteAlertLevel {
+        return when {
+            deviationMeters <= 30.0 -> OffRouteAlertLevel.NO_USAGE
+            deviationMeters <= 60.0 -> OffRouteAlertLevel.LOW_USAGE
+            deviationMeters <= 90.0 -> OffRouteAlertLevel.MEDIUM_USAGE
+            else -> OffRouteAlertLevel.HIGH_USAGE
+        }
+    }
+
+    /**
+     * Computes the navigation state from off-route status and upcoming maneuver.
+     * Mirrors Google Maps' guided / off-nav / cruising state publishing.
+     */
+    private fun computeNavigationState(
+        isOffRoute: Boolean,
+        upcomingManeuverIdx: Int,
+        stepCount: Int
+    ): NavigationState {
+        if (isOffRoute) return NavigationState.OFF_NAV
+        // Cruising when there are no more upcoming maneuvers ahead
+        if (upcomingManeuverIdx >= stepCount - 1) return NavigationState.CRUISING
+        return NavigationState.GUIDED
+    }
+
+    /**
+     * Updates the rerouting state from outside (e.g. when RideViewModel triggers
+     * a reroute). Mirrors Google Maps' isRerouting / hasRerouted /
+     * distanceTraveledBeforeLastRerouteMeters.
+     */
+    fun setReroutingState(
+        isRerouting: Boolean,
+        hasRerouted: Boolean,
+        distanceTraveledBeforeRerouteMeters: Double
+    ) {
+        val current = _progress.value
+        _progress.value = current.copy(
+            isRerouting = isRerouting,
+            hasRerouted = hasRerouted,
+            distanceTraveledBeforeLastRerouteMeters = distanceTraveledBeforeRerouteMeters
+        )
     }
 
     /**
