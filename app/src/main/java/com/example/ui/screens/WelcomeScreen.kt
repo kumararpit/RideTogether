@@ -28,6 +28,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.History
@@ -220,15 +221,21 @@ fun WelcomeScreen(
             Spacer(modifier = Modifier.height(RTSpacing.xl))
 
             // ── Quick actions ───────────────────────────────────────────────
+            // When no ride is active, the "No ride planned" card above is the
+            // dominant Create Ride CTA, so the Create Ride tile is omitted here
+            // to avoid duplication (UX-015). When a ride is active, the tile
+            // offers planning a new ride alongside the resume path.
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                QuickAction(
-                    label = "Create Ride",
-                    icon = Icons.Default.Add,
-                    accent = AmberPrimary,
-                    onClick = onCreateRideClick,
-                    testTag = "create_ride_button",
-                    modifier = Modifier.weight(1f)
-                )
+                if (hasActiveRide) {
+                    QuickAction(
+                        label = "Create Ride",
+                        icon = Icons.Default.Add,
+                        accent = AmberPrimary,
+                        onClick = onCreateRideClick,
+                        testTag = "create_ride_button",
+                        modifier = Modifier.weight(1f)
+                    )
+                }
                 QuickAction(
                     label = "Join Ride",
                     icon = Icons.Default.GroupAdd,
@@ -260,9 +267,11 @@ fun WelcomeScreen(
 
             Spacer(modifier = Modifier.height(RTSpacing.xl))
 
-            // ── Discover ────────────────────────────────────────────────────
+            // ── Recent routes ─────────────────────────────────────────────────
+            // Personal ride/place history — distinct from public discovery below
+            // (UX-008: separate personal history from Discover rides).
             SectionHeader(
-                title = "Discover",
+                title = "Recent routes",
                 actionLabel = if (pastRides.isNotEmpty() || savedPlaces.isNotEmpty()) "See all" else null,
                 onAction = {
                     if (pastRides.isNotEmpty()) showHistorySheet = true else showSavedPlacesSheet = true
@@ -283,7 +292,7 @@ fun WelcomeScreen(
                 )
                 else -> RTCard {
                     Text(
-                        text = "Nothing here yet",
+                        text = "No recent routes",
                         color = TextPrimary,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold
@@ -294,6 +303,43 @@ fun WelcomeScreen(
                         color = TextSecondary,
                         fontSize = 13.sp
                     )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(RTSpacing.xl))
+
+            // ── Discover rides ────────────────────────────────────────────────
+            // Public / group rides available to join. Personal history lives in
+            // "Recent routes" above so the two mental models are not mixed (UX-008).
+            SectionHeader(
+                title = "Discover rides",
+                actionLabel = null,
+                onAction = {}
+            )
+            Spacer(modifier = Modifier.height(RTSpacing.sm))
+            RTCard {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Icon(
+                        imageVector = Icons.Default.Explore,
+                        contentDescription = null,
+                        tint = TextTertiary,
+                        modifier = Modifier.size(32.dp)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "No group rides nearby",
+                        color = TextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Public rides will appear here when hosts share them.",
+                        color = TextSecondary,
+                        fontSize = 13.sp
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
                 }
             }
 

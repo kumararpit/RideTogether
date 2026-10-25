@@ -46,6 +46,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.BuildConfig
 import com.example.ui.theme.AmberDark
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.SlateDark700
@@ -61,7 +62,18 @@ fun JoinRideScreen(
     modifier: Modifier = Modifier
 ) {
     var codeInput by remember { mutableStateOf("") }
-    var codeError by remember { mutableStateOf(false) }
+
+    // UX-013: a valid invite code is exactly 6 alphanumeric characters. The join
+    // CTA stays disabled until the code is valid, and inline errors tell the user
+    // what to fix before they tap.
+    val isCodeValid = codeInput.length == 6 && codeInput.all { it.isLetterOrDigit() }
+    val inlineError: String? = when {
+        codeInput.isNotEmpty() && codeInput.length != 6 ->
+            "Code must be 6 characters"
+        codeInput.isNotEmpty() && !codeInput.all { it.isLetterOrDigit() } ->
+            "Use letters and numbers only"
+        else -> null
+    }
 
     Surface(
         modifier = modifier
@@ -131,7 +143,10 @@ fun JoinRideScreen(
                             modifier = Modifier.padding(top = 2.dp)
                         )
 
-                        if (!errorMessage.isNullOrBlank()) {
+                        // UX-013: surface inline validation errors (or a server
+                        // error passed in from the parent) right under the input.
+                        val effectiveError = inlineError ?: errorMessage
+                        if (effectiveError != null) {
                             Spacer(modifier = Modifier.height(10.dp))
                             Surface(
                                 color = Color(0xFF7F1D1D).copy(alpha = 0.5f),
@@ -139,7 +154,7 @@ fun JoinRideScreen(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
-                                    text = errorMessage,
+                                    text = effectiveError,
                                     color = Color(0xFFFCA5A5),
                                     fontSize = 12.sp,
                                     modifier = Modifier.padding(8.dp),
@@ -155,7 +170,6 @@ fun JoinRideScreen(
                             onValueChange = {
                                 if (it.length <= 8) {
                                     codeInput = it.uppercase()
-                                    codeError = false
                                 }
                             },
                             placeholder = { Text("e.g. ABC123", color = Color(0xFF78909C)) },
@@ -188,26 +202,29 @@ fun JoinRideScreen(
 
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        // Quick demo code chip
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(SlateDark800)
-                                .clickable { codeInput = "ABC123" }
-                                .padding(horizontal = 12.dp, vertical = 6.dp)
-                        ) {
-                            Text(
-                                text = "Use demo code: ",
-                                color = Color(0xFF90A4AE),
-                                fontSize = 12.sp
-                            )
-                            Text(
-                                text = "ABC123",
-                                color = AmberPrimary,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                        // UX-011: demo-code chip is a debug-only convenience; strip it
+                        // from release builds so test/demo data never leaks to users.
+                        if (BuildConfig.DEBUG) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(SlateDark800)
+                                    .clickable { codeInput = "ABC123" }
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = "Use demo code: ",
+                                    color = Color(0xFF90A4AE),
+                                    fontSize = 12.sp
+                                )
+                                Text(
+                                    text = "ABC123",
+                                    color = AmberPrimary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
@@ -274,18 +291,15 @@ fun JoinRideScreen(
             ) {
                 Button(
                     onClick = {
-                        if (codeInput.isBlank()) {
-                            codeError = true
-                        } else {
-                            onJoinRide(codeInput)
-                        }
+                        onJoinRide(codeInput)
                     },
+                    enabled = isCodeValid,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(56.dp)
                         .testTag("submit_join_ride_button"),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = AmberPrimary,
+                        containerColor = if (isCodeValid) AmberPrimary else SlateDark700,
                         contentColor = Color.Black
                     ),
                     shape = RoundedCornerShape(14.dp)

@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -15,20 +16,29 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Help
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.QuickMessageType
@@ -45,6 +55,9 @@ fun QuickMessageSheet(
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // Lightweight confirmation for the routine "Need help" broadcast — distinct
+    // from SOS which uses a 5-second emergency countdown (see SosConfirmDialog).
+    var confirmNeedHelp by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -100,7 +113,7 @@ fun QuickMessageSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Categorized Quick Messages: STATUS vs COORDINATION
+            // Categorized Quick Messages: STATUS vs COORDINATION vs ATTENTION
             val statusMessages = listOf(
                 QuickMessageType.IM_OKAY,
                 QuickMessageType.STOPPED,
@@ -111,36 +124,129 @@ fun QuickMessageSheet(
             val coordinationMessages = listOf(
                 QuickMessageType.WAIT_FOR_ME,
                 QuickMessageType.SLOW_DOWN,
-                QuickMessageType.FOOD_STOP,
-                QuickMessageType.NEED_HELP
+                QuickMessageType.FOOD_STOP
             )
 
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    text = "QUICK STATUS",
-                    color = AmberPrimary,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold
-                )
-
-                statusMessages.forEach { option ->
-                    QuickMessageTile(option = option, onClick = { onSendMessage(option) })
+            if (confirmNeedHelp) {
+                // Lightweight confirmation for the routine "Need help" broadcast.
+                // Distinct from SOS: no countdown, no emergency red, plain "Send"
+                // action — the user explicitly opts in to notifying the group.
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Help,
+                        contentDescription = "Need help",
+                        tint = AmberPrimary,
+                        modifier = Modifier.size(32.dp)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Send 'Need help' to group?",
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Notifies all riders you need assistance — this is a routine broadcast, not an emergency SOS.",
+                        color = Color(0xFF90A4AE),
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { confirmNeedHelp = false },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = Color(0xFF90A4AE)
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(
+                                text = "Cancel",
+                                color = Color(0xFF90A4AE),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        Button(
+                            onClick = {
+                                confirmNeedHelp = false
+                                onSendMessage(QuickMessageType.NEED_HELP)
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("send_need_help_button"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AmberPrimary,
+                                contentColor = Color(0xFF1A1205)
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(
+                                text = "Send Need Help",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "QUICK STATUS",
+                        color = AmberPrimary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
 
-                Spacer(modifier = Modifier.height(8.dp))
+                    statusMessages.forEach { option ->
+                        QuickMessageTile(option = option, onClick = { onSendMessage(option) })
+                    }
 
-                Text(
-                    text = "COORDINATION",
-                    color = AmberPrimary,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                coordinationMessages.forEach { option ->
-                    QuickMessageTile(option = option, onClick = { onSendMessage(option) })
+                    Text(
+                        text = "COORDINATION",
+                        color = AmberPrimary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    coordinationMessages.forEach { option ->
+                        QuickMessageTile(option = option, onClick = { onSendMessage(option) })
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // UX-010: "Need help" is a routine attention broadcast, visually
+                    // and semantically separate from the emergency SOS flow (red,
+                    // 5-second countdown, "SEND SOS NOW"). It uses an amber tile and
+                    // an explicit lightweight confirmation instead.
+                    Text(
+                        text = "ATTENTION",
+                        color = AmberPrimary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    QuickMessageTile(
+                        option = QuickMessageType.NEED_HELP,
+                        onClick = { confirmNeedHelp = true },
+                        attention = true
+                    )
                 }
             }
 
@@ -152,8 +258,10 @@ fun QuickMessageSheet(
 @Composable
 private fun QuickMessageTile(
     option: QuickMessageType,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    attention: Boolean = false
 ) {
+    val tileColor = if (attention) AmberPrimary.copy(alpha = 0.18f) else SurfaceCardElevated
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -161,8 +269,9 @@ private fun QuickMessageTile(
             .clip(RoundedCornerShape(12.dp))
             .clickable { onClick() }
             .testTag("quick_msg_btn_${option.name}"),
-        color = SurfaceCardElevated,
-        tonalElevation = 2.dp
+        color = tileColor,
+        tonalElevation = 2.dp,
+        border = if (attention) BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.5f)) else null
     ) {
         Row(
             modifier = Modifier

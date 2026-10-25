@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -59,15 +60,18 @@ import com.example.R
 import com.example.data.model.LatLng
 import com.example.data.model.Ride
 import com.example.data.model.RideRole
+import com.example.data.model.RideStatus
 import com.example.data.model.RiderMember
 import com.example.ui.components.RideMapCanvas
 import com.example.ui.components.RiderStatusBadge
 import com.example.ui.components.RouteItineraryCard
+import com.example.ui.components.StatusChip
 import com.example.ui.components.RouteOptionSelector
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.CustomIcons
 import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
+import com.example.ui.theme.StatusOfflineGray
 import com.example.ui.theme.StatusRidingGreen
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
@@ -146,6 +150,20 @@ fun RideLobbyScreen(
                                 fontSize = 12.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
+                            )
+                            // UX-012: session state (ride lifecycle) shown separately
+                            // from the movement state in RiderStatusBadge, so the
+                            // "Riding • X km/h" badge is never mistaken for the
+                            // ride being live while Start Ride is still available.
+                            Spacer(modifier = Modifier.height(4.dp))
+                            StatusChip(
+                                text = ride.status.name,
+                                color = when (ride.status) {
+                                    RideStatus.ACTIVE -> StatusRidingGreen
+                                    RideStatus.LOBBY -> AmberPrimary
+                                    RideStatus.COMPLETED, RideStatus.CANCELLED -> StatusOfflineGray
+                                    else -> TextTertiary
+                                }
                             )
                         }
                         IconButton(
@@ -471,11 +489,14 @@ fun RideLobbyScreen(
                                     val isRiderLeader = (rider.role == RideRole.LEADER) || (rider.id == ride.leaderId)
                                     if (isRiderLeader) {
                                         Spacer(modifier = Modifier.width(6.dp))
+                                        // UX-009: predictable min width so "LEADER" never wraps
+                                        // at small widths or large font scale.
                                         Box(
                                             modifier = Modifier
+                                                .widthIn(min = 56.dp)
                                                 .clip(RoundedCornerShape(6.dp))
                                                 .background(AmberPrimary.copy(alpha = 0.25f))
-                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                .padding(horizontal = 8.dp, vertical = 2.dp)
                                         ) {
                                             Row(verticalAlignment = Alignment.CenterVertically) {
                                                 Icon(
@@ -489,7 +510,8 @@ fun RideLobbyScreen(
                                                     text = "LEADER",
                                                     color = AmberPrimary,
                                                     fontSize = 9.sp,
-                                                    fontWeight = FontWeight.Bold
+                                                    fontWeight = FontWeight.Bold,
+                                                    maxLines = 1
                                                 )
                                             }
                                         }

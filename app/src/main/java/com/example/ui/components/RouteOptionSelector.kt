@@ -60,8 +60,10 @@ fun RouteOptionSelector(
     if (options.isEmpty()) return
 
     // The engine's own ranking is the fastest candidate; that is the one the
-    // "best route" preset refers to.
+    // "best route" preset refers to. When there is only one candidate it is the
+    // recommended route by default (UX-007).
     val bestIndex = options.minByOrNull { it.durationSeconds }?.index
+    val isSingle = options.size == 1
 
     Column(modifier = modifier.fillMaxWidth()) {
         if (showHeader && options.size > 1) {
@@ -85,7 +87,8 @@ fun RouteOptionSelector(
 
         options.forEach { option ->
             val isSelected = option.index == selectedIndex
-            val isBest = option.index == bestIndex && options.size > 1
+            val isBest = option.index == bestIndex && !isSingle
+            val isRecommended = isSingle && option.index == bestIndex
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -117,8 +120,14 @@ fun RouteOptionSelector(
                             Spacer(Modifier.width(8.dp))
                             if (isBest) {
                                 StatusChip(
-                                    text = if (options.size > 1) "Fastest" else "Route",
+                                    text = "Fastest",
                                     color = com.example.ui.theme.StatusRidingGreen
+                                )
+                            }
+                            if (isRecommended) {
+                                StatusChip(
+                                    text = "Recommended",
+                                    color = AmberPrimary
                                 )
                             }
                         }

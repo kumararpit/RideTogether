@@ -123,8 +123,8 @@ fun RideTogetherApp(viewModel: RideViewModel) {
     var pendingScreen by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<AppScreen?>(null) }
 
     LaunchedEffect(currentUser) {
-        if (currentUser != null && currentScreen == AppScreen.SIGN_IN && pendingScreen != null) {
-            val target = pendingScreen!!
+        if (currentUser != null && currentScreen == AppScreen.SIGN_IN) {
+            val target = pendingScreen ?: AppScreen.WELCOME
             pendingScreen = null
             viewModel.navigateTo(target)
         }
@@ -254,9 +254,6 @@ fun RideTogetherApp(viewModel: RideViewModel) {
         }
 
         AppScreen.LIVE_RIDE -> {
-            BackHandler {
-                viewModel.openRiderListSheet(true)
-            }
             LiveRideScreen(viewModel = viewModel)
         }
 

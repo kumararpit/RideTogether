@@ -25,6 +25,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -48,7 +50,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.DividerColor
+import com.example.ui.theme.RideGuidanceGreen
 import com.example.ui.theme.SlateDark500
+import com.example.ui.theme.StatusEmergencyRed
 import com.example.ui.theme.SlateDark600
 import com.example.ui.theme.SlateDark700
 import com.example.ui.theme.SlateDark800
@@ -514,5 +518,228 @@ fun InfoRow(
             }
         }
         trailing?.invoke()
+    }
+}
+
+/** Inline validation error: red-tinted surface with a message and optional dismiss action. */
+@Composable
+fun InlineError(
+    message: String,
+    modifier: Modifier = Modifier,
+    onDismiss: (() -> Unit)? = null
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = RTSpacing.md, vertical = RTSpacing.sm)
+            .background(StatusEmergencyRed.copy(alpha = 0.12f))
+            .clip(RTShapes.control)
+            .border(BorderStroke(1.dp, StatusEmergencyRed.copy(alpha = 0.4f)))
+    ) {
+        Box(
+            modifier = Modifier
+                .size(20.dp)
+                .clip(CircleShape)
+                .background(StatusEmergencyRed),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Error,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(14.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(RTSpacing.sm))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = message,
+                color = TextPrimary,
+                fontSize = 13.sp,
+                maxLines = 2
+            )
+        }
+        if (onDismiss != null) {
+            Spacer(modifier = Modifier.width(RTSpacing.xs))
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier.size(20.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Dismiss",
+                    tint = TextSecondary,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+    }
+}
+
+/** Route metric row: icon, label, primary value, optional trailing subtitle. */
+@Composable
+fun RouteMetricRow(
+    icon: ImageVector,
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    trailing: @Composable (() -> Unit)? = null
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .background(SlateDark700),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = AmberPrimary,
+                modifier = Modifier.size(16.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(RTSpacing.sm))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = value,
+                color = TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = label,
+                color = TextSecondary,
+                fontSize = 12.sp
+            )
+        }
+        trailing?.invoke()
+    }
+}
+
+/** Ride summary card: title, optional subtitle, and content. */
+@Composable
+fun RideSummaryCard(
+    title: String,
+    subtitle: String? = null,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    RTCard(
+        modifier = modifier,
+        contentPadding = PaddingValues(RTSpacing.md),
+        testTag = "ride_summary_card"
+    ) {
+        Text(
+            text = title,
+            color = TextPrimary,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        if (subtitle != null) {
+            Spacer(modifier = Modifier.height(RTSpacing.xxs))
+            Text(
+                text = subtitle,
+                color = TextSecondary,
+                fontSize = 13.sp
+            )
+        }
+        Spacer(modifier = Modifier.height(RTSpacing.md))
+        content()
+    }
+}
+
+/** Navigation maneuver card: deep green surface per the design system spec. */
+@Composable
+fun NavigationManeuverCard(
+    icon: ImageVector,
+    instruction: String,
+    distance: String,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = RTSpacing.md, vertical = RTSpacing.sm)
+            .background(RideGuidanceGreen)
+            .clip(RTShapes.control)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(RideGuidanceGreen.copy(alpha = 0.85f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(RTSpacing.sm))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = instruction,
+                color = Color.White,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 2
+            )
+            Text(
+                text = distance,
+                color = Color.White.copy(alpha = 0.8f),
+                fontSize = 13.sp
+            )
+        }
+    }
+}
+
+/** Circular map control button with an icon and content description. */
+@Composable
+fun MapControlButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    selected: Boolean = false
+) {
+    Box(
+        modifier = modifier
+            .size(48.dp)
+            .clickable(onClick = onClick)
+            .background(if (selected) AmberPrimary.copy(alpha = 0.2f) else SlateDark700)
+            .clip(CircleShape)
+            .border(if (selected) BorderStroke(1.5.dp, AmberPrimary) else BorderStroke(1.dp, SlateDark500))
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = if (selected) AmberPrimary else TextPrimary,
+            modifier = Modifier.size(24.dp)
+        )
+    }
+}
+
+/** Bottom action bar row: full width, navigation-bars padded, evenly spaced actions. */
+@Composable
+fun BottomActionBar(
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(vertical = RTSpacing.md),
+        horizontalArrangement = Arrangement.spacedBy(RTSpacing.md),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        content()
     }
 }
