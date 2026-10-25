@@ -110,6 +110,60 @@ class MapTileRenderingAndRotationTest {
     }
 
     @Test
+    fun `tilted tile grid covers the viewport corners`() {
+        val widthPx = 1080f
+        val heightPx = 2400f
+        val anchorX = widthPx / 2f
+        val anchorY = heightPx * 0.65f
+        val zoomLevel = 17
+        val tileSizePx = 256f * 3f * kotlin.math.sqrt(2f) // 1086.1 px, fractional zoom
+        val tiltCos = cos(Math.toRadians(35.0)).toFloat()
+
+        val centerTileX = TileMath.lonToTileX(73.8567, zoomLevel.toFloat())
+        val centerTileY = TileMath.latToTileY(18.5204, zoomLevel.toFloat())
+
+        val range = TileMath.calculateVisibleTileRange(
+            widthPx = widthPx,
+            heightPx = heightPx,
+            anchorX = anchorX,
+            anchorY = anchorY,
+            centerTileXDouble = centerTileX,
+            centerTileYDouble = centerTileY,
+            zoomLevel = zoomLevel,
+            tileSizePx = tileSizePx,
+            tiltCos = tiltCos,
+            tileMargin = 1
+        )
+
+        for (headingDeg in listOf(0f, 30f, 135f, 270f)) {
+            val rad = Math.toRadians(headingDeg.toDouble())
+            val cosH = cos(rad)
+            val sinH = sin(rad)
+            for ((sx, sy) in listOf(
+                Pair(0f, 0f), Pair(widthPx, 0f),
+                Pair(widthPx, heightPx), Pair(0f, heightPx)
+            )) {
+                // Screen → unrotated screen → tile coordinate under tilt.
+                val dx = sx - anchorX
+                val dy = sy - anchorY
+                val ux = anchorX + dx * cosH - dy * sinH
+                val uy = anchorY + dx * sinH + dy * cosH
+                val cornerTileX = centerTileX + (ux - anchorX) / tileSizePx
+                val cornerTileY = centerTileY + (uy - anchorY) / (tileSizePx * tiltCos)
+
+                assertTrue(
+                    "Tilted corner ($sx,$sy) at $headingDeg deg: tileX $cornerTileX outside [${range.minX},${range.maxX}]",
+                    cornerTileX >= range.minX && cornerTileX <= range.maxX + 1
+                )
+                assertTrue(
+                    "Tilted corner ($sx,$sy) at $headingDeg deg: tileY $cornerTileY outside [${range.minY},${range.maxY}]",
+                    cornerTileY >= range.minY && cornerTileY <= range.maxY + 1
+                )
+            }
+        }
+    }
+
+    @Test
     fun `test fractional tile positions and edge tile coverage`() {
         val zoomLevel = 16
         val tileSizePx = 512f

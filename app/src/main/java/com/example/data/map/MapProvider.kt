@@ -193,6 +193,11 @@ object TileMath {
 
     /**
      * Calculates the minimum and maximum tile indices required to completely cover a rotated viewport.
+     *
+     * @param tiltCos cosine of the map tilt angle; tiles are vertically compressed by this factor,
+     *                so more tiles are needed vertically when tiltCos < 1. Without this adjustment,
+     *                tile range under-covers the viewport vertically at tilt > 0, producing black
+     *                stripes at the top/bottom edges.
      */
     fun calculateVisibleTileRange(
         widthPx: Float,
@@ -203,22 +208,26 @@ object TileMath {
         centerTileYDouble: Double,
         zoomLevel: Int,
         tileSizePx: Float,
+        tiltCos: Float = 1f,
         tileMargin: Int = 1
     ): TileRange {
         val maxTileIndex = (1 shl zoomLevel) - 1
-        
+
         // Use hypot to get the maximum radius required to cover the corners regardless of rotation
         val maxRadiusPx = kotlin.math.hypot(
             kotlin.math.max(anchorX, widthPx - anchorX).toDouble(),
             kotlin.math.max(anchorY, heightPx - anchorY).toDouble()
         )
-        
-        val radiusTiles = maxRadiusPx / tileSizePx
-        
-        val minTileX = centerTileXDouble - radiusTiles
-        val maxTileX = centerTileXDouble + radiusTiles
-        val minTileY = centerTileYDouble - radiusTiles
-        val maxTileY = centerTileYDouble + radiusTiles
+
+        // Horizontal tiles are not compressed by tilt; vertical tiles are scaled by tiltCos.
+        // Dividing the vertical radius by tiltCos ensures full viewport coverage when tilted.
+        val radiusTilesX = maxRadiusPx / tileSizePx
+        val radiusTilesY = maxRadiusPx / (tileSizePx * tiltCos.toDouble())
+
+        val minTileX = centerTileXDouble - radiusTilesX
+        val maxTileX = centerTileXDouble + radiusTilesX
+        val minTileY = centerTileYDouble - radiusTilesY
+        val maxTileY = centerTileYDouble + radiusTilesY
 
         val rangeMinX = (kotlin.math.floor(minTileX).toInt() - tileMargin).coerceIn(0, maxTileIndex)
         val rangeMaxX = (kotlin.math.ceil(maxTileX).toInt() + tileMargin).coerceIn(0, maxTileIndex)

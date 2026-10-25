@@ -30,7 +30,9 @@ object ZoomAnchorMath {
      *
      * Derived from the unrotated projection used by the canvas:
      *   x = anchorX + (tileX(point, zoom) - tileX(center, zoom)) * tileSizePx
-     * Solved for the center tile coordinate at [newZoom].
+     *   y = anchorY + (tileY(point, zoom) - tileY(center, zoom)) * tileSizePx * tiltCos
+     * Solved for the center tile coordinate at [newZoom]. [tiltCos] is cos(tilt)
+     * (1 for the top-down overview), matching the renderer's Y foreshortening.
      *
      * Falls back to the unchanged current center for degenerate inputs (invalid
      * anchor coordinates, non-positive zoom/tile size) rather than producing a
@@ -46,19 +48,24 @@ object ZoomAnchorMath {
         anchorUnrotatedY: Float,
         anchorX: Float,
         anchorY: Float,
-        tileSizePx: Float
+        tileSizePx: Float,
+        tiltCos: Float = 1f
     ): LatLng {
         val fallback = LatLng(currentCenterLat, currentCenterLng)
         if (currentZoom <= 0f || newZoom <= 0f) return fallback
         if (!anchorLatLng.latitude.isFinite() || !anchorLatLng.longitude.isFinite()) return fallback
-        if (tileSizePx <= 0f || !tileSizePx.isFinite() || !anchorUnrotatedX.isFinite() ||
+        if (tileSizePx <= 0f || !tileSizePx.isFinite() || !tiltCos.isFinite() || tiltCos <= 0f ||
+            !anchorUnrotatedX.isFinite() ||
             !anchorUnrotatedY.isFinite() || !anchorX.isFinite() || !anchorY.isFinite()
         ) return fallback
 
         val anchorTileX = TileMath.lonToTileX(anchorLatLng.longitude, newZoom)
         val anchorTileY = TileMath.latToTileY(anchorLatLng.latitude, newZoom)
         val centerTileX = anchorTileX - (anchorUnrotatedX - anchorX) / tileSizePx
-        val centerTileY = anchorTileY - (anchorUnrotatedY - anchorY) / tileSizePx
+        // The Y axis is foreshortened by cos(tilt) in the canvas projection, so
+        // the inverse must divide by the same factor or the anchored fix drifts
+        // vertically by (1/cos(tilt) - 1) of the centroid offset.
+        val centerTileY = anchorTileY - (anchorUnrotatedY - anchorY) / (tileSizePx * tiltCos)
         return LatLng(
             TileMath.tileYToLat(centerTileY, newZoom),
             TileMath.tileXToLon(centerTileX, newZoom)
@@ -92,12 +99,13 @@ object ZoomAnchorMath {
         anchorRotatedY: Float,
         anchorX: Float,
         anchorY: Float,
-        tileSizePx: Float
+        tileSizePx: Float,
+        tiltCos: Float = 1f
     ): LatLng {
         val fallback = LatLng(currentCenterLat, currentCenterLng)
         if (currentZoom <= 0f || newZoom <= 0f) return fallback
         if (!anchorLatLng.latitude.isFinite() || !anchorLatLng.longitude.isFinite()) return fallback
-        if (tileSizePx <= 0f || !tileSizePx.isFinite()) return fallback
+        if (tileSizePx <= 0f || !tileSizePx.isFinite() || !tiltCos.isFinite() || tiltCos <= 0f) return fallback
         if (!anchorRotatedX.isFinite() || !anchorRotatedY.isFinite() ||
             !anchorX.isFinite() || !anchorY.isFinite()
         ) return fallback
@@ -107,7 +115,7 @@ object ZoomAnchorMath {
             return anchoredCenter(
                 currentCenterLat, currentCenterLng, currentZoom, newZoom,
                 anchorLatLng, anchorRotatedX, anchorRotatedY,
-                anchorX, anchorY, tileSizePx
+                anchorX, anchorY, tileSizePx, tiltCos
             )
         }
 
@@ -133,7 +141,7 @@ object ZoomAnchorMath {
         val anchorTileX = TileMath.lonToTileX(anchorLatLng.longitude, newZoom)
         val anchorTileY = TileMath.latToTileY(anchorLatLng.latitude, newZoom)
         val centerTileX = anchorTileX - (uNewX - anchorX) / tileSizePx
-        val centerTileY = anchorTileY - (uNewY - anchorY) / tileSizePx
+        val centerTileY = anchorTileY - (uNewY - anchorY) / (tileSizePx * tiltCos)
         return LatLng(
             TileMath.tileYToLat(centerTileY, newZoom),
             TileMath.tileXToLon(centerTileX, newZoom)

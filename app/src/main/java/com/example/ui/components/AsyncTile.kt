@@ -8,7 +8,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
@@ -18,8 +17,6 @@ import androidx.compose.ui.layout.ContentScale
 import com.example.data.map.tile.TileKey
 import com.example.data.map.tile.TileRepository
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 
 /**
  * Compose component that loads and paints a single map tile.
@@ -53,25 +50,21 @@ fun AsyncTile(
     placeholderColor: Color = Color.Unspecified,
     contentDescription: String? = null
 ) {
-    val coroutineScope = rememberCoroutineScope()
-
     val androidBitmapState = remember { mutableStateOf<android.graphics.Bitmap?>(null) }
-    var loadJob: Job? = null
 
-    // Cancel any previous load for this key when entering this effect.
+    // Load inside the effect's own coroutine. A key change (zoom/pan) or leaving
+    // the composition cancels this request; the previous implementation launched
+    // into a rememberCoroutineScope() child that survived key changes, so a stale
+    // tile could complete after the viewport had moved on.
     LaunchedEffect(key) {
-        loadJob?.cancel()
         androidBitmapState.value = null
-
-        loadJob = coroutineScope.launch {
-            try {
-                val bmp = repository.loadBitmap(key, priority = priority)
-                androidBitmapState.value = bmp
-            } catch (e: CancellationException) {
-                // Expected on camera move / disposal — placeholder stays.
-            } catch (e: Exception) {
-                // Load failure — placeholder stays visible.
-            }
+        try {
+            val bmp = repository.loadBitmap(key, priority = priority)
+            androidBitmapState.value = bmp
+        } catch (e: CancellationException) {
+            // Expected on camera move / disposal — placeholder stays.
+        } catch (e: Exception) {
+            // Load failure — placeholder stays visible.
         }
     }
 

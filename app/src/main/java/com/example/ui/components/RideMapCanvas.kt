@@ -9,7 +9,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -68,6 +70,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -390,6 +393,10 @@ fun RideMapCanvas(
     // the frame-paced interpolation loop skips writing to display* values so a
     // gesture immediately cancels any ongoing camera animation (INV-C).
     var gestureInProgress by remember { mutableStateOf(false) }
+    // No timeout/watchdog: the companion pointer handler below owns the gesture
+    // lifecycle explicitly (awaitFirstDown → wait for all pointers up), so the flag
+    // is cleared exactly when the last pointer lifts — including when an overlay
+    // consumes the touch-up. See the pointerInput block on the overlay Canvas.
     // True while the camera is actively interpolating toward a target.
     // Set false when the display has converged to within epsilon of the goal.
     var isCameraAnimating by remember { mutableStateOf(false) }
@@ -430,18 +437,23 @@ fun RideMapCanvas(
     // Initialize map position on first launch or when route becomes available.
     // LiveRide launches with isFollowRiderMode == true and must lock directly into
     // FOLLOWING mode at navigation zoom — never into the Free-Pan route overview.
-    LaunchedEffect(route, isFollowRiderMode) {
+    LaunchedEffect(route, isFollowRiderMode, currentUser?.location) {
         if (!hasInitialized) {
             if (isFollowRiderMode) {
+                // Wait for real data instead of latching to the Pune fallback.
+                // Latching on the placeholder made every later real fix look like
+                // a camera jump (and left the map at the wrong city when the
+                // location arrived after first composition).
                 val followCenter = currentUser?.location
                     ?: initialStartLocation
                     ?: route.firstOrNull()
-                    ?: LatLng(18.5204, 73.8567)
-                // D5 fix (INV-E): boot locks FOLLOWING in ONE controller write.
-                // The old recenter()+setZoom(17f) pair wrote a 16f target that was
-                // immediately replaced by 17f — a two-step zoom target at startup.
-                cameraController.recenter(followCenter, currentUser?.headingDeg, 17f)
-                hasInitialized = true
+                if (followCenter != null) {
+                    // D5 fix (INV-E): boot locks FOLLOWING in ONE controller write.
+                    // The old recenter()+setZoom(17f) pair wrote a 16f target that was
+                    // immediately replaced by 17f — a two-step zoom target at startup.
+                    cameraController.recenter(followCenter, currentUser?.headingDeg, 17f)
+                    hasInitialized = true
+                }
             } else if (route.isNotEmpty()) {
                 // Lobby / summary previews only: overview the whole route once.
                 cameraController.showOverview(route)
@@ -568,9 +580,12 @@ fun RideMapCanvas(
                         riderMarkerAnimator.advance(dt.toDouble())
                         if (mayRender) {
                             animatedMarkerFrame = riderMarkerAnimator.frameVersion
-                            // Phase B (B-18): the frame's work is timed against the
-                            // budget so "frames over budget" is a real measurement.
-                            frameBudget.recordFrameDuration(frameTimeNanos - lastTime)
+                            // Measure the work this loop actually did for the frame
+                            // (camera interpolation + marker advance). Composition and
+                            // draw run after this block, so this is a lower bound; the
+                            // previous value (frameTimeNanos - lastTime) was just the
+                            // vsync interval and reported ~16.7 ms on every device.
+                            frameBudget.recordFrameDuration(System.nanoTime() - frameTimeNanos)
                             // The statistics are published periodically so they are
                             // observable in the field (logcat) instead of being
                             // collected and never read.
@@ -692,10 +707,15 @@ fun RideMapCanvas(
             // disconnected from the dt-based zoom/center/heading loop — the
             // second half of the recenter zoom-pop. No anchor clock remains:
             // every remaining animated channel shares the one dt-based loop.
+            //   screenY = anchorY + (tileY − centerTileY) · tileSize · cos(tilt)
+            //   ⇒ centerTileY′ = centerTileY + Δanchor / (tileSize · cos(tilt))
+            // The tilt factor is part of the projection, so it must be in the
+            // rebase denominator; without it the pivot shift was 1/cos(tilt)
+            // too small at 35° (≈18%) and the map jumped by the residual.
             val anchorDeltaPx = targetAnchorY - displayAnchorY
             val baseTilePx = with(density) { 256.dp.toPx() }
             val centerTileY = TileMath.latToTileY(displayCenterLat.toDouble(), displayZoom)
-            val newCenterTileY = centerTileY + (anchorDeltaPx / baseTilePx).toDouble()
+            val newCenterTileY = centerTileY + (anchorDeltaPx / (baseTilePx * tiltCos)).toDouble()
             displayCenterLat = TileMath.tileYToLat(newCenterTileY, displayZoom).toFloat()
             displayAnchorY = targetAnchorY
         }
@@ -787,7 +807,8 @@ fun RideMapCanvas(
             val centerTileX = TileMath.lonToTileX(displayCenterLng.toDouble(), zoom)
             val centerTileY = TileMath.latToTileY(displayCenterLat.toDouble(), zoom)
             val tileX = centerTileX + (x - anchorX) / baseTileSizePx
-            val tileY = centerTileY + (y - anchorY) / baseTileSizePx
+            // Inverse of latLngToUnrotatedScreen: Y is foreshortened by cos(tilt).
+            val tileY = centerTileY + (y - anchorY) / (baseTileSizePx * tiltCos)
             return LatLng(TileMath.tileYToLat(tileY, zoom), TileMath.tileXToLon(tileX, zoom))
         }
 
@@ -820,7 +841,8 @@ fun RideMapCanvas(
                 centerTileXDouble = centerTileXAtTileZoom,
                 centerTileYDouble = centerTileYAtTileZoom,
                 zoomLevel = tileZoom,
-                tileSizePx = scaledTileSizePx
+                tileSizePx = scaledTileSizePx,
+                tiltCos = tiltCos
             )
 
             LaunchedEffect(tileRange, tileZoom) {
@@ -848,22 +870,44 @@ fun RideMapCanvas(
                 tileRepository.cancelPending()
             }
 
-            Box(modifier = Modifier.fillMaxSize()) {
+            // Tilt is applied once, to the tile grid as a whole, around the same
+            // anchor the route canvas uses. Scaling each tile's *position* by
+            // tiltCos while leaving its *height* at scaledTileSizePx made rows
+            // overlap by (1-cos(tilt)) and split content at the overlap. Applying
+            // scaleY to the assembled grid keeps the projection affine and
+            // identical to RouteRenderMath.worldToScreenTransform:
+            //   screen = rotate(-heading) * (scaleY(tiltCos) * world)
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleY = tiltCos
+                        transformOrigin = TransformOrigin(
+                            anchorX / widthPx,
+                            anchorY / heightPx
+                        )
+                    }
+            ) {
                 for (tileX in tileRange.minX..tileRange.maxX) {
                     for (tileY in tileRange.minY..tileRange.maxY) {
                         key("$tileZoom/$tileX/$tileY") {
+                            // Tilt foreshortening is applied by the tile-grid container
+                            // above (graphicsLayer scaleY), matching RouteRenderMath.
+                            // Row spacing therefore stays at the unscaled tile size.
                             val tileUnrotatedX = anchorX + ((tileX - centerTileXAtTileZoom) * scaledTileSizePx).toFloat()
                             val tileUnrotatedY = anchorY + ((tileY - centerTileYAtTileZoom) * scaledTileSizePx).toFloat()
 
                             val tileUrl = TileMath.getOsmTileUrl(tileZoom, tileX, tileY)
                             
-                            // Calculate exact layout bounds rounding mathematically to avoid sub-pixel gaps (seams)
-                            // We use Math.ceil for the size and strict float rounding for the offset to guarantee 
-                            // neighboring tiles snap perfectly edge-to-edge without 1px gaps when scaled.
-                            val left = tileUnrotatedX.roundToInt()
-                            val top = tileUnrotatedY.roundToInt()
-                            val right = (tileUnrotatedX + scaledTileSizePx).roundToInt()
-                            val bottom = (tileUnrotatedY + scaledTileSizePx).roundToInt()
+                            // Calculate exact layout bounds to avoid sub-pixel gaps (seams)
+                            // between tiles when scaled during zoom transitions.
+                            // floor the start, ceil the end so every tile covers at least
+                            // its full extent — neighboring tiles overlap by <=1px rather
+                            // than leaving gaps.
+                            val left = Math.floor(tileUnrotatedX.toDouble()).toInt()
+                            val top = Math.floor(tileUnrotatedY.toDouble()).toInt()
+                            val right = Math.ceil((tileUnrotatedX + scaledTileSizePx).toDouble()).toInt()
+                            val bottom = Math.ceil((tileUnrotatedY + scaledTileSizePx).toDouble()).toInt()
 
                             // Priority: Manhattan distance from centre tile (0 = centre,
                             // loads first). Mirrors Google Maps' ORDER BY priority so the
@@ -874,7 +918,15 @@ fun RideMapCanvas(
                             Box(
                                 modifier = Modifier
                                     .offset { IntOffset(left, top) }
-                                    .size(
+                                    // requiredSize, not size: the tile grid is laid out
+                                    // against the viewport constraint, but a tile is
+                                    // legitimately wider/taller than the viewport at
+                                    // fractional zoom (e.g. 256dp x 2^0.5 = 1086px on
+                                    // a 1080px screen). size() clamps to the parent
+                                    // constraint and leaves a tilePlaceholderColor
+                                    // stripe down the edge; requiredSize keeps the
+                                    // full tile extent so neighbours always overlap.
+                                    .requiredSize(
                                         width = with(density) { (right - left).toDp() },
                                         height = with(density) { (bottom - top).toDp() }
                                     )
@@ -916,7 +968,13 @@ fun RideMapCanvas(
                                     Box(
                                         modifier = Modifier
                                             .offset { IntOffset(parentOffsetX, parentOffsetY) }
-                                            .size(
+                                            // Parent fallback covers a 2x2 tile footprint,
+                                            // which is always larger than the child's
+                                            // viewport-sized constraint. requiredSize keeps
+                                            // that footprint instead of squeezing it into
+                                            // the child (which caused fallback content to
+                                            // be cropped and seams to reappear).
+                                            .requiredSize(
                                                 width = with(density) { ((right - left) * 2).toDp() },
                                                 height = with(density) { ((bottom - top) * 2).toDp() }
                                             )
@@ -1164,17 +1222,16 @@ fun RideMapCanvas(
                     // (the first finger's few-px micro-pan must not exit follow).
                     var microPanAccumPx = 0f
                     detectTransformGestures { centroid, pan, zoom, rotation ->
-                        val isInitial = zoom == 1f && rotation == 0f && pan == Offset.Zero
-                        if (isInitial && gestureStarted) {
-                            // Gesture just ended — reset baselines, release animation cancellation.
-                            gestureStarted = false
-                            gestureInProgress = false
-                            lastCumulativeZoom = 1f
-                            lastCumulativeRotation = 0f
-                        } else if (!isInitial && !gestureStarted) {
-                            // New gesture just started — reset baselines, cancel any ongoing animation.
+                        // The touch-slop gate inside detectTransformGestures only
+                        // calls us once a real transform has begun. The companion
+                        // pointerInput below owns start/end: it resets the cumulative
+                        // baselines on touch-down and clears gestureInProgress as soon
+                        // as the last pointer lifts, so there is no timeout to race.
+                        gestureInProgress = true
+                        if (!gestureStarted) {
+                            // Defensive: if the companion handler missed the down
+                            // (e.g. re-entrant node), start a clean baseline.
                             gestureStarted = true
-                            gestureInProgress = true
                             lastCumulativeZoom = 1f
                             lastCumulativeRotation = 0f
                         }
@@ -1225,7 +1282,8 @@ fun RideMapCanvas(
                                     anchorRotatedY = centroid.y,
                                     anchorX = anchorX,
                                     anchorY = anchorY,
-                                    tileSizePx = baseTileSizePx
+                                    tileSizePx = baseTileSizePx,
+                                    tiltCos = tiltCos
                                 )
                                 cameraController.setZoomFree(newZoom, anchoredCenter)
                                 cameraController.setHeading(newHeading)
@@ -1260,6 +1318,35 @@ fun RideMapCanvas(
                                 cameraController.onUserGesture()
                                 onFollowRiderChange(false)
                             }
+                        }
+                    }
+                }
+                // Explicit gesture lifecycle. detectTransformGestures never emits a
+                // zero-delta "ended" callback, so the old code could only guess that
+                // a gesture had finished. This handler shares the same down/up stream
+                // (it reads the Final pass, after the transform handler) and clears
+                // the flag when the last pointer lifts, including when an overlay
+                // consumes the up event. On touch-down it starts a fresh cumulative
+                // baseline for detectTransformGestures.
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        gestureStarted = true
+                        lastCumulativeZoom = 1f
+                        lastCumulativeRotation = 0f
+                        try {
+                            // Wait for the up event of the last pointer. Read the
+                            // Final pass so consumption by detectTransformGestures
+                            // (or an overlay) does not hide the release.
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Final)
+                                if (event.changes.none { it.pressed }) break
+                            }
+                        } finally {
+                            // Gesture finished (or the node was disposed): hand the
+                            // camera back to the frame loop immediately.
+                            gestureInProgress = false
+                            gestureStarted = false
                         }
                     }
                 }
@@ -2078,12 +2165,12 @@ fun RideMapCanvas(
             // Re-center on current user button (Primary Blue when active)
             FloatingActionButton(
                 onClick = {
+                    android.util.Log.d("RideMapCanvas", "recenter button clicked: currentUser=$currentUser location=${currentUser?.location} heading=${currentUser?.headingDeg} isFollowRiderMode=$isFollowRiderMode")
                     cameraController.recenter(currentUser?.location, currentUser?.headingDeg)
-                    // Immediate rider/camera alignment: snap the marker to its current
-                    // target, bypassing the normal 150 ms position glide.
-                    if (currentUser != null) {
-                        riderMarkerAnimator.snap(currentUser.id)
-                    }
+                    // The frame loop resumes on the touch-up that triggered this tap
+                    // (the explicit gesture lifecycle above clears gestureInProgress
+                    // immediately), so the camera animates to the recenter target
+                    // itself. No manual display-state snap is needed here.
                     onFollowRiderChange(true)
                 },
                 modifier = Modifier

@@ -501,8 +501,9 @@ class MapCameraController {
         val normalized = ((newHeading % 360f) + 360f) % 360f
         _state.value = _state.value.copy(
             heading = normalized,
-            mode = MapCameraMode.FREE_EXPLORE,
-            tiltDegrees = 0f
+            mode = MapCameraMode.FREE_EXPLORE
+            // tiltDegrees intentionally preserved — gesture-driven rotation
+            // should not snap the camera from 35° follow tilt to top-down.
         )
     }
 
@@ -594,9 +595,9 @@ class MapCameraController {
         _state.value = _state.value.copy(
             zoom = newZoom.coerceIn(3f, 18f),
             center = center,
-            mode = MapCameraMode.FREE_EXPLORE,
-            tiltDegrees = 0f,
-            bounds = null
+            mode = MapCameraMode.FREE_EXPLORE
+            // tiltDegrees intentionally preserved — gesture-driven zoom
+            // should not snap the camera from 35° follow tilt to top-down.
         )
     }
 
