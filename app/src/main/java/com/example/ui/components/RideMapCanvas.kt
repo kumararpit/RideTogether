@@ -842,7 +842,8 @@ fun RideMapCanvas(
                 centerTileYDouble = centerTileYAtTileZoom,
                 zoomLevel = tileZoom,
                 tileSizePx = scaledTileSizePx,
-                tiltCos = tiltCos
+                tiltCos = tiltCos,
+                tileMargin = 2
             )
 
             LaunchedEffect(tileRange, tileZoom) {
@@ -1221,6 +1222,12 @@ fun RideMapCanvas(
                     // finger-placement drift that otherwise sabotages every pinch
                     // (the first finger's few-px micro-pan must not exit follow).
                     var microPanAccumPx = 0f
+                    // scaledTileSizePx must be recomputed here because it's defined
+                    // inside the tile grid Box scope (line ~830) and is not visible
+                    // in the gesture handler. Same formula: base tile size scaled by
+                    // the fractional zoom factor.
+                    val tileScale = Math.pow(2.0, (displayZoom - floor(displayZoom).toInt().toDouble()).toDouble()).toFloat()
+                    val scaledTileSizePx = baseTileSizePx * tileScale
                     detectTransformGestures { centroid, pan, zoom, rotation ->
                         // The touch-slop gate inside detectTransformGestures only
                         // calls us once a real transform has begun. The companion
@@ -1240,7 +1247,7 @@ fun RideMapCanvas(
                         val zoomDeltaLog2 = kotlin.math.log2((zoom / lastCumulativeZoom).toDouble()).toFloat()
                         val hasPinchZoom = kotlin.math.abs(zoomDeltaLog2) >= com.example.data.map.ZoomAnchorMath.PINCH_ZOOM_DELTA_LOG2
                         val rotationDeltaDeg = (rotation - lastCumulativeRotation) * 180f / Math.PI.toFloat()
-                        val hasRotation = kotlin.math.abs(rotationDeltaDeg) >= 0.5f
+                        val hasRotation = kotlin.math.abs(rotationDeltaDeg) >= 0.05f
 
                         lastCumulativeZoom = zoom
                         lastCumulativeRotation = rotation
@@ -1282,7 +1289,7 @@ fun RideMapCanvas(
                                     anchorRotatedY = centroid.y,
                                     anchorX = anchorX,
                                     anchorY = anchorY,
-                                    tileSizePx = baseTileSizePx,
+                                    tileSizePx = scaledTileSizePx,
                                     tiltCos = tiltCos
                                 )
                                 cameraController.setZoomFree(newZoom, anchoredCenter)
@@ -1303,7 +1310,7 @@ fun RideMapCanvas(
                                     // Deliberate pan confirmed: exit follow, then pan freely.
                                     cameraController.onUserGesture()
                                     onFollowRiderChange(false)
-                                    cameraController.pan(pan.x, pan.y, displayZoom, effectiveHeading, baseTileSizePx)
+                                    cameraController.pan(pan.x, pan.y, displayZoom, effectiveHeading, scaledTileSizePx)
                                     val targetState = cameraController.state.value
                                     displayCenterLat = targetState.center.latitude.toFloat()
                                     displayCenterLng = targetState.center.longitude.toFloat()
@@ -1311,7 +1318,7 @@ fun RideMapCanvas(
                                 // Below threshold: fragment swallowed — the following
                                 // camera feed keeps the rider anchored (jitter-free).
                             } else {
-                                cameraController.pan(pan.x, pan.y, displayZoom, effectiveHeading, baseTileSizePx)
+                                cameraController.pan(pan.x, pan.y, displayZoom, effectiveHeading, scaledTileSizePx)
                                 val targetState = cameraController.state.value
                                 displayCenterLat = targetState.center.latitude.toFloat()
                                 displayCenterLng = targetState.center.longitude.toFloat()
@@ -1543,9 +1550,15 @@ fun RideMapCanvas(
                 }
                 visibleAmenityPositions.add(amenity.osmId to (pos.x to pos.y))
             }
+            // Clustering radius scales with zoom: at lower zoom markers sit closer
+            // together on screen and need a larger grouping radius; at higher zoom
+            // they spread out and need a smaller radius to avoid over-clustering.
+            // At zoom 17 the radius is 30px; it doubles at zoom 16, halves at 18.
+            val clusterRadiusPx = (30f * Math.pow(2.0, (17f - displayZoom).toDouble())).toFloat()
+                .coerceIn(10f, 100f)
             val amenityClusters = AmenityClustering.cluster(
                 points = visibleAmenityPositions,
-                maxDistancePx = 30f,
+                maxDistancePx = clusterRadiusPx,
                 expandedIds = expandedAmenityIds
             )
             val amenitiesById = amenities.associateBy { it.osmId }
