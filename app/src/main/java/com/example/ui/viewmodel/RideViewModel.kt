@@ -29,6 +29,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import com.example.data.offline.mesh.MeshForegroundService
+import com.example.data.offline.mesh.MeshManager
 import com.example.data.map.MapLighting
 import com.example.data.map.MapThemeController
 import com.example.data.map.MapThemeMode
@@ -46,6 +48,22 @@ enum class AppScreen {
     RIDE_LOBBY,
     LIVE_RIDE,
     RIDE_SUMMARY
+}
+
+/**
+ * Startup restoration lifecycle. While [RESTORING], the UI holds on a splash
+ * and does not commit to [AppScreen.WELCOME] (or any other screen), so the
+ * user is never sent to Home while an active ride is still being restored —
+ * and is never offered a "Create Ride" path that could duplicate an active ride.
+ */
+enum class RestorationState {
+    RESTORING,
+    /** A durable active ride was verified and the correct screen committed. */
+    RESTORED,
+    /** No active ride exists; normal Home flow is safe. */
+    NONE,
+    /** Restoration failed (e.g. transient read error); fall back to Home. */
+    FAILED
 }
 
 /** How many candidate places are priced at once (each price is a route request). */
@@ -127,10 +145,6 @@ class RideViewModel(    application: Application,
     }
 
     val authRepository = AuthRepository()
-    val repository = RideRepository(
-        locationTracker = locationTracker,
-        firestore = db
-    )
 
     val currentUser: StateFlow<FirebaseUser?> = authRepository.authStateFlow()
         .stateIn(viewModelScope, SharingStarted.Eagerly, authRepository.currentUser)
@@ -145,6 +159,12 @@ class RideViewModel(    application: Application,
     private val _currentScreen = MutableStateFlow(AppScreen.WELCOME)
     val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
 
+    // Startup restoration lifecycle: holds RESTORING until the durable active-ride
+    // reference (Room) and/or Firestore have been checked, so navigation is never
+    // committed prematurely while an active ride is still being resolved.
+    private val _restorationState = MutableStateFlow(RestorationState.RESTORING)
+    val restorationState: StateFlow<RestorationState> = _restorationState.asStateFlow()
+
     // Tracks which ride was auto-rejoined this process so we don't auto-rejoin
     // again if the user navigates back to Welcome; cleared on process death so a
     // genuine restoration after backgrounding re-joins automatically (UX-014).
@@ -155,6 +175,23 @@ class RideViewModel(    application: Application,
 
     private val _userName = MutableStateFlow(authRepository.currentUser?.displayName ?: "Rider")
     val userName: StateFlow<String> = _userName.asStateFlow()
+
+    /** Manages the offline mesh network (BLE transport, mesh router, SOS/status relays). */
+    val meshManager = MeshManager(
+        localRiderId = userId.value,
+        localRiderName = userName.value
+    )
+    val repository = RideRepository(
+        locationTracker = locationTracker,
+        firestore = db,
+        sosMeshRelay = meshManager.sosRelay,
+        riderStatusMeshRelay = meshManager.riderStatusRelay
+    )
+
+    /** Whether BLE mesh is active (advertising + scanning). */
+    val isMeshActive: StateFlow<Boolean> = meshManager.isMeshActive
+    /** Number of currently connected mesh peers. */
+    val meshPeerCount: StateFlow<Int> = meshManager.connectedPeerCount
 
     private val _motorcycleModel = MutableStateFlow("Hunter 350")
     val motorcycleModel: StateFlow<String> = _motorcycleModel.asStateFlow()
@@ -194,6 +231,19 @@ class RideViewModel(    application: Application,
         }
         // The rider's saved places feed the Home screen and the place sheets.
         loadSavedAmenities()
+
+        // Phase 11 — wire mesh relays into repository so incoming mesh packets
+        // (SOS alerts, rider status) are routed to local state.
+        meshManager.bindRepository(repository)
+        meshManager.onRiderStatusReceived = { status ->
+            repository.onMeshRiderStatusReceived(status)
+        }
+        meshManager.start()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        meshManager.stop()
     }
 
     /**
@@ -935,27 +985,76 @@ class RideViewModel(    application: Application,
             }
         }
 
-        // Check for active uncompleted ride on initialization
+        // Session restoration — durable active-ride reference (Room) first, then
+        // Firestore secondary check. Restoration completes before _currentScreen is
+        // committed, so the user is never sent to Home prematurely (and never
+        // offered a "Create Ride" path that could duplicate an active ride).
         viewModelScope.launch {
+            var restoredRide: Ride? = null
+
             try {
-                repository.fetchActiveRideForUser()
+                // 1. Durable local reference first — survives process death and
+                //    covers members (not just leaders, unlike the Firestore
+                //    leaderId == uid query).
+                val reference = try {
+                    com.example.data.db.RideDatabase
+                        .getInstance(getApplication<Application>())
+                        .activeRideReferenceDao()
+                        .getReference()
+                } catch (_: Exception) {
+                    null
+                }
+
+                if (reference != null &&
+                    reference.status != RideStatus.COMPLETED.name &&
+                    reference.status != RideStatus.CANCELLED.name
+                ) {
+                    // Verify against the actual ride document — the reference
+                    // alone is not proof the ride is still active (it may have
+                    // completed on another device).
+                    val verified = repository.restoreActiveRide(reference.rideId)
+                    if (verified != null) {
+                        restoredRide = verified
+                    } else {
+                        // Terminal or missing: clear stale reference.
+                        try {
+                            com.example.data.db.RideDatabase
+                                .getInstance(getApplication<Application>())
+                                .activeRideReferenceDao()
+                                .clearAll()
+                        } catch (_: Exception) {}
+                    }
+                }
+
+                // 2. Firestore secondary check (leader-oriented query). Only
+                //    runs when no durable reference was found — covers leaders
+                //    on fresh installs where Room data was cleared.
+                if (restoredRide == null) {
+                    repository.fetchActiveRideForUser()
+                    val candidate = currentRide.value
+                    if (candidate != null &&
+                        candidate.status != RideStatus.COMPLETED &&
+                        candidate.status != RideStatus.CANCELLED) {
+                        restoredRide = candidate
+                    }
+                }
+
+                // 3. Commit navigation only after restoration resolves.
+                if (restoredRide != null &&
+                    autoRejoinedRideId != restoredRide.id &&
+                    _currentScreen.value == AppScreen.WELCOME) {
+                    autoRejoinedRideId = restoredRide.id
+                    rejoinActiveRide()
+                }
+
+                _restorationState.value = if (restoredRide != null) {
+                    RestorationState.RESTORED
+                } else {
+                    RestorationState.NONE
+                }
             } catch (e: Exception) {
                 android.util.Log.w("RideViewModel", "Failed restoring active ride: ${e.message}")
-            }
-
-            // UX-014: session restoration — after background/process death, if an
-            // active (non-terminal) ride was restored from Firestore, automatically
-            // rejoin it on the correct screen instead of leaving the user on Welcome
-            // with a manual rejoin button. Guarded so it only runs once per process
-            // and never overrides an in-progress navigation.
-            val restored = currentRide.value
-            if (restored != null &&
-                autoRejoinedRideId != restored.id &&
-                restored.status != RideStatus.COMPLETED &&
-                restored.status != RideStatus.CANCELLED &&
-                _currentScreen.value == AppScreen.WELCOME) {
-                autoRejoinedRideId = restored.id
-                rejoinActiveRide()
+                _restorationState.value = RestorationState.FAILED
             }
         }
 
@@ -1062,6 +1161,8 @@ class RideViewModel(    application: Application,
         // Stop active navigation progression and ride-specific foreground work.
         navEngine.reset()
         com.example.data.location.RideLocationService.stopService(getApplication())
+        MeshForegroundService.stopService(getApplication())
+        meshManager.start()
         repository.onSharedRideCompleted(rideId)
 
         // Established post-ride state (existing screen).
@@ -1621,6 +1722,11 @@ class RideViewModel(    application: Application,
         // preservation continue on the exact route the rider approved.
         _routeResult.value?.let { navEngine.setRoute(it) }
         repository.startRide()
+        // Hand mesh over to the foreground service so BLE advertising/scanning
+        // survives when the app is backgrounded during the ride. The ViewModel's
+        // MeshManager is stopped here; it restarts when the ride ends.
+        meshManager.stop()
+        MeshForegroundService.startService(getApplication(), userId.value, userName.value)
         com.example.data.location.RideLocationService.startService(getApplication())
         _currentScreen.value = AppScreen.LIVE_RIDE
     }
@@ -1632,6 +1738,8 @@ class RideViewModel(    application: Application,
             saveLeaderCompletedRideSummary(ride, memberList)
         }
         com.example.data.location.RideLocationService.stopService(getApplication())
+        MeshForegroundService.stopService(getApplication())
+        meshManager.start()
         _currentScreen.value = AppScreen.RIDE_SUMMARY
         viewModelScope.launch {
             val result = repository.endRide()
@@ -1663,6 +1771,8 @@ class RideViewModel(    application: Application,
 
     fun leaveRide() {
         com.example.data.location.RideLocationService.stopService(getApplication())
+        MeshForegroundService.stopService(getApplication())
+        meshManager.start()
         viewModelScope.launch {
             repository.leaveRide()
         }

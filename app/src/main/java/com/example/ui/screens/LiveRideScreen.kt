@@ -71,6 +71,7 @@ import com.example.ui.components.ReportIssueDialog
 import com.example.ui.components.UpdatedRouteSheet
 import com.example.ui.components.NavigationTripHud
 import com.example.ui.components.QuickMessageSheet
+import com.example.ui.components.MeshStatusChip
 import com.example.ui.components.RecentMessageToast
 import com.example.ui.components.RideMapCanvas
 import com.example.ui.components.RiderBottomSheet
@@ -104,6 +105,8 @@ fun LiveRideScreen(
     val selectedRider by viewModel.selectedRider.collectAsState()
     val activeSos by viewModel.activeSos.collectAsState()
     val recentMessages by viewModel.recentMessages.collectAsState()
+    val isMeshActive by viewModel.isMeshActive.collectAsState()
+    val meshPeerCount by viewModel.meshPeerCount.collectAsState()
 
     // Navigation & Routing states
     val navProgress by viewModel.navEngine.progress.collectAsState()
@@ -258,6 +261,13 @@ fun LiveRideScreen(
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
         ) {
+            // Mesh status chip — shows whether BLE mesh is active and peer count.
+            MeshStatusChip(
+                isMeshActive = isMeshActive,
+                peerCount = meshPeerCount,
+                modifier = Modifier.padding(bottom = 4.dp),
+            )
+
             TurnByTurnNavHeader(
                 currentStep = currentStep,
                 nextStep = nextStep,

@@ -6,6 +6,10 @@ import com.example.R
 import com.example.data.location.LocationTracker
 import com.example.data.location.LocationUpdate
 import com.example.data.location.StopDetector
+import com.example.data.model.ConnectionStatus
+import com.example.data.model.EmergencyState
+import com.example.data.model.HeadingSource
+import com.example.data.model.MovementState
 import com.example.data.model.LatLng
 import com.example.data.model.MemberStatus
 import com.example.data.model.NavigationStep
@@ -21,6 +25,7 @@ import com.example.data.model.RoutePlanCodec
 import com.example.data.model.RouteStop
 import com.example.data.model.RouteStopCodec
 import com.example.data.model.SosEvent
+import com.example.data.db.ActiveRideReferenceEntity
 import com.example.data.offline.mesh.RiderStatusMeshRelay
 import com.example.data.offline.mesh.SosMeshRelay
 import com.google.firebase.Timestamp
@@ -133,6 +138,104 @@ class RideRepository(
 
     private val roomDb: com.example.data.db.RideDatabase? by lazy {
         this.context?.let { com.example.data.db.RideDatabase.getInstance(it) }
+    }
+
+    /**
+     * Persists a durable on-device reference to the active ride so startup
+     * restoration can survive process death without a live Firestore query.
+     * Safe to call when no ride is active (writes a no-op tombstone is not needed;
+     * [clearActiveRideReference] handles removal).
+     */
+    private suspend fun persistActiveRideReference(ride: Ride) {
+        try {
+            roomDb?.activeRideReferenceDao()?.insertOrReplace(
+                ActiveRideReferenceEntity(
+                    rideId = ride.id,
+                    leaderId = ride.leaderId,
+                    status = ride.status.name,
+                    updatedAtMs = System.currentTimeMillis()
+                )
+            )
+        } catch (e: Exception) {
+            Log.w("RideRepository", "Failed persisting active ride reference: ${e.message}")
+        }
+    }
+
+    /** Clears the persisted active-ride reference (leave/end/terminal restore). */
+    private suspend fun clearActiveRideReference() {
+        try {
+            roomDb?.activeRideReferenceDao()?.clearAll()
+        } catch (e: Exception) {
+            Log.w("RideRepository", "Failed clearing active ride reference: ${e.message}")
+        }
+    }
+
+    /**
+     * Loads a single ride document by ID for one-time restoration. Unlike
+     * [fetchActiveRideForUser] (leader-only query), this works for any ride the
+     * user knows the ID of — including rides they joined as a member.
+     */
+    suspend fun fetchRideById(rideId: String): Ride? {
+        val fs = firestore ?: return null
+        return try {
+            val doc = fs.collection("rides").document(rideId).get().await()
+            if (!doc.exists()) return null
+            val rideName = doc.getString("name") ?: "Group Ride"
+            val startLocName = doc.getString("startLocationName") ?: "Start"
+            val destLocName = doc.getString("destinationName") ?: "Destination"
+            val startLat = doc.getDouble("startLat") ?: 18.5204
+            val startLng = doc.getDouble("startLng") ?: 73.8567
+            val destLat = doc.getDouble("destLat") ?: 18.7546
+            val destLng = doc.getDouble("destLng") ?: 73.4062
+            val leaderId = doc.getString("leaderId") ?: ""
+            val code = doc.getString("inviteCode") ?: ""
+            val statusStr = doc.getString("status") ?: "LOBBY"
+            val status = runCatching { RideStatus.valueOf(statusStr) }.getOrDefault(RideStatus.LOBBY)
+            val totalDist = doc.getDouble("totalDistanceMeters") ?: 0.0
+            val totalDur = doc.getDouble("totalDurationSeconds") ?: 0.0
+            val startedAt = doc.getLong("startedAtMs") ?: 0L
+
+            Ride(
+                id = rideId,
+                name = rideName,
+                startLocationName = startLocName,
+                destinationName = destLocName,
+                startLocation = LatLng(startLat, startLng),
+                destinationLocation = LatLng(destLat, destLng),
+                leaderId = leaderId,
+                inviteCode = code,
+                status = status,
+                initialPlannedDistanceMeters = doc.getDouble("initialPlannedDistanceMeters") ?: totalDist,
+                totalDistanceMeters = totalDist,
+                totalDurationSeconds = totalDur,
+                routeStops = RouteStopCodec.fromFirestore(doc.get("routeStops") as? List<*>),
+                routePlanVersion = doc.getLong("routePlanVersion") ?: 0L,
+                selectedRouteIndex = (doc.get("selectedRouteIndex") as? Number)?.toInt() ?: 0,
+                routeOptions = RoutePlanCodec.optionsFromFirestore(doc.get("routeOptions") as? List<*>),
+                startedAtMs = startedAt
+            )
+        } catch (e: Exception) {
+            Log.w("RideRepository", "fetchRideById($rideId) failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Restores an active ride by ID for startup recovery. Loads the ride document,
+     * verifies it is non-terminal, sets it as the current ride, persists the
+     * durable Room reference, and attaches live listeners — all in one call.
+     * Returns null if the ride does not exist or is in a terminal state.
+     */
+    internal suspend fun restoreActiveRide(rideId: String): Ride? {
+        val ride = fetchRideById(rideId) ?: return null
+        if (RideLifecyclePolicy.isTerminal(ride.status)) {
+            Log.w("RideRepository", "Refusing to restore terminal ride $rideId (status=${ride.status})")
+            return null
+        }
+        _currentRide.value = ride
+        persistActiveRideReference(ride)
+        listenToRide(rideId)
+        return ride
     }
 
     private var currentUserId: String = auth?.currentUser?.uid ?: "rider_unknown"
@@ -325,6 +428,7 @@ class RideRepository(
                     startedAtMs = restoredStartAt
                 )
                 _currentRide.value = restoredRide
+                persistActiveRideReference(restoredRide)
                 listenToRide(rideId)
                 restoredRide
             } else {
@@ -541,6 +645,7 @@ class RideRepository(
         // Immediately populate local state and active rides map
         activeLocalRides[inviteCode] = createdRide
         _currentRide.value = createdRide
+        persistActiveRideReference(createdRide)
         _members.value = listOf(leaderMember)
 
         val rideDoc = mapOf(
@@ -762,6 +867,7 @@ class RideRepository(
                 status = status
             )
             _currentRide.value = joinedRide
+            persistActiveRideReference(joinedRide)
             _joinError.value = null
 
             // Start live listeners for all riders, messages, and SOS events in this ride
@@ -1398,6 +1504,7 @@ class RideRepository(
                 status = RideStatus.COMPLETED,
                 elapsedDurationSeconds = actualElapsedSec
             )
+            persistActiveRideReference(_currentRide.value!!)
             sharedCompletedRideIds.add(ride.id)
             rideStartedAtMs = 0L
             _activeSos.value = null
@@ -1503,6 +1610,7 @@ class RideRepository(
         _recentMessage.value = null
         _messageSendError.value = false
         _currentRide.value = null
+        clearActiveRideReference()
         _activeSos.value = null
         _members.value = emptyList()
         _recentMessage.value = null
@@ -1943,7 +2051,42 @@ class RideRepository(
         if (status.riderId.isBlank()) return false
         // Ignore our own status updates echoed back through the mesh.
         if (status.riderId == currentUserId) return false
+        updateMeshRider(status)
         return true
+    }
+
+    /**
+     * Adds or updates a rider in the local members list from a mesh status update.
+     * Mesh-only riders are marked DISCONNECTED (no internet) so the UI can
+     * distinguish them from Firestore-synced riders.
+     */
+    private fun updateMeshRider(status: RiderStatusMeshRelay.ParsedRiderStatus) {
+        val existing = _members.value.find { it.id == status.riderId }
+        val member = RiderMember(
+            id = status.riderId,
+            name = status.riderName,
+            role = RideRole.MEMBER,
+            status = status.status,
+            movementState = when {
+                status.status == MemberStatus.STOPPED -> MovementState.STOPPED
+                status.status == MemberStatus.RIDING -> MovementState.RIDING
+                else -> MovementState.UNKNOWN
+            },
+            emergencyState = if (status.status == MemberStatus.EMERGENCY) EmergencyState.ACTIVE else EmergencyState.NONE,
+            connectionStatus = ConnectionStatus.DISCONNECTED,
+            location = status.location,
+            speedKmh = status.speedKmh,
+            headingDeg = status.headingDeg,
+            headingSource = if (status.headingDeg != null) HeadingSource.GNSS_COURSE else HeadingSource.UNAVAILABLE,
+            accuracyMeters = status.accuracyMeters,
+            lastUpdatedMs = status.timestampMs,
+            isCurrentUser = false,
+        )
+        if (existing != null) {
+            _members.value = _members.value.map { if (it.id == status.riderId) member else it }
+        } else {
+            _members.value = _members.value + member
+        }
     }
 
     fun cleanup() {
