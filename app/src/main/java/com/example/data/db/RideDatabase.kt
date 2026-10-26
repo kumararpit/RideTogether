@@ -19,9 +19,11 @@ import com.example.data.map.tile.TileEntity
         ActiveRideTelemetryEntity::class,
         RecentPlaceEntity::class,
         SavedPlaceEntity::class,
-        TileEntity::class
+        TileEntity::class,
+        OfflineMessageEntity::class,
+        PeerSessionEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 @TypeConverters(com.example.data.amenities.AmenityTypeConverter::class)
@@ -34,6 +36,8 @@ abstract class RideDatabase : RoomDatabase() {
     abstract fun recentPlaceDao(): RecentPlaceDao
     abstract fun savedPlaceDao(): SavedPlaceDao
     abstract fun tileDao(): TileDao
+    abstract fun offlineMessageDao(): OfflineMessageDao
+    abstract fun peerSessionDao(): PeerSessionDao
 
     companion object {
         @Volatile
@@ -157,6 +161,41 @@ abstract class RideDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Additive migration: offline mesh store-and-forward queue.
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `offline_messages` (
+                        `id` TEXT NOT NULL,
+                        `sender_id` BLOB NOT NULL,
+                        `recipient_id` BLOB NOT NULL,
+                        `msg_type` INTEGER NOT NULL,
+                        `ttl` INTEGER NOT NULL,
+                        `timestamp_ms` INTEGER NOT NULL,
+                        `payload` BLOB NOT NULL,
+                        `signature` BLOB NOT NULL,
+                        `enqueued_at_ms` INTEGER NOT NULL,
+                        `delivered` INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(`id`)
+                    )
+                """.trimIndent())
+
+                // Additive migration: peer session tracking.
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `peer_sessions` (
+                        `peer_id` BLOB NOT NULL,
+                        `x25519_public_key` BLOB NOT NULL,
+                        `ed25519_public_key` BLOB NOT NULL,
+                        `first_seen_ms` INTEGER NOT NULL,
+                        `last_seen_ms` INTEGER NOT NULL,
+                        `trusted` INTEGER NOT NULL DEFAULT 0,
+                        `connection_state` TEXT NOT NULL DEFAULT 'unknown',
+                        PRIMARY KEY(`peer_id`)
+                    )
+                """.trimIndent())
+            }
+        }
+
         fun getInstance(context: Context): RideDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -164,7 +203,7 @@ abstract class RideDatabase : RoomDatabase() {
                     RideDatabase::class.java,
                     "ridetogether.db"
                 )
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

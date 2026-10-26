@@ -21,6 +21,8 @@ import com.example.data.model.RoutePlanCodec
 import com.example.data.model.RouteStop
 import com.example.data.model.RouteStopCodec
 import com.example.data.model.SosEvent
+import com.example.data.offline.mesh.RiderStatusMeshRelay
+import com.example.data.offline.mesh.SosMeshRelay
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentSnapshot
@@ -62,7 +64,17 @@ class RideRepository(
      * acknowledgment, resolution) can be exercised offline - the offline suite
      * must never depend on a live backend or on network state.
      */
-    val sosBackend: SosDeliveryBackend? = null
+    val sosBackend: SosDeliveryBackend? = null,
+    /**
+     * Optional mesh relay for delivering SOS alerts over BLE when
+     * internet connectivity is unavailable.
+     */
+    val sosMeshRelay: SosMeshRelay? = null,
+    /**
+     * Optional mesh relay for broadcasting rider status/location updates
+     * over BLE when internet connectivity is unavailable.
+     */
+    val riderStatusMeshRelay: RiderStatusMeshRelay? = null
 ) {
     // Secondary constructor for convenience resolving default database
     constructor(context: Context, locationTracker: LocationTracker) : this(
@@ -456,6 +468,15 @@ class RideRepository(
                     ?.collection("riders")?.document(currentUid)
                     ?.set(riderMap, SetOptions.merge())
                     ?.await()
+                riderStatusMeshRelay?.sendRiderStatusUpdate(
+                    status = finalStatus,
+                    location = loc.latLng,
+                    speedKmh = loc.speedKmh,
+                    headingDeg = loc.headingDeg,
+                    accuracyMeters = loc.accuracyMeters,
+                    timestampMs = loc.timestampMs,
+                    sequenceNumber = seq,
+                )
             } catch (e: Exception) {
                 handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/riders/$currentUid")
             }
@@ -1721,6 +1742,7 @@ class RideRepository(
                     .set(doc)
                     .await()
             }
+            sosMeshRelay?.sendSos(event)
             Result.success(event)
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, "rides/$activeRideId/sos/$sosId")
@@ -1741,6 +1763,8 @@ class RideRepository(
         if (currentSos != null && currentSos.id == sosId && !currentSos.isResolved && !currentSos.acknowledgedBy.contains(currentUid)) {
             _activeSos.value = currentSos.copy(acknowledgedBy = currentSos.acknowledgedBy + currentUid)
         }
+
+        sosMeshRelay?.sendSosAck(sosId, currentUid)
 
         repositoryScope.launch {
             val sosRef = firestore?.collection("rides")?.document(activeRideId)?.collection("sos")?.document(sosId)
@@ -1834,6 +1858,7 @@ class RideRepository(
                         "resolvedAtMs" to System.currentTimeMillis()
                     )
                 )
+                sosMeshRelay?.sendSosResolve(targetEvent.id)
                 Result.success(Unit)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -1876,6 +1901,7 @@ class RideRepository(
             }
         }
         return if (lastError == null) {
+            sosMeshRelay?.sendSosResolve(targetEvent.id)
             Result.success(Unit)
         } else {
             handleFirestoreError(lastError, OperationType.UPDATE, "rides/$activeRideId/sos/${targetEvent.id}")
@@ -1892,6 +1918,32 @@ class RideRepository(
         repositoryScope.launch {
             resolveSosInternal()
         }
+    }
+
+    /**
+     * Handles an SOS alert received from a remote peer over the mesh.
+     * Updates local state so the rider sees the emergency banner, unless
+     * this SOS was already resolved or suppressed on this device.
+     */
+    fun onMeshSosReceived(event: SosEvent) {
+        if (event.id.isBlank()) return
+        if (suppressedSosIds.isSuppressed(event.id)) return
+        val current = _activeSos.value
+        if (current != null && current.id == event.id && current.isResolved) return
+        _activeSos.value = event
+        _currentRiderStatus.value = MemberStatus.EMERGENCY
+    }
+
+    /**
+     * Handles a rider status/location update received from a remote peer over the mesh.
+     * The caller (e.g. RideViewModel) is responsible for applying the parsed status
+     * to local rider state — this method only validates and passes it through.
+     */
+    fun onMeshRiderStatusReceived(status: RiderStatusMeshRelay.ParsedRiderStatus): Boolean {
+        if (status.riderId.isBlank()) return false
+        // Ignore our own status updates echoed back through the mesh.
+        if (status.riderId == currentUserId) return false
+        return true
     }
 
     fun cleanup() {
