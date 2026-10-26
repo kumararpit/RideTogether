@@ -2,6 +2,7 @@ package com.example.data.map.tile
 
 import androidx.room.ColumnInfo
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /**
@@ -16,7 +17,8 @@ import androidx.room.PrimaryKey
  */
 @Entity(
     tableName = "tile_cache",
-    primaryKeys = ["zoom", "x", "y"]
+    primaryKeys = ["zoom", "x", "y"],
+    indices = [Index(value = ["expires_at_ms"], name = "ix_tile_cache_expiration")]
 )
 data class TileEntity(
     @ColumnInfo(name = "zoom") val zoom: Int,

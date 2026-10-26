@@ -87,7 +87,7 @@ fun RouteAlternativesSheet(
                     }
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "Route alternatives",
+                        text = if (options.size == 1) "Recommended route" else "Route alternatives",
                         color = TextPrimary,
                         fontSize = 19.sp,
                         fontWeight = FontWeight.SemiBold

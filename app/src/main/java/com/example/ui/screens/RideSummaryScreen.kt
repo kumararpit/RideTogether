@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -103,10 +104,12 @@ fun RideSummaryScreen(
 
     // Metrics calculations from real ride data
     val distanceMeters = ride?.finalSummaryDistanceMeters ?: 0.0
+    val isActualDuration = (ride?.elapsedDurationSeconds ?: 0.0) > 30.0
     val durationSeconds = when {
-        (ride?.elapsedDurationSeconds ?: 0.0) > 30.0 -> ride!!.elapsedDurationSeconds
+        isActualDuration -> ride!!.elapsedDurationSeconds
         else -> ride?.totalDurationSeconds ?: 0.0
     }
+    val durationLabel = if (isActualDuration) "Actual Duration" else "Planned Duration"
 
     val distKm = if (distanceMeters > 0) {
         distanceMeters / 1000.0
@@ -293,7 +296,29 @@ fun RideSummaryScreen(
                         distance = formattedDist,
                         duration = formattedDuration,
                         avgSpeed = formattedSpeed,
-                        packSize = ridersLabel
+                        packSize = ridersLabel,
+                        durationLabel = durationLabel
+                    )
+                }
+            }
+
+            // 5. Route preview map — stats sit above the map so the rider
+            //    can see the completed route without opening a modal.
+            item {
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = 20.dp)
+                        .height(170.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                ) {
+                    RideMapCanvas(
+                        route = ride?.routePoints ?: emptyList(),
+                        members = members,
+                        selectedRider = null,
+                        onSelectRider = {},
+                        isFollowRiderMode = false,
+                        onFollowRiderChange = {},
+                        initialStartLocation = ride?.startLocation
                     )
                 }
             }
@@ -380,7 +405,8 @@ fun RideSummaryScreen(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(640.dp)
+                            .heightIn(min = 400.dp, max = 700.dp)
+                            .navigationBarsPadding()
                             .padding(bottom = 16.dp)
                     ) {
                         Text(
@@ -655,7 +681,8 @@ private fun RideMetricsGrid(
     distance: String,
     duration: String,
     avgSpeed: String,
-    packSize: String
+    packSize: String,
+    durationLabel: String = "Total Duration"
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(
@@ -676,7 +703,7 @@ private fun RideMetricsGrid(
                 iconBg = Color(0xFF14532D),
                 iconTint = AccentGreen,
                 value = duration,
-                label = "Total Duration"
+                label = durationLabel
             )
         }
 

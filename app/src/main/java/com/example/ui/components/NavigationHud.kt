@@ -405,7 +405,14 @@ fun NavigationTripHud(
                         MetricCell(
                             icon = Icons.Default.Timer,
                             value = remainingDuration.ifBlank { "—" },
-                            label = "ETA $etaTime",
+                            label = "Time remaining",
+                            tint = StatusRidingGreen,
+                            modifier = Modifier.weight(1f)
+                        )
+                        MetricCell(
+                            icon = Icons.Default.Timer,
+                            value = etaTime.ifBlank { "—" },
+                            label = "ETA",
                             tint = StatusRidingGreen,
                             modifier = Modifier.weight(1f)
                         )
@@ -452,7 +459,7 @@ fun NavigationTripHud(
                             )
                             if (totalTripDistanceAndDuration.isNotBlank()) {
                                 Text(
-                                    text = totalTripDistanceAndDuration,
+                                    text = "Planned · $totalTripDistanceAndDuration",
                                     color = TextTertiary,
                                     fontSize = 11.sp,
                                     maxLines = 1

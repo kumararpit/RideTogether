@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -56,6 +57,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.amenities.AmenityEntity
@@ -191,6 +194,12 @@ fun LiveRideScreen(
     }
 
     Box(modifier = modifier.fillMaxSize()) {
+        // Back during a live ride offers to end or leave the ride
+        // (leader ends, member leaves), matching the navigation menu.
+        BackHandler {
+            showEndRideConfirm = true
+        }
+
         // 1. Live Map View — dominant surface filling full screen
         RideMapCanvas(
             route = viewModel.getRoutePoints(),
@@ -321,7 +330,8 @@ fun LiveRideScreen(
                     color = Color(0xFF101318),
                     shape = CircleShape,
                     border = BorderStroke(1.5.dp, CardBorderColor),
-                    tonalElevation = 6.dp
+                    tonalElevation = 6.dp,
+                    modifier = Modifier.semantics { contentDescription = "Current speed ${currentUser.speedKmh.toInt()} km/h" }
                 ) {
                     Box(
                         modifier = Modifier
@@ -353,7 +363,8 @@ fun LiveRideScreen(
                     color = Color.White,
                     shape = CircleShape,
                     border = BorderStroke(2.5.dp, Color(0xFFDC2626)),
-                    tonalElevation = 6.dp
+                    tonalElevation = 6.dp,
+                    modifier = Modifier.semantics { contentDescription = "Speed limit 60 km/h" }
                 ) {
                     Box(
                         modifier = Modifier.size(32.dp),
@@ -378,8 +389,8 @@ fun LiveRideScreen(
         ) {
             val userLocationUpdate by viewModel.locationTracker.currentLocation.collectAsState()
 
-            // Selected Rider quick-detail card
-            if (selectedRider != null) {
+            // Selected Rider quick-detail card — hidden on arrival (replaced by arrival overlay)
+            if (selectedRider != null && !navProgress.isArrived) {
                 val rider = selectedRider!!
                 val myLoc = currentUser?.location ?: userLocationUpdate?.latLng
                 val gapStr = if (myLoc != null && !rider.isCurrentUser) {
@@ -561,7 +572,7 @@ fun LiveRideScreen(
                                 )
                                 TripSummaryChip(
                                     icon = Icons.Default.Timer,
-                                    label = "Duration",
+                                    label = "Actual duration",
                                     value = formatDuration(currentRide?.elapsedDurationSeconds ?: 0.0)
                                 )
                                 TripSummaryChip(
@@ -603,7 +614,7 @@ fun LiveRideScreen(
             val nextStop = remember(activeRoute, navProgress.currentLegIndex) {
                 activeRoute?.stops?.getOrNull(navProgress.currentLegIndex + 1)
             }
-            if (activeRoute != null && activeRoute.legs.size > 1 && nextStop != null) {
+            if (!navProgress.isArrived && activeRoute != null && activeRoute.legs.size > 1 && nextStop != null) {
                 val legIndex = navProgress.currentLegIndex.coerceIn(0, activeRoute.legs.lastIndex)
                 val legDistance = viewModel.getRemainingLegDistanceMeters()
                 Surface(
@@ -655,8 +666,9 @@ fun LiveRideScreen(
             }
 
             // Trip HUD (ETA, distance, traveled, route info, tracking toggle)
-            // Stays anchored at bottom
-            NavigationTripHud(
+            // Hidden on arrival — replaced by the arrival overlay
+            if (!navProgress.isArrived) {
+                NavigationTripHud(
                 destinationName = currentRide?.destinationName ?: "Lonavala",
                 startLocationName = currentRide?.startLocationName ?: "Pune",
                 remainingDistance = remainingDistText,
@@ -670,6 +682,7 @@ fun LiveRideScreen(
                 onEndNavigation = { showEndRideConfirm = true },
                 modifier = Modifier
             )
+            }
 
             // Tap-to-Reveal Primary Bottom Action Bar: Controls | Chat | SOS
             AnimatedVisibility(
@@ -851,7 +864,8 @@ fun LiveRideScreen(
                 .clickable {
                     showAddStopSheet = true
                 }
-                .testTag("add_stop_button"),
+                .testTag("add_stop_button")
+                .semantics { contentDescription = "Add a stop" },
             color = Color(0xFF101318),
             shape = RoundedCornerShape(12.dp),
             border = BorderStroke(1.dp, CardBorderColor)
@@ -1095,7 +1109,10 @@ private fun TripSummaryChip(
     label: String,
     value: String
 ) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.semantics { contentDescription = "$label $value" }
+    ) {
         Icon(
             imageVector = icon,
             contentDescription = null,

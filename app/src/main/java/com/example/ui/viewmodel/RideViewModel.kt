@@ -16,6 +16,7 @@ import com.example.data.model.LatLng
 import com.example.data.model.MemberStatus
 import com.example.data.model.QuickMessageType
 import com.example.data.model.Ride
+import com.example.data.model.RideStatus
 import com.example.data.model.RiderMember
 import com.example.data.model.RouteOption
 import com.example.data.model.RouteOptionSummary
@@ -143,6 +144,11 @@ class RideViewModel(    application: Application,
     // Navigation and screen state
     private val _currentScreen = MutableStateFlow(AppScreen.WELCOME)
     val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
+
+    // Tracks which ride was auto-rejoined this process so we don't auto-rejoin
+    // again if the user navigates back to Welcome; cleared on process death so a
+    // genuine restoration after backgrounding re-joins automatically (UX-014).
+    private var autoRejoinedRideId: String? = null
 
     private val _userId = MutableStateFlow(authRepository.currentUser?.uid ?: "user_rider")
     val userId: StateFlow<String> = _userId.asStateFlow()
@@ -935,6 +941,21 @@ class RideViewModel(    application: Application,
                 repository.fetchActiveRideForUser()
             } catch (e: Exception) {
                 android.util.Log.w("RideViewModel", "Failed restoring active ride: ${e.message}")
+            }
+
+            // UX-014: session restoration — after background/process death, if an
+            // active (non-terminal) ride was restored from Firestore, automatically
+            // rejoin it on the correct screen instead of leaving the user on Welcome
+            // with a manual rejoin button. Guarded so it only runs once per process
+            // and never overrides an in-progress navigation.
+            val restored = currentRide.value
+            if (restored != null &&
+                autoRejoinedRideId != restored.id &&
+                restored.status != RideStatus.COMPLETED &&
+                restored.status != RideStatus.CANCELLED &&
+                _currentScreen.value == AppScreen.WELCOME) {
+                autoRejoinedRideId = restored.id
+                rejoinActiveRide()
             }
         }
 

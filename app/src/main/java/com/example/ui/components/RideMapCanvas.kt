@@ -1134,10 +1134,13 @@ fun RideMapCanvas(
                             }
                         } else {
                             // Legacy preview (lobby / summary / single-destination): the
-                            // whole route is one amber band.
+                            // whole route uses RouteBlue so the route color matches the
+                            // route alternatives and add-stop previews (UX-005 map styling
+                            // unification). AmberPrimary is reserved for the completed
+                            // portion in active navigation.
                             drawRouteBand(
                                 path = buildRoutePath(kept),
-                                coreColor = AmberPrimary,
+                                coreColor = RouteBlue,
                                 casingColor = RouteCasing,
                                 streakColor = RouteStreak
                             )

@@ -36,7 +36,9 @@ enum class RideRole {
 enum class QuickMessageType(val label: String, val icon: String) {
     STOPPED("Stopped", "🛑"),
     NEED_FUEL("Need fuel", "⛽"),
-    NEED_HELP("Need help", "🆘"),
+    // UX-010: 🙋 (attention/help) rather than 🆘 (SOS) so "Need help" is read as a
+    // routine broadcast, distinct from the emergency SOS flow.
+    NEED_HELP("Need help", "🙋"),
     REGROUP("Regroup", "🤝"),
     WAIT_FOR_ME("Wait for me", "⏳"),
     SLOW_DOWN("Slow down", "⚠️"),
