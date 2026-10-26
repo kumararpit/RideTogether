@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Skill(watch:watch)",
+      "WebFetch(domain:reamcp.dev)",
+      "Bash(npm --version)"
+    ]
+  },
+  "enabledPlugins": {
+    "watch@claude-video": true
+  }
+}

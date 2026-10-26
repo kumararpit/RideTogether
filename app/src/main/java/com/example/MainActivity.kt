@@ -35,6 +35,7 @@ import com.example.ui.screens.WelcomeScreen
 import com.example.ui.theme.RideTogetherTheme
 import com.example.ui.theme.SlateDark900
 import com.example.ui.viewmodel.AppScreen
+import com.example.ui.viewmodel.RestorationState
 import com.example.ui.viewmodel.RideViewModel
 
 class MainActivity : ComponentActivity() {
@@ -108,6 +109,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun RideTogetherApp(viewModel: RideViewModel) {
     val currentScreen by viewModel.currentScreen.collectAsState()
+    val restorationState by viewModel.restorationState.collectAsState()
     val userName by viewModel.userName.collectAsState()
     val motorcycleModel by viewModel.motorcycleModel.collectAsState()
     val ride by viewModel.currentRide.collectAsState()
@@ -130,9 +132,20 @@ fun RideTogetherApp(viewModel: RideViewModel) {
         }
     }
 
-    when (currentScreen) {
-        AppScreen.WELCOME -> {
-            WelcomeScreen(
+    // While startup restoration is in flight, hold on a splash so the user is
+    // never sent to Home prematurely (and never offered a "Create Ride" path
+    // that could duplicate an active ride).
+    if (restorationState == RestorationState.RESTORING) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            CircularProgressIndicator(color = AmberPrimary)
+        }
+    } else {
+        when (currentScreen) {
+            AppScreen.WELCOME -> {
+                WelcomeScreen(
                 currentName = userName,
                 onNameChange = { viewModel.setUserName(it) },
                 currentMotorcycle = motorcycleModel,
@@ -266,6 +279,7 @@ fun RideTogetherApp(viewModel: RideViewModel) {
                 members = members,
                 onBackToHome = { viewModel.leaveRide() }
             )
+        }
         }
     }
 }
