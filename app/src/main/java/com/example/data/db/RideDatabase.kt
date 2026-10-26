@@ -21,7 +21,7 @@ import com.example.data.map.tile.TileEntity
         SavedPlaceEntity::class,
         TileEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 @TypeConverters(com.example.data.amenities.AmenityTypeConverter::class)
