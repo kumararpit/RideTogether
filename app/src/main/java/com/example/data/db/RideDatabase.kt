@@ -24,7 +24,7 @@ import com.example.data.map.tile.TileEntity
         OfflineMessageEntity::class,
         PeerSessionEntity::class
     ],
-    version = 11,
+    version = 12,
     exportSchema = false
 )
 @TypeConverters(com.example.data.amenities.AmenityTypeConverter::class)
@@ -215,6 +215,26 @@ abstract class RideDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Recreate peer_sessions to match PeerSessionEntity schema
+                // exactly (fixes schema hash mismatch from earlier migrations).
+                db.execSQL("DROP TABLE IF EXISTS `peer_sessions`")
+                db.execSQL("""
+                    CREATE TABLE `peer_sessions` (
+                        `peer_id` BLOB NOT NULL,
+                        `x25519_public_key` BLOB NOT NULL,
+                        `ed25519_public_key` BLOB NOT NULL,
+                        `first_seen_ms` INTEGER NOT NULL,
+                        `last_seen_ms` INTEGER NOT NULL,
+                        `trusted` INTEGER NOT NULL DEFAULT 0,
+                        `connection_state` TEXT NOT NULL DEFAULT 'unknown',
+                        PRIMARY KEY(`peer_id`)
+                    )
+                """.trimIndent())
+            }
+        }
+
         fun getInstance(context: Context): RideDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -222,7 +242,7 @@ abstract class RideDatabase : RoomDatabase() {
                     RideDatabase::class.java,
                     "ridetogether.db"
                 )
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

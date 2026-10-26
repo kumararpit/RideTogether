@@ -35,5 +35,5 @@ data class PeerSessionEntity(
     @ColumnInfo(name = "trusted", defaultValue = "0") val trusted: Boolean = false,
 
     /** Current connection state: "connected", "disconnected", or "unknown". */
-    @ColumnInfo(name = "connection_state", defaultValue = "\"unknown\"") val connectionState: String = "unknown",
+    @ColumnInfo(name = "connection_state", defaultValue = "'unknown'") val connectionState: String = "unknown",
 )
