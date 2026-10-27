@@ -22,9 +22,10 @@ import com.example.data.map.tile.TileEntity
         SavedPlaceEntity::class,
         TileEntity::class,
         OfflineMessageEntity::class,
-        PeerSessionEntity::class
+        PeerSessionEntity::class,
+        SyncOutboxEntity::class
     ],
-    version = 12,
+    version = 13,
     exportSchema = false
 )
 @TypeConverters(com.example.data.amenities.AmenityTypeConverter::class)
@@ -40,6 +41,7 @@ abstract class RideDatabase : RoomDatabase() {
     abstract fun tileDao(): TileDao
     abstract fun offlineMessageDao(): OfflineMessageDao
     abstract fun peerSessionDao(): PeerSessionDao
+    abstract fun syncOutboxDao(): SyncOutboxDao
 
     companion object {
         @Volatile
@@ -235,6 +237,39 @@ abstract class RideDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Additive migration: sync outbox for offline-first Supabase writes.
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `sync_outbox` (
+                        `id` TEXT NOT NULL,
+                        `user_id` TEXT NOT NULL,
+                        `entity_type` TEXT NOT NULL,
+                        `entity_id` TEXT NOT NULL,
+                        `op_type` TEXT NOT NULL,
+                        `idempotency_key` TEXT NOT NULL,
+                        `payload` TEXT NOT NULL,
+                        `created_at_ms` INTEGER NOT NULL,
+                        `updated_at_ms` INTEGER NOT NULL,
+                        `retry_count` INTEGER NOT NULL DEFAULT 0,
+                        `max_retries` INTEGER NOT NULL DEFAULT 7,
+                        `status` TEXT NOT NULL DEFAULT 'PENDING',
+                        `last_error` TEXT,
+                        `next_retry_at_ms` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                """.trimIndent())
+                db.execSQL("""
+                    CREATE INDEX IF NOT EXISTS `idx_sync_outbox_user_status_created`
+                    ON `sync_outbox` (`user_id`, `status`, `created_at_ms`)
+                """.trimIndent())
+                db.execSQL("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS `idx_sync_outbox_idempotency_key`
+                    ON `sync_outbox` (`idempotency_key`)
+                """.trimIndent())
+            }
+        }
+
         fun getInstance(context: Context): RideDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -242,7 +277,7 @@ abstract class RideDatabase : RoomDatabase() {
                     RideDatabase::class.java,
                     "ridetogether.db"
                 )
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

@@ -49,11 +49,10 @@ class ActiveRideRestoreTest {
         Dispatchers.resetMain()
     }
 
-    /** Builds a repository with no Firestore (offline) so persistence paths are tested in isolation. */
+    /** Builds a repository with no backend (offline) so persistence paths are tested in isolation. */
     private fun repository(): RideRepository {
         return RideRepository(
             locationTracker = LocationTracker(app),
-            firestore = null,
             context = app
         )
     }
@@ -119,6 +118,5 @@ class ActiveRideRestoreTest {
         val stored = db.activeRideReferenceDao().getReference()
         assertEquals("ride_abc", stored!!.rideId)
         assertEquals(RideStatus.ACTIVE.name, stored.status)
-        db.close()
     }
 }

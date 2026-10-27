@@ -25,6 +25,10 @@ android {
     buildConfigField("String", "FIREBASE_WEB_CLIENT_ID", "\"\"")
     buildConfigField("String", "FIRESTORE_DATABASE_ID", "\"(default)\"")
     buildConfigField("String", "FIREBASE_PROJECT_ID", "\"ridetogether-f558a\"")
+    val supabaseUrl = project.findProperty("SUPABASE_URL") ?: "YOUR_SUPABASE_URL"
+    val supabaseAnonKey = project.findProperty("SUPABASE_ANON_KEY") ?: "YOUR_SUPABASE_ANON_KEY"
+    buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
+    buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
   }
 
   signingConfigs {
@@ -112,8 +116,9 @@ dependencies {
   implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
-  // Firestore:
-  implementation(libs.firebase.firestore)
+  // Supabase — free cloud database + realtime, replaces Firestore for data:
+  // Uses okhttp (already a dependency) to call Supabase REST API directly.
+  // No extra client library needed.
 
   // Firebase Auth and Google Sign-In via Credential Manager:
   implementation(libs.firebase.auth)

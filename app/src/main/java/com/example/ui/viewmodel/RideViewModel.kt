@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
 import com.example.R
+import com.example.data.db.RideDatabase
 import com.example.data.firebase.AuthRepository
 import com.example.data.firebase.RideRepository
 import com.example.data.location.LocationTracker
@@ -12,6 +13,8 @@ import com.example.data.location.OsrmRoutingService
 import com.example.data.location.RouteGeometry
 import com.example.data.location.RouteRequestException
 import com.example.data.place.PhotonPlaceSearchRepository
+import com.example.data.repository.RideLocalDataSource
+import com.example.data.repository.RoomRideLocalDataSource
 import com.example.data.model.LatLng
 import com.example.data.model.MemberStatus
 import com.example.data.model.QuickMessageType
@@ -24,13 +27,14 @@ import com.example.data.model.RouteResult
 import com.example.data.model.RouteStop
 import com.example.data.model.RouteStopRole
 import com.google.firebase.auth.FirebaseUser
-import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import com.example.data.offline.mesh.MeshForegroundService
 import com.example.data.offline.mesh.MeshManager
+import com.example.data.supabase.SupabaseClient
+import com.example.data.supabase.SupabaseRideRepository
 import com.example.data.map.MapLighting
 import com.example.data.map.MapThemeController
 import com.example.data.map.MapThemeMode
@@ -38,6 +42,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import java.util.Locale
 
 enum class AppScreen {
@@ -137,13 +142,6 @@ class RideViewModel(    application: Application,
     private var lastRerouteTimestampMs = 0L
     private val REROUTE_COOLDOWN_MS = 15000L
 
-    private val db: FirebaseFirestore? = try {
-        FirebaseFirestore.getInstance()
-    } catch (e: Exception) {
-        android.util.Log.e("RideViewModel", "Error initializing FirebaseFirestore: ${e.message}", e)
-        null
-    }
-
     val authRepository = AuthRepository()
 
     val currentUser: StateFlow<FirebaseUser?> = authRepository.authStateFlow()
@@ -181,11 +179,23 @@ class RideViewModel(    application: Application,
         localRiderId = userId.value,
         localRiderName = userName.value
     )
+    val supabaseRepository: SupabaseRideRepository? by lazy {
+        if (SupabaseClient.isInitialized) {
+            SupabaseRideRepository(SupabaseClient.instance, application)
+        } else {
+            null
+        }
+    }
+    /** Local data source (Room) backing the sync outbox for offline-first Supabase writes. */
+    val localDataSource: RideLocalDataSource = RoomRideLocalDataSource(
+        database = RideDatabase.getInstance(application)
+    )
     val repository = RideRepository(
         locationTracker = locationTracker,
-        firestore = db,
         sosMeshRelay = meshManager.sosRelay,
-        riderStatusMeshRelay = meshManager.riderStatusRelay
+        riderStatusMeshRelay = meshManager.riderStatusRelay,
+        remoteDataSource = supabaseRepository,
+        localDataSource = localDataSource
     )
 
     /** Whether BLE mesh is active (advertising + scanning). */
@@ -1003,6 +1013,19 @@ class RideViewModel(    application: Application,
                         .getReference()
                 } catch (_: Exception) {
                     null
+                }
+
+                // Guarantee a suspension point before mutating restoration state so
+                // that observers see RESTORING before the async init proceeds.
+                yield()
+
+                // Never auto-restore a ride for a signed-out / never-logged-in user.
+                // Firebase Auth persists the session across relaunches, so without
+                // this check a stale Room reference could surface a ride to someone
+                // who never signed in this session.
+                if (authRepository.currentUser == null) {
+                    _restorationState.value = RestorationState.NONE
+                    return@launch
                 }
 
                 if (reference != null &&

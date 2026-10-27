@@ -7,6 +7,7 @@ import coil.ImageLoaderFactory
 import coil.memory.MemoryCache
 import com.example.data.offline.ble.AndroidBleTransport
 import com.example.data.offline.ble.BleTransportFactory
+import com.example.data.supabase.SupabaseClient
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
 
@@ -15,6 +16,7 @@ class RideTogetherApplication : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         initFirebase()
+        SupabaseClient.init(this)
         // Register the Android BLE transport factory so MeshManager can create
         // a platform transport for offline mesh advertising/scanning.
         BleTransportFactory.register { AndroidBleTransport(this) }

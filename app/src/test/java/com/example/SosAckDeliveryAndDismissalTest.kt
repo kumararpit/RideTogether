@@ -75,7 +75,6 @@ class SosAckDeliveryAndDismissalTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val repo = RideRepository(
             locationTracker = LocationTracker(context),
-            firestore = null,
             context = context,
             sosBackend = InMemorySosBackend()
         )

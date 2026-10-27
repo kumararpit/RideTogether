@@ -47,6 +47,24 @@ enum class QuickMessageType(val label: String, val icon: String) {
     EMERGENCY("Emergency", "🚨")
 }
 
+/**
+ * Membership lifecycle state of a rider within a ride. Distinct from
+ * [MemberStatus] (RIDING/STOPPED/EMERGENCY/OFFLINE), which describes the
+ * rider's current trip activity. [MembershipStatus] is the authoritative
+ * server-side authorization boundary: only [ACTIVE] members may read or
+ * write ride communication channels.
+ */
+enum class MembershipStatus {
+    /** Current, authorized participant; reads/writes allowed at the rules boundary. */
+    ACTIVE,
+    /** Rider left the ride; rider doc retained as a tombstone, access denied at the boundary. */
+    LEFT,
+    /** Rider removed by the ride leader; access denied at the boundary. */
+    REMOVED,
+    /** Rider banned from the ride; access denied at the boundary. */
+    BANNED
+}
+
 data class RiderMember(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
@@ -54,6 +72,7 @@ data class RiderMember(
     val avatarColorHex: Long = 0xFFFF9800,
     val role: RideRole = RideRole.MEMBER,
     val status: MemberStatus = MemberStatus.RIDING,
+    val membershipStatus: MembershipStatus = MembershipStatus.ACTIVE,
     val movementState: MovementState = MovementState.RIDING,
     val emergencyState: EmergencyState = EmergencyState.NONE,
     val connectionStatus: ConnectionStatus = ConnectionStatus.CONNECTED,

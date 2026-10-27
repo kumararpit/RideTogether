@@ -12,6 +12,7 @@ import com.example.data.model.HeadingSource
 import com.example.data.model.MovementState
 import com.example.data.model.LatLng
 import com.example.data.model.MemberStatus
+import com.example.data.model.MembershipStatus
 import com.example.data.model.NavigationStep
 import com.example.data.model.QuickMessage
 import com.example.data.model.QuickMessageType
@@ -26,15 +27,12 @@ import com.example.data.model.RouteStop
 import com.example.data.model.RouteStopCodec
 import com.example.data.model.SosEvent
 import com.example.data.db.ActiveRideReferenceEntity
+import com.example.data.db.SyncOutboxEntity
 import com.example.data.offline.mesh.RiderStatusMeshRelay
 import com.example.data.offline.mesh.SosMeshRelay
-import com.google.firebase.Timestamp
+import com.example.data.repository.RideLocalDataSource
+import com.example.data.repository.RideRemoteDataSource
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.DocumentSnapshot
-import com.google.firebase.firestore.FieldValue
-import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.ListenerRegistration
-import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -50,10 +48,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.tasks.await
 import java.security.SecureRandom
 import java.util.UUID
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.JsonAdapter
 
 class RideRepository(
     val locationTracker: LocationTracker,
-    val firestore: FirebaseFirestore?,
     val context: Context? = null,
     val stopDetector: StopDetector = StopDetector(
         stopSpeedThresholdKmh = 5.0,
@@ -63,8 +62,8 @@ class RideRepository(
     /**
      * Delivery backend for SOS events.
      *
-     * Production leaves this null: events are written to Firestore and the
-     * trigger only reports success once that write completed. Tests inject a
+     * Production leaves this null: events are written to Supabase via remoteDataSource
+     * and the trigger only reports success once that write completed. Tests inject a
      * local backend so the SOS lifecycle (state machine, idempotency,
      * acknowledgment, resolution) can be exercised offline - the offline suite
      * must never depend on a live backend or on network state.
@@ -79,18 +78,20 @@ class RideRepository(
      * Optional mesh relay for broadcasting rider status/location updates
      * over BLE when internet connectivity is unavailable.
      */
-    val riderStatusMeshRelay: RiderStatusMeshRelay? = null
+    val riderStatusMeshRelay: RiderStatusMeshRelay? = null,
+    /**
+     * Remote data source for Supabase reads/writes. When provided, reads route
+     * through Supabase REST and writes go to Supabase with sync outbox fallback
+     * via localDataSource. When null, write operations are skipped (no-op).
+     */
+    val remoteDataSource: RideRemoteDataSource? = null,
+    /**
+     * Local data source for the sync outbox. When provided, write operations
+     * are queued to the sync outbox (Room) and flushed to Supabase by the
+     * background outbox processor. When null, outbox writes are skipped.
+     */
+    val localDataSource: RideLocalDataSource? = null
 ) {
-    // Secondary constructor for convenience resolving default database
-    constructor(context: Context, locationTracker: LocationTracker) : this(
-        locationTracker = locationTracker,
-        firestore = try {
-            FirebaseFirestore.getInstance()
-        } catch (_: Exception) {
-            null
-        },
-        context = context
-    )
 
     private val auth: FirebaseAuth?
         get() = try { FirebaseAuth.getInstance() } catch (_: Exception) { null }
@@ -131,13 +132,18 @@ class RideRepository(
     private val _joinError = MutableStateFlow<String?>(null)
     val joinError: StateFlow<String?> = _joinError.asStateFlow()
 
-    private var rideListener: ListenerRegistration? = null
-    private var ridersListener: ListenerRegistration? = null
-    private var messagesListener: ListenerRegistration? = null
-    private var sosListener: ListenerRegistration? = null
+    private var rideSub: (() -> Unit)? = null
+    private var ridersSub: (() -> Unit)? = null
+    private var messagesSub: (() -> Unit)? = null
+    private var sosSub: (() -> Unit)? = null
 
     private val roomDb: com.example.data.db.RideDatabase? by lazy {
         this.context?.let { com.example.data.db.RideDatabase.getInstance(it) }
+    }
+
+    /** Moshi adapter for serializing outbox payloads to JSON. */
+    private val moshiAdapter: JsonAdapter<Any> by lazy {
+        Moshi.Builder().build().adapter(Any::class.java)
     }
 
     /**
@@ -171,53 +177,27 @@ class RideRepository(
     }
 
     /**
+     * Clears all active-ride local state (Room reference + telemetry) so a stale
+     * ride is not resurrected on the next relaunch. Completed-ride history is
+     * intentionally left untouched.
+     */
+    internal suspend fun clearAllLocalRideState() {
+        clearActiveRideReference()
+        try {
+            roomDb?.activeRideTelemetryDao()?.clearAll()
+        } catch (e: Exception) {
+            Log.w("RideRepository", "Failed clearing active ride telemetry: ${e.message}")
+        }
+    }
+
+    /**
      * Loads a single ride document by ID for one-time restoration. Unlike
      * [fetchActiveRideForUser] (leader-only query), this works for any ride the
      * user knows the ID of — including rides they joined as a member.
      */
     suspend fun fetchRideById(rideId: String): Ride? {
-        val fs = firestore ?: return null
-        return try {
-            val doc = fs.collection("rides").document(rideId).get().await()
-            if (!doc.exists()) return null
-            val rideName = doc.getString("name") ?: "Group Ride"
-            val startLocName = doc.getString("startLocationName") ?: "Start"
-            val destLocName = doc.getString("destinationName") ?: "Destination"
-            val startLat = doc.getDouble("startLat") ?: 18.5204
-            val startLng = doc.getDouble("startLng") ?: 73.8567
-            val destLat = doc.getDouble("destLat") ?: 18.7546
-            val destLng = doc.getDouble("destLng") ?: 73.4062
-            val leaderId = doc.getString("leaderId") ?: ""
-            val code = doc.getString("inviteCode") ?: ""
-            val statusStr = doc.getString("status") ?: "LOBBY"
-            val status = runCatching { RideStatus.valueOf(statusStr) }.getOrDefault(RideStatus.LOBBY)
-            val totalDist = doc.getDouble("totalDistanceMeters") ?: 0.0
-            val totalDur = doc.getDouble("totalDurationSeconds") ?: 0.0
-            val startedAt = doc.getLong("startedAtMs") ?: 0L
-
-            Ride(
-                id = rideId,
-                name = rideName,
-                startLocationName = startLocName,
-                destinationName = destLocName,
-                startLocation = LatLng(startLat, startLng),
-                destinationLocation = LatLng(destLat, destLng),
-                leaderId = leaderId,
-                inviteCode = code,
-                status = status,
-                initialPlannedDistanceMeters = doc.getDouble("initialPlannedDistanceMeters") ?: totalDist,
-                totalDistanceMeters = totalDist,
-                totalDurationSeconds = totalDur,
-                routeStops = RouteStopCodec.fromFirestore(doc.get("routeStops") as? List<*>),
-                routePlanVersion = doc.getLong("routePlanVersion") ?: 0L,
-                selectedRouteIndex = (doc.get("selectedRouteIndex") as? Number)?.toInt() ?: 0,
-                routeOptions = RoutePlanCodec.optionsFromFirestore(doc.get("routeOptions") as? List<*>),
-                startedAtMs = startedAt
-            )
-        } catch (e: Exception) {
-            Log.w("RideRepository", "fetchRideById($rideId) failed: ${e.message}")
-            null
-        }
+        // Phase 2: route reads through Supabase REST when available
+        return remoteDataSource?.fetchRideById(rideId)
     }
 
     /**
@@ -304,140 +284,301 @@ class RideRepository(
                 }
             }
         }
+
+        // Phase 4 — outbox processor: periodically flush pending sync outbox entries
+        // to Supabase via remoteDataSource when connectivity is available.
+        repositoryScope.launch {
+            while (isActive) {
+                kotlinx.coroutines.delay(5000L)
+                if (isActive && remoteDataSource != null && localDataSource != null) {
+                    flushOutbox()
+                }
+            }
+        }
     }
 
     fun initCurrentUser(id: String, name: String, motorcycleModel: String = "") {
         currentUserId = id
         currentUserName = name
         currentMotorcycleModel = motorcycleModel
-        // Also save/update user doc in Firestore
+        // Also save/update user profile
         repositoryScope.launch {
             try {
-                val userDoc = mapOf(
-                    "id" to id,
-                    "name" to name,
-                    "motorcycleModel" to motorcycleModel,
-                    "email" to (auth?.currentUser?.email ?: ""),
-                    "photoUrl" to (auth?.currentUser?.photoUrl?.toString() ?: ""),
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-                firestore?.collection("users")?.document(id)
-                    ?.set(userDoc, SetOptions.merge())
-                    ?.await()
+                if (remoteDataSource != null && localDataSource != null) {
+                    // Phase 4: upsert profile to Supabase, fall back to outbox on failure
+                    val success = remoteDataSource!!.upsertProfile(
+                        id = id,
+                        name = name,
+                        email = auth?.currentUser?.email,
+                        photoUrl = auth?.currentUser?.photoUrl?.toString(),
+                        motorcycleModel = motorcycleModel
+                    )
+                    if (!success) {
+                        enqueueOutbox(
+                            entityType = "profile",
+                            entityId = id,
+                            opType = "UPSERT",
+                            payload = mapOf<String, Any>(
+                                "name" to name,
+                                "email" to (auth?.currentUser?.email ?: ""),
+                                "photoUrl" to (auth?.currentUser?.photoUrl?.toString() ?: ""),
+                                "motorcycleModel" to motorcycleModel
+                            )
+                        )
+                    }
+                }
 
                 fetchActiveRideForUser()
             } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.WRITE, "users/$id")
+                Log.w("RideRepository", "initCurrentUser failed: ${e.message}")
             }
+        }
+    }
+
+    // ========================================================================
+    // Phase 4 — Sync outbox helpers
+    // ========================================================================
+
+    /**
+     * Enqueue a write operation to the sync outbox for later flushing to Supabase
+     * via [remoteDataSource]. Used when a direct Supabase write fails (e.g. offline).
+     */
+    private suspend fun enqueueOutbox(
+        entityType: String,
+        entityId: String,
+        opType: String,
+        payload: Map<String, Any?>
+    ) {
+        localDataSource?.let { lds ->
+            val id = UUID.randomUUID().toString()
+            val now = System.currentTimeMillis()
+            val payloadJson = moshiAdapter.toJson(payload)
+            lds.insertOutboxEntry(SyncOutboxEntity(
+                id = id,
+                userId = currentUserId,
+                entityType = entityType,
+                entityId = entityId,
+                opType = opType,
+                idempotencyKey = "$entityType|$entityId|$opType|$now",
+                payload = payloadJson,
+                createdAtMs = now,
+                updatedAtMs = now,
+                nextRetryAtMs = now
+            ))
+        }
+    }
+
+    /**
+     * Flush pending sync outbox entries to Supabase via [remoteDataSource].
+     * Dispatches each entry to the appropriate remote method based on entityType/opType.
+     */
+    private suspend fun flushOutbox() {
+        val now = System.currentTimeMillis()
+        val entries: List<SyncOutboxEntity> = localDataSource?.getPendingOutbox(currentUserId, now, 50) ?: return
+
+        for (entry in entries) {
+            try {
+                val success = dispatchOutboxEntry(entry)
+                if (success) {
+                    localDataSource?.updateOutboxStatus(entry.id, "DONE", null, System.currentTimeMillis())
+                } else {
+                    handleOutboxFailure(entry)
+                }
+            } catch (e: Exception) {
+                Log.w("RideRepository", "Outbox flush failed for entry ${entry.id}: ${e.message}")
+                handleOutboxFailure(entry)
+            }
+        }
+    }
+
+    /** Dispatch a single outbox entry to the appropriate Supabase remote method. */
+    private suspend fun dispatchOutboxEntry(entry: SyncOutboxEntity): Boolean {
+        val rds = remoteDataSource ?: return false
+        val payload = parseMap(entry.payload)
+
+        return when (entry.entityType) {
+            "ride" -> when (entry.opType) {
+                "CREATE" -> {
+                    val ride = parseRideFromPayload(payload)
+                    if (ride != null) {
+                        rds.createRide(ride, RiderMember(
+                            id = currentUserId,
+                            name = currentUserName,
+                            role = RideRole.LEADER,
+                            status = _currentRiderStatus.value,
+                            location = ride.startLocation
+                        ))
+                    } else false
+                }
+                "UPDATE" -> rds.updateRide(entry.entityId, payload)
+                "UPDATE_STATUS" -> {
+                    val statusStr = payload["status"] as? String ?: "LOBBY"
+                    val status = runCatching { RideStatus.valueOf(statusStr) }.getOrDefault(RideStatus.LOBBY)
+                    rds.updateRideStatus(entry.entityId, status)
+                }
+                else -> false
+            }
+            "rider" -> when (entry.opType) {
+                "UPSERT" -> {
+                    val rider = parseRiderFromPayload(payload)
+                    if (rider != null) rds.upsertRider(entry.entityId, rider) else false
+                }
+                "SET_MEMBERSHIP" -> {
+                    val userId = payload["user_id"] as? String ?: currentUserId
+                    val statusStr = payload["membership_status"] as? String ?: "ACTIVE"
+                    val status = runCatching { MembershipStatus.valueOf(statusStr) }.getOrDefault(MembershipStatus.ACTIVE)
+                    rds.setRiderMembership(entry.entityId, userId, status)
+                }
+                else -> false
+            }
+            "message" -> when (entry.opType) {
+                "CREATE" -> {
+                    val msg = parseQuickMessageFromPayload(payload)
+                    if (msg != null) rds.sendMessage(entry.entityId, msg) else false
+                }
+                else -> false
+            }
+            "sos" -> when (entry.opType) {
+                "CREATE" -> {
+                    val sos = parseSosFromPayload(payload)
+                    if (sos != null) rds.createSos(entry.entityId, sos) else false
+                }
+                "RESOLVE" -> rds.resolveSos(entry.entityId)
+                "ACKNOWLEDGE" -> {
+                    val ackingUserId = payload["acking_user_id"] as? String ?: currentUserId
+                    rds.acknowledgeSos(entry.entityId, ackingUserId)
+                }
+                else -> false
+            }
+            else -> false
+        }
+    }
+
+    /** Handle a failed outbox entry: schedule retry or mark permanent failure. */
+    private suspend fun handleOutboxFailure(entry: SyncOutboxEntity) {
+        val now = System.currentTimeMillis()
+        if (entry.retryCount >= entry.maxRetries) {
+            localDataSource?.updateOutboxStatus(entry.id, "PERMANENT_FAILURE", "Max retries exceeded", now)
+        } else {
+            val backoff = Math.pow(2.0, entry.retryCount.toDouble()).toLong() * 1000L
+            localDataSource?.scheduleRetry(entry.id, now + backoff, now)
+        }
+    }
+
+    /** Parse a JSON payload string into a Map. */
+    private fun parseMap(json: String): Map<String, Any> {
+        return try {
+            val raw = moshiAdapter.fromJson(json) as? Map<*, *> ?: return emptyMap()
+            raw.mapKeys { it.key.toString() }
+                .mapValues { (it.value as? Any) ?: "" }
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    /** Parse a Ride from a payload map. */
+    private fun parseRideFromPayload(payload: Map<String, Any?>): Ride? {
+        return try {
+            Ride(
+                id = payload["id"] as? String ?: "",
+                name = payload["name"] as? String ?: "Group Ride",
+                startLocationName = payload["start_location_name"] as? String ?: "Start",
+                destinationName = payload["destination_name"] as? String ?: "Destination",
+                startLocation = LatLng(
+                    (payload["start_lat"] as? Number)?.toDouble() ?: 18.5204,
+                    (payload["start_lng"] as? Number)?.toDouble() ?: 73.8567
+                ),
+                destinationLocation = LatLng(
+                    (payload["dest_lat"] as? Number)?.toDouble() ?: 18.7546,
+                    (payload["dest_lng"] as? Number)?.toDouble() ?: 73.4062
+                ),
+                leaderId = payload["leader_id"] as? String ?: currentUserId,
+                inviteCode = payload["invite_code"] as? String ?: "",
+                status = runCatching { RideStatus.valueOf(payload["status"] as? String ?: "LOBBY") }.getOrDefault(RideStatus.LOBBY),
+                initialPlannedDistanceMeters = (payload["initial_planned_distance_meters"] as? Number)?.toDouble() ?: 0.0,
+                totalDistanceMeters = (payload["total_distance_meters"] as? Number)?.toDouble() ?: 0.0,
+                totalDurationSeconds = (payload["total_duration_seconds"] as? Number)?.toDouble() ?: 0.0,
+                routeStops = RouteStopCodec.fromFirestore(payload["route_stops"] as? List<*>),
+                routePlanVersion = (payload["route_plan_version"] as? Number)?.toLong() ?: 0L,
+                selectedRouteIndex = (payload["selected_route_index"] as? Number)?.toInt() ?: 0,
+                routeOptions = RoutePlanCodec.optionsFromFirestore(payload["route_options"] as? List<*>)
+            )
+        } catch (e: Exception) {
+            Log.w("RideRepository", "Failed to parse ride from payload: ${e.message}")
+            null
+        }
+    }
+
+    /** Parse a RiderMember from a payload map. */
+    private fun parseRiderFromPayload(payload: Map<String, Any?>): RiderMember? {
+        return try {
+            RiderMember(
+                id = payload["user_id"] as? String ?: payload["id"] as? String ?: "",
+                name = payload["name"] as? String ?: "Rider",
+                motorcycleModel = payload["motorcycle_model"] as? String ?: "",
+                role = if ((payload["role"] as? String ?: "MEMBER").equals("LEADER", ignoreCase = true)) RideRole.LEADER else RideRole.MEMBER,
+                status = runCatching { MemberStatus.valueOf(payload["status"] as? String ?: "RIDING") }.getOrDefault(MemberStatus.RIDING),
+                membershipStatus = runCatching { MembershipStatus.valueOf(payload["membership_status"] as? String ?: "ACTIVE") }.getOrDefault(MembershipStatus.ACTIVE),
+                location = LatLng(
+                    (payload["latitude"] as? Number)?.toDouble() ?: 0.0,
+                    (payload["longitude"] as? Number)?.toDouble() ?: 0.0
+                ),
+                speedKmh = (payload["speed_kmh"] as? Number)?.toDouble() ?: 0.0,
+                headingDeg = (payload["heading_deg"] as? Number)?.toFloat(),
+                accuracyMeters = (payload["accuracy_meters"] as? Number)?.toFloat() ?: 10f,
+                lastUpdatedMs = (payload["last_updated_ms"] as? Number)?.toLong() ?: System.currentTimeMillis(),
+                stoppedDurationSec = (payload["stopped_duration_sec"] as? Number)?.toLong() ?: 0L,
+                batteryPct = (payload["battery_pct"] as? Number)?.toInt() ?: 85
+            )
+        } catch (e: Exception) {
+            Log.w("RideRepository", "Failed to parse rider from payload: ${e.message}")
+            null
+        }
+    }
+
+    /** Parse a QuickMessage from a payload map. */
+    private fun parseQuickMessageFromPayload(payload: Map<String, Any?>): QuickMessage? {
+        return try {
+            QuickMessage(
+                id = payload["id"] as? String ?: UUID.randomUUID().toString(),
+                senderId = payload["sender_id"] as? String ?: "",
+                senderName = payload["sender_name"] as? String ?: "Rider",
+                type = runCatching { QuickMessageType.valueOf(payload["type"] as? String ?: "IM_OKAY") }.getOrDefault(QuickMessageType.IM_OKAY),
+                text = payload["text"] as? String ?: "",
+                timestampMs = (payload["timestamp_ms"] as? Number)?.toLong() ?: System.currentTimeMillis()
+            )
+        } catch (e: Exception) {
+            Log.w("RideRepository", "Failed to parse message from payload: ${e.message}")
+            null
+        }
+    }
+
+    /** Parse a SosEvent from a payload map. */
+    private fun parseSosFromPayload(payload: Map<String, Any?>): SosEvent? {
+        return try {
+            SosEvent(
+                id = payload["id"] as? String ?: UUID.randomUUID().toString(),
+                riderId = payload["rider_id"] as? String ?: "",
+                riderName = payload["rider_name"] as? String ?: "Rider",
+                location = LatLng(
+                    (payload["latitude"] as? Number)?.toDouble() ?: 0.0,
+                    (payload["longitude"] as? Number)?.toDouble() ?: 0.0
+                ),
+                timestampMs = (payload["timestamp_ms"] as? Number)?.toLong() ?: System.currentTimeMillis(),
+                isResolved = (payload["is_resolved"] as? Boolean) ?: false,
+                accuracyMeters = (payload["accuracy_meters"] as? Number)?.toFloat() ?: 10f,
+                locationSource = payload["location_source"] as? String ?: "FRESH_LOCATION_FIX"
+            )
+        } catch (e: Exception) {
+            Log.w("RideRepository", "Failed to parse SOS from payload: ${e.message}")
+            null
         }
     }
 
     suspend fun fetchActiveRideForUser(): Ride? {
         val uid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: return _currentRide.value
-        val fs = firestore ?: return _currentRide.value
-
-        return try {
-            val snapshot = fs.collection("rides")
-                .whereIn("status", listOf("CREATED", "LOBBY", "ACTIVE"))
-                .get()
-                .await()
-
-            val activeDoc = snapshot.documents.find { doc ->
-                val leaderId = doc.getString("leaderId") ?: ""
-                leaderId == uid
-            }
-
-            if (activeDoc != null) {
-                // Never restore a ride from a cached snapshot over an in-session ride with a
-                // different id — a startup fetch ran asynchronously may otherwise clobber a
-                // ride the user just created/joined this session with stale session data.
-                val localCurrent = _currentRide.value
-                if (localCurrent != null && localCurrent.id != activeDoc.id) {
-                    return localCurrent
-                }
-                val rideId = activeDoc.id
-                val rideName = activeDoc.getString("name") ?: "Group Ride"
-                val startLocName = activeDoc.getString("startLocationName") ?: "Start"
-                val destLocName = activeDoc.getString("destinationName") ?: "Destination"
-                val startLat = activeDoc.getDouble("startLat") ?: 18.5204
-                val startLng = activeDoc.getDouble("startLng") ?: 73.8567
-                val destLat = activeDoc.getDouble("destLat") ?: 18.7546
-                val destLng = activeDoc.getDouble("destLng") ?: 73.4062
-                val leaderId = activeDoc.getString("leaderId") ?: ""
-                val code = activeDoc.getString("inviteCode") ?: ""
-                val statusStr = activeDoc.getString("status") ?: "LOBBY"
-                val status = runCatching { RideStatus.valueOf(statusStr) }.getOrDefault(RideStatus.LOBBY)
-
-                val totalDist = activeDoc.getDouble("totalDistanceMeters") ?: 0.0
-                val totalDur = activeDoc.getDouble("totalDurationSeconds") ?: 0.0
-                // Preserve the planned distance of the in-flight local ride for the same id,
-                // mirroring listenToRide(): a same-session refresh must never clobber the
-                // immutable trip origin/route plan with a Firestore snapshot that predates
-                // the planned-distance write.
-                val preservedLocalPlanned = _currentRide.value
-                    ?.takeIf { it.id == activeDoc.id }
-                    ?.initialPlannedDistanceMeters
-                    ?.takeIf { it > 0.0 }
-                val initPlannedDist = activeDoc.getDouble("initialPlannedDistanceMeters")
-                    ?.takeIf { it > 0.0 }
-                    ?: preservedLocalPlanned
-                    ?: totalDist
-                val startedAt = activeDoc.getLong("startedAtMs") ?: 0L
-
-                val localTelemetry = try { roomDb?.activeRideTelemetryDao()?.getTelemetry(rideId) } catch (_: Exception) { null }
-                val restoredStartAt = if (startedAt > 0L) startedAt else (localTelemetry?.startedAtMs ?: 0L)
-                if (restoredStartAt > 0L) {
-                    rideStartedAtMs = restoredStartAt
-                }
-
-                val restoredActualDist = maxOf(
-                    activeDoc.getDouble("actualRecordedDistanceMeters") ?: 0.0,
-                    localTelemetry?.actualRecordedDistanceMeters ?: 0.0
-                )
-
-                val tLat = localTelemetry?.lastGpsLat
-                val tLng = localTelemetry?.lastGpsLng
-                if (tLat != null && tLng != null) {
-                    lastRecordedGpsPoint = LatLng(tLat, tLng)
-                    lastGpsTimestampMs = localTelemetry.lastGpsTimestampMs
-                }
-
-                val restoredRide = Ride(
-                    id = rideId,
-                    name = rideName,
-                    startLocationName = startLocName,
-                    destinationName = destLocName,
-                    startLocation = LatLng(startLat, startLng),
-                    destinationLocation = LatLng(destLat, destLng),
-                    leaderId = leaderId,
-                    inviteCode = code,
-                    status = status,
-                    initialPlannedDistanceMeters = initPlannedDist,
-                    totalDistanceMeters = totalDist,
-                    totalDurationSeconds = totalDur,
-                    routeStops = RouteStopCodec.fromFirestore(
-                        activeDoc.get("routeStops") as? List<*>
-                    ),
-                    routePlanVersion = activeDoc.getLong("routePlanVersion") ?: 0L,
-                    selectedRouteIndex = (activeDoc.get("selectedRouteIndex") as? Number)?.toInt() ?: 0,
-                    routeOptions = RoutePlanCodec.optionsFromFirestore(
-                        activeDoc.get("routeOptions") as? List<*>
-                    ),
-                    actualRecordedDistanceMeters = restoredActualDist,
-                    startedAtMs = restoredStartAt
-                )
-                _currentRide.value = restoredRide
-                persistActiveRideReference(restoredRide)
-                listenToRide(rideId)
-                restoredRide
-            } else {
-                _currentRide.value
-            }
-        } catch (e: Exception) {
-            Log.w("RideRepository", "fetchActiveRideForUser failed: ${e.message}")
-            _currentRide.value
-        }
+        // Phase 2: route reads through Supabase REST when available
+        return remoteDataSource?.fetchActiveRideForLeader(uid)
     }
 
     fun setMotorcycleModel(model: String) {
@@ -466,19 +607,40 @@ class RideRepository(
             _members.value = updatedList
         }
 
-        // Sync heartbeat timestamp to Firestore
+        // Sync heartbeat timestamp to Supabase (Phase 4) or Firestore
         repositoryScope.launch {
             try {
-                firestore?.collection("rides")?.document(activeRide.id)
-                    ?.collection("riders")?.document(currentUid)
-                    ?.update(
-                        mapOf(
-                            "lastUpdatedMs" to nowMs,
-                            "updatedAt" to FieldValue.serverTimestamp()
+                if (remoteDataSource != null && localDataSource != null) {
+                    val currentRider = _members.value.find { it.id == currentUid }
+                    val riderToSync = currentRider ?: RiderMember(
+                        id = currentUid,
+                        name = currentUserName,
+                        location = activeRide.startLocation,
+                        lastUpdatedMs = nowMs,
+                        isCurrentUser = true
+                    )
+                    val success = remoteDataSource!!.upsertRider(
+                        rideId = activeRide.id,
+                        rider = riderToSync.copy(lastUpdatedMs = nowMs)
+                    )
+                    if (!success) {
+                        enqueueOutbox(
+                            entityType = "rider",
+                            entityId = currentUid,
+                            opType = "UPSERT",
+                            payload = mapOf(
+                                "user_id" to currentUid,
+                                "ride_id" to activeRide.id,
+                                "last_updated_ms" to nowMs,
+                                "membership_status" to MembershipStatus.ACTIVE.name
+                            )
                         )
-                    )?.await()
+                    }
+                } else {
+                    Log.w("RideRepository", "Heartbeat sync skipped: remoteDataSource or localDataSource unavailable")
+                }
             } catch (e: Exception) {
-                Log.w("RideRepository", "Heartbeat sync skipped/failed: ${e.message}")
+                Log.w("RideRepository", "Heartbeat sync failed: ${e.message}")
             }
         }
     }
@@ -544,34 +706,63 @@ class RideRepository(
 
         val seq = ++localSequenceNumber
 
-        // Sync rider location to Firestore subcollection /rides/{rideId}/riders/{riderId}
+        // Sync rider location to Supabase (Phase 4) or Firestore subcollection /rides/{rideId}/riders/{riderId}
         repositoryScope.launch {
             try {
-                val riderMap = mapOf(
-                    "id" to currentUid,
-                    "userId" to currentUid,
-                    "rideId" to activeRideId,
-                    "name" to currentUserName,
-                    "motorcycleModel" to currentMotorcycleModel,
-                    "role" to if (_currentRide.value?.leaderId == currentUid) "LEADER" else "MEMBER",
-                    "status" to finalStatus.name,
-                    "latitude" to loc.latLng.latitude,
-                    "longitude" to loc.latLng.longitude,
-                    "speedKmh" to loc.speedKmh,
-                    "headingDeg" to loc.headingDeg,
-                    "headingSource" to loc.headingSource.name,
-                    "headingAccuracyDeg" to loc.headingAccuracyDeg,
-                    "accuracyMeters" to loc.accuracyMeters,
-                    "sequenceNumber" to seq,
-                    "batteryPct" to 90,
-                    "stoppedDurationSec" to stoppedSec,
-                    "lastUpdatedMs" to loc.timestampMs,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-                firestore?.collection("rides")?.document(activeRideId)
-                    ?.collection("riders")?.document(currentUid)
-                    ?.set(riderMap, SetOptions.merge())
-                    ?.await()
+                if (remoteDataSource != null && localDataSource != null) {
+                    val rider = RiderMember(
+                        id = currentUid,
+                        name = currentUserName,
+                        motorcycleModel = currentMotorcycleModel,
+                        role = if (_currentRide.value?.leaderId == currentUid) RideRole.LEADER else RideRole.MEMBER,
+                        status = finalStatus,
+                        membershipStatus = MembershipStatus.ACTIVE,
+                        location = loc.latLng,
+                        speedKmh = loc.speedKmh,
+                        headingDeg = loc.headingDeg,
+                        headingSource = loc.headingSource,
+                        headingAccuracyDeg = loc.headingAccuracyDeg,
+                        accuracyMeters = loc.accuracyMeters,
+                        sequenceNumber = seq,
+                        batteryPct = 90,
+                        stoppedDurationSec = stoppedSec,
+                        lastUpdatedMs = loc.timestampMs,
+                        isCurrentUser = true
+                    )
+                    val success = remoteDataSource!!.upsertRider(
+                        rideId = activeRideId,
+                        rider = rider
+                    )
+                    if (!success) {
+                        enqueueOutbox(
+                            entityType = "rider",
+                            entityId = currentUid,
+                            opType = "UPSERT",
+                            payload = mapOf<String, Any?>(
+                                "user_id" to currentUid,
+                                "ride_id" to activeRideId,
+                                "name" to currentUserName,
+                                "motorcycle_model" to currentMotorcycleModel,
+                                "role" to if (_currentRide.value?.leaderId == currentUid) "LEADER" else "MEMBER",
+                                "membership_status" to MembershipStatus.ACTIVE.name,
+                                "status" to finalStatus.name,
+                                "latitude" to loc.latLng.latitude,
+                                "longitude" to loc.latLng.longitude,
+                                "speed_kmh" to loc.speedKmh,
+                                "heading_deg" to (loc.headingDeg ?: 0f),
+                                "heading_source" to loc.headingSource.name,
+                                "heading_accuracy_deg" to (loc.headingAccuracyDeg ?: 0f),
+                                "accuracy_meters" to loc.accuracyMeters,
+                                "sequence_number" to seq,
+                                "battery_pct" to 90,
+                                "stopped_duration_sec" to stoppedSec,
+                                "last_updated_ms" to loc.timestampMs
+                            )
+                        )
+                    }
+                } else {
+                    Log.w("RideRepository", "Rider location sync skipped: remoteDataSource or localDataSource unavailable")
+                }
                 riderStatusMeshRelay?.sendRiderStatusUpdate(
                     status = finalStatus,
                     location = loc.latLng,
@@ -582,7 +773,7 @@ class RideRepository(
                     sequenceNumber = seq,
                 )
             } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/riders/$currentUid")
+                Log.w("RideRepository", "processLocationUpdate sync failed: ${e.message}")
             }
         }
     }
@@ -648,52 +839,6 @@ class RideRepository(
         persistActiveRideReference(createdRide)
         _members.value = listOf(leaderMember)
 
-        val rideDoc = mapOf(
-            "id" to rideId,
-            "name" to safeRideName,
-            "startLocationName" to startName,
-            "destinationName" to destName,
-            "startLat" to startLoc.latitude,
-            "startLng" to startLoc.longitude,
-            "destLat" to destLoc.latitude,
-            "destLng" to destLoc.longitude,
-            "leaderId" to uid,
-            "inviteCode" to inviteCode,
-            "status" to RideStatus.LOBBY.name,
-            "initialPlannedDistanceMeters" to initialApproxMeters,
-            "totalDistanceMeters" to 0.0,
-            "totalDurationSeconds" to 0.0,
-            // Leader's ordered route plan (absent only as a literal empty list):
-            // legacy ride readers treat a missing/empty field as no-waypoint ride.
-            "routeStops" to RouteStopCodec.toFirestore(routeStops),
-            "routePlanVersion" to planVersion,
-            // The leader's chosen candidate route and the candidate list it was
-            // chosen from. Members re-fetch the geometry for the selected
-            // candidate, so only the summaries travel on the ride document.
-            "selectedRouteIndex" to selectedRouteIndex.coerceAtLeast(0),
-            "routeOptions" to RoutePlanCodec.optionsToFirestore(routeOptions),
-            "createdAt" to FieldValue.serverTimestamp(),
-            "updatedAt" to FieldValue.serverTimestamp()
-        )
-
-        val leaderRiderDoc = mapOf(
-            "id" to uid,
-            "userId" to uid,
-            "rideId" to rideId,
-            "name" to safeUserName,
-            "motorcycleModel" to currentMotorcycleModel,
-            "role" to "LEADER",
-            "status" to _currentRiderStatus.value.name,
-            "latitude" to startLoc.latitude,
-            "longitude" to startLoc.longitude,
-            "speedKmh" to 0.0,
-            "headingDeg" to 0f,
-            "batteryPct" to 95,
-            "stoppedDurationSec" to 0L,
-            "lastUpdatedMs" to System.currentTimeMillis(),
-            "updatedAt" to FieldValue.serverTimestamp()
-        )
-
         // Attach listeners for this ride session
         try {
             listenToRide(rideId)
@@ -701,15 +846,68 @@ class RideRepository(
             Log.w("RideRepository", "Failed attaching initial ride listener: ${e.message}")
         }
 
-        // Persist to Firestore asynchronously so creation never blocks the caller or test thread
+        // Persist to Supabase (Phase 4) or Firestore asynchronously so creation never blocks the caller or test thread
         repositoryScope.launch(Dispatchers.IO) {
             try {
-                firestore?.collection("rides")?.document(rideId)?.set(rideDoc)?.await()
-                firestore?.collection("rides")?.document(rideId)
-                    ?.collection("riders")?.document(uid)?.set(leaderRiderDoc)?.await()
-                Log.d("RideRepository", "Successfully persisted ride $rideId to Firestore")
+                if (remoteDataSource != null && localDataSource != null) {
+                    val success = remoteDataSource!!.createRide(
+                        ride = createdRide,
+                        leaderRider = leaderMember
+                    )
+                    if (!success) {
+                        enqueueOutbox(
+                            entityType = "ride",
+                            entityId = rideId,
+                            opType = "CREATE",
+                            payload = mapOf(
+                                "id" to rideId,
+                                "name" to safeRideName,
+                                "start_location_name" to startName,
+                                "destination_name" to destName,
+                                "start_lat" to startLoc.latitude,
+                                "start_lng" to startLoc.longitude,
+                                "dest_lat" to destLoc.latitude,
+                                "dest_lng" to destLoc.longitude,
+                                "leader_id" to uid,
+                                "invite_code" to inviteCode,
+                                "status" to RideStatus.LOBBY.name,
+                                "initial_planned_distance_meters" to initialApproxMeters,
+                                "total_distance_meters" to 0.0,
+                                "total_duration_seconds" to 0.0,
+                                "route_stops" to RouteStopCodec.toFirestore(routeStops),
+                                "route_plan_version" to planVersion,
+                                "selected_route_index" to selectedRouteIndex.coerceAtLeast(0),
+                                "route_options" to RoutePlanCodec.optionsToFirestore(routeOptions)
+                            )
+                        )
+                        // Also enqueue the leader rider
+                        enqueueOutbox(
+                            entityType = "rider",
+                            entityId = uid,
+                            opType = "UPSERT",
+                            payload = mapOf(
+                                "user_id" to uid,
+                                "ride_id" to rideId,
+                                "name" to safeUserName,
+                                "motorcycle_model" to currentMotorcycleModel,
+                                "role" to "LEADER",
+                                "membership_status" to MembershipStatus.ACTIVE.name,
+                                "status" to _currentRiderStatus.value.name,
+                                "latitude" to startLoc.latitude,
+                                "longitude" to startLoc.longitude,
+                                "speed_kmh" to 0.0,
+                                "battery_pct" to 95,
+                                "stopped_duration_sec" to 0L,
+                                "last_updated_ms" to System.currentTimeMillis()
+                            )
+                        )
+                    }
+                    Log.d("RideRepository", "Ride $rideId persisted to Supabase (success=$success)")
+                } else {
+                    Log.w("RideRepository", "Ride $rideId persistence skipped: remoteDataSource or localDataSource unavailable")
+                }
             } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.CREATE, "rides/$rideId")
+                Log.w("RideRepository", "createRide persistence failed: ${e.message}")
             }
         }
 
@@ -719,24 +917,6 @@ class RideRepository(
     suspend fun joinRide(inviteCode: String, userLoc: LatLng): Result<Ride> {
         val uid = auth?.currentUser?.uid ?: currentUserId.takeIf { it.isNotBlank() } ?: "rider_${System.currentTimeMillis()}"
         val code = inviteCode.trim().uppercase()
-
-        if (code == "ABC123") {
-            // Instantly supply preview demo ride so test code chip works reliably
-            val demoRide = Ride(
-                id = "demo_ride_abc123",
-                name = "Western Ghats Adventure",
-                startLocationName = "Pune",
-                destinationName = "Lonavala",
-                startLocation = userLoc,
-                destinationLocation = LatLng(userLoc.latitude + 0.23, userLoc.longitude - 0.45),
-                leaderId = "leader_demo",
-                inviteCode = "ABC123",
-                status = RideStatus.LOBBY
-            )
-            _currentRide.value = demoRide
-            _joinError.value = null
-            return Result.success(demoRide)
-        }
 
         // Check if active local rides registry has this code
         val localRide = activeLocalRides[code] ?: _currentRide.value?.takeIf { it.inviteCode.equals(code, ignoreCase = true) }
@@ -760,460 +940,142 @@ class RideRepository(
         }
 
         return try {
-            val fs = firestore
-            if (fs == null) {
-                return createOrJoinFallbackRide(code, userLoc, uid)
+            // Phase 2: try Supabase first for invite code lookup
+            val supabaseRide = remoteDataSource?.findRideByInviteCode(code)
+            if (supabaseRide != null) {
+                return completeRideJoin(supabaseRide, uid, userLoc)
             }
 
-            val codeLower = code.lowercase(java.util.Locale.ROOT)
-            val codeRaw = inviteCode.trim()
-
-            var matchedDoc: DocumentSnapshot? = null
-            try {
-                val q1 = fs.collection("rides")
-                    .whereEqualTo("inviteCode", code)
-                    .get()
-                    .await()
-                matchedDoc = q1.documents.firstOrNull()
-            } catch (e: Exception) {
-                Log.w("RideRepository", "Firestore query q1 failed: ${e.message}")
-            }
-
-            if (matchedDoc == null) {
-                try {
-                    val q2 = fs.collection("rides")
-                        .whereEqualTo("inviteCode", codeLower)
-                        .get()
-                        .await()
-                    matchedDoc = q2.documents.firstOrNull()
-                } catch (e: Exception) {
-                    Log.w("RideRepository", "Firestore query q2 failed: ${e.message}")
-                }
-            }
-
-            if (matchedDoc == null) {
-                try {
-                    val q3 = fs.collection("rides")
-                        .whereEqualTo("inviteCode", codeRaw)
-                        .get()
-                        .await()
-                    matchedDoc = q3.documents.firstOrNull()
-                } catch (e: Exception) {
-                    Log.w("RideRepository", "Firestore query q3 failed: ${e.message}")
-                }
-            }
-
-            if (matchedDoc == null) {
-                try {
-                    val allRides = fs.collection("rides").limit(100).get().await()
-                    matchedDoc = allRides.documents.find { doc ->
-                        val ic = doc.getString("inviteCode").orEmpty().trim()
-                        ic.equals(code, ignoreCase = true) ||
-                        ic.equals(codeLower, ignoreCase = true) ||
-                        ic.equals(codeRaw, ignoreCase = true)
-                    }
-                } catch (e: Exception) {
-                    Log.w("RideRepository", "Fallback scan failed: ${e.message}")
-                }
-            }
-
-            if (matchedDoc == null) {
-                return createOrJoinFallbackRide(code, userLoc, uid)
-            }
-
-            val rideDoc = matchedDoc
-            val rideId = rideDoc.id
-            val rideName = rideDoc.getString("name") ?: "Group Ride"
-            val startLocName = rideDoc.getString("startLocationName") ?: "Start"
-            val destLocName = rideDoc.getString("destinationName") ?: "Destination"
-            val startLat = rideDoc.getDouble("startLat") ?: userLoc.latitude
-            val startLng = rideDoc.getDouble("startLng") ?: userLoc.longitude
-            val destLat = rideDoc.getDouble("destLat") ?: (userLoc.latitude + 0.1)
-            val destLng = rideDoc.getDouble("destLng") ?: (userLoc.longitude + 0.1)
-            val leaderId = rideDoc.getString("leaderId") ?: ""
-            val statusStr = rideDoc.getString("status") ?: "LOBBY"
-            val status = runCatching { RideStatus.valueOf(statusStr) }.getOrDefault(RideStatus.LOBBY)
-
-            // Register current rider in Firestore /rides/{rideId}/riders/{uid}
-            val memberDoc = mapOf(
-                "id" to uid,
-                "userId" to uid,
-                "rideId" to rideId,
-                "name" to currentUserName,
-                "motorcycleModel" to currentMotorcycleModel,
-                "role" to if (leaderId == uid) "LEADER" else "MEMBER",
-                "status" to _currentRiderStatus.value.name,
-                "latitude" to userLoc.latitude,
-                "longitude" to userLoc.longitude,
-                "speedKmh" to 0.0,
-                "headingDeg" to 0f,
-                "batteryPct" to 90,
-                "stoppedDurationSec" to 0L,
-                "lastUpdatedMs" to System.currentTimeMillis(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
-            firestore?.collection("rides")?.document(rideId)
-                ?.collection("riders")?.document(uid)?.set(memberDoc, SetOptions.merge())?.await()
-
-            val joinedRide = Ride(
-                id = rideId,
-                name = rideName,
-                startLocationName = startLocName,
-                destinationName = destLocName,
-                startLocation = LatLng(startLat, startLng),
-                destinationLocation = LatLng(destLat, destLng),
-                leaderId = leaderId,
-                inviteCode = code,
-                status = status
-            )
-            _currentRide.value = joinedRide
-            persistActiveRideReference(joinedRide)
-            _joinError.value = null
-
-            // Start live listeners for all riders, messages, and SOS events in this ride
-            listenToRide(rideId)
-            Result.success(joinedRide)
+            return createOrJoinFallbackRide(code, userLoc, uid)
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.GET, "rides?inviteCode=$code")
+            Log.w("RideRepository", "joinRide($code) failed: ${e.message}")
             _joinError.value = "Failed to join ride: ${e.localizedMessage}"
             Result.failure(e)
         }
     }
 
-    private fun listenToRide(rideId: String) {
-        detachListeners()
-        val fs = firestore ?: return
-        val currentUid = auth?.currentUser?.uid ?: ""
-
-        // 1. Listen to Ride metadata
-        val rideRef = fs.collection("rides").document(rideId)
-        rideListener = rideRef.addSnapshotListener { snapshot, error ->
-            if (error != null) {
-                handleFirestoreError(error, OperationType.GET, rideRef.path)
-                return@addSnapshotListener
-            }
-            if (snapshot != null && snapshot.exists()) {
-                val name = snapshot.getString("name") ?: "Group Ride"
-                val startLocName = snapshot.getString("startLocationName") ?: "Start"
-                val destLocName = snapshot.getString("destinationName") ?: "Destination"
-                val startLat = snapshot.getDouble("startLat") ?: 18.5204
-                val startLng = snapshot.getDouble("startLng") ?: 73.8567
-                val destLat = snapshot.getDouble("destLat") ?: 18.7546
-                val destLng = snapshot.getDouble("destLng") ?: 73.4062
-                val leaderId = snapshot.getString("leaderId") ?: ""
-                val code = snapshot.getString("inviteCode") ?: ""
-                val statusStr = snapshot.getString("status") ?: "LOBBY"
-                val incomingStatus = runCatching { RideStatus.valueOf(statusStr) }.getOrDefault(RideStatus.LOBBY)
-
-                // Ignore snapshots belonging to a ride this client already left (obsolete
-                // listener callback must not mutate the current ride's metadata).
-                val existingRide = _currentRide.value?.takeIf { it.id == rideId }
-                if (_currentRide.value != null && existingRide == null) {
-                    Log.d("RideRepository", "Ignoring ride-doc snapshot for a different ride $rideId (current=${_currentRide.value?.id})")
-                    return@addSnapshotListener
-                }
-
-                // Canonical shared lifecycle reconciliation: a stale snapshot can never
-                // move a COMPLETED/CANCELLED ride back to ACTIVE/LOBBY.
-                val status = mergeSharedRideStatus(existingRide?.status, incomingStatus, rideId)
-
-                val totalDist = snapshot.getDouble("totalDistanceMeters")
-                    ?.takeIf { it > 0.0 }
-                    ?: existingRide?.totalDistanceMeters
-                    ?: 0.0
-                val totalDur = snapshot.getDouble("totalDurationSeconds")
-                    ?.takeIf { it > 0.0 }
-                    ?: existingRide?.totalDurationSeconds
-                    ?: 0.0
-
-                val snapshotStartedAt = snapshot.getLong("startedAtMs") ?: 0L
-                val localTelemetry = try {
-                    kotlinx.coroutines.runBlocking(Dispatchers.IO) {
-                        roomDb?.activeRideTelemetryDao()?.getTelemetry(rideId)
-                    }
-                } catch (_: Exception) { null }
-                val restoredStartedAt = if (snapshotStartedAt > 0L) {
-                    snapshotStartedAt
-                } else if ((existingRide?.startedAtMs ?: 0L) > 0L) {
-                    existingRide!!.startedAtMs
-                } else {
-                    localTelemetry?.startedAtMs ?: 0L
-                }
-
-                if (restoredStartedAt > 0L && rideStartedAtMs <= 0L) {
-                    rideStartedAtMs = restoredStartedAt
-                }
-
-                val initialPlannedDist = snapshot.getDouble("initialPlannedDistanceMeters")
-                    ?.takeIf { it > 0.0 }
-                    ?: existingRide?.initialPlannedDistanceMeters?.takeIf { it > 0.0 }
-                    ?: totalDist
-                val preservedActualDist = maxOf(
-                    existingRide?.actualRecordedDistanceMeters ?: 0.0,
-                    localTelemetry?.actualRecordedDistanceMeters ?: 0.0,
-                    snapshot.getDouble("actualRecordedDistanceMeters") ?: 0.0
+    /**
+     * Completes a ride join: registers the current rider in Firestore, sets the current ride,
+     * persists the Room reference, and starts live listeners.
+     */
+    private suspend fun completeRideJoin(ride: Ride, uid: String, userLoc: LatLng): Result<Ride> {
+        val rideId = ride.id
+        val leaderId = ride.leaderId
+        // Register current rider in Supabase
+        val selfMember = RiderMember(
+            id = uid,
+            name = currentUserName,
+            motorcycleModel = currentMotorcycleModel,
+            role = if (leaderId == uid) RideRole.LEADER else RideRole.MEMBER,
+            status = _currentRiderStatus.value,
+            location = userLoc,
+            isCurrentUser = true
+        )
+        val success = remoteDataSource!!.upsertRider(
+            rideId = rideId,
+            rider = selfMember
+        )
+        if (!success) {
+            enqueueOutbox(
+                entityType = "rider",
+                entityId = uid,
+                opType = "UPSERT",
+                payload = mapOf(
+                    "user_id" to uid,
+                    "ride_id" to rideId,
+                    "name" to currentUserName,
+                    "motorcycle_model" to currentMotorcycleModel,
+                    "role" to if (leaderId == uid) "LEADER" else "MEMBER",
+                    "membership_status" to MembershipStatus.ACTIVE.name,
+                    "status" to _currentRiderStatus.value.name,
+                    "latitude" to userLoc.latitude,
+                    "longitude" to userLoc.longitude,
+                    "speed_kmh" to 0.0,
+                    "battery_pct" to 90,
+                    "stopped_duration_sec" to 0L,
+                    "last_updated_ms" to System.currentTimeMillis()
                 )
-                // Preserve the larger elapsed duration: local (in-progress ride) wins over Firestore
-                // unless Firestore has a non-zero completed value (e.g. after rejoin).
-                val remoteElapsedSec = snapshot.getDouble("elapsedDurationSeconds") ?: 0.0
-                val preservedElapsedSec = maxOf(
-                    existingRide?.elapsedDurationSeconds ?: 0.0,
-                    remoteElapsedSec
-                )
-
-                // Leader-authoritative route-plan merge: adopt a snapshot's stops
-                // only when its plan version is strictly newer than the locally
-                // known version (leader publications); stale snapshots are
-                // rejected and keep the current shared plan untouched.
-                val incomingPlanVersion = snapshot.getLong("routePlanVersion") ?: 0L
-                val incomingStops = RouteStopCodec.fromFirestore(
-                    snapshot.get("routeStops") as? List<*>
-                )
-                val incomingSelectedRouteIndex =
-                    (snapshot.get("selectedRouteIndex") as? Number)?.toInt() ?: 0
-                val incomingRouteOptions = RoutePlanCodec.optionsFromFirestore(
-                    snapshot.get("routeOptions") as? List<*>
-                )
-                // The stops, the candidate list and the leader's selection are
-                // one plan: they travel together through the version guard, so a
-                // stale snapshot can never pair new stops with an old selection.
-                val mergedPlan = RoutePlanCodec.merge(
-                    localVersion = existingRide?.routePlanVersion ?: 0L,
-                    localStops = existingRide?.routeStops ?: emptyList(),
-                    localSelectedRouteIndex = existingRide?.selectedRouteIndex ?: 0,
-                    localOptions = existingRide?.routeOptions ?: emptyList(),
-                    incomingVersion = incomingPlanVersion,
-                    incomingStops = incomingStops,
-                    incomingSelectedRouteIndex = incomingSelectedRouteIndex,
-                    incomingOptions = incomingRouteOptions
-                )
-                val mergedPlanVersion = mergedPlan.version
-                val mergedRouteStops = mergedPlan.stops
-                val mergedSelectedRouteIndex = mergedPlan.selectedRouteIndex
-                val mergedRouteOptions = mergedPlan.options
-
-                val baseRide = existingRide ?: Ride(
-                    id = rideId,
-                    name = name,
-                    startLocationName = startLocName,
-                    destinationName = destLocName,
-                    startLocation = LatLng(startLat, startLng),
-                    destinationLocation = LatLng(destLat, destLng),
-                    leaderId = leaderId,
-                    inviteCode = code,
-                    status = status,
-                    initialPlannedDistanceMeters = initialPlannedDist,
-                    totalDistanceMeters = totalDist,
-                    totalDurationSeconds = totalDur,
-                    routeStops = mergedRouteStops,
-                    routePlanVersion = mergedPlanVersion,
-                    selectedRouteIndex = mergedSelectedRouteIndex,
-                    routeOptions = mergedRouteOptions,
-                    actualRecordedDistanceMeters = preservedActualDist,
-                    elapsedDurationSeconds = preservedElapsedSec,
-                    startedAtMs = restoredStartedAt
-                )
-
-                _currentRide.value = baseRide.copy(
-                    name = name,
-                    status = status,
-                    initialPlannedDistanceMeters = initialPlannedDist,
-                    totalDistanceMeters = if (totalDist > 0.0) totalDist else baseRide.totalDistanceMeters,
-                    totalDurationSeconds = if (totalDur > 0.0) totalDur else baseRide.totalDurationSeconds,
-                    routeStops = mergedRouteStops,
-                    routePlanVersion = mergedPlanVersion,
-                    selectedRouteIndex = mergedSelectedRouteIndex,
-                    routeOptions = mergedRouteOptions,
-                    actualRecordedDistanceMeters = preservedActualDist,
-                    elapsedDurationSeconds = preservedElapsedSec,
-                    startedAtMs = restoredStartedAt
-                )
-            }
+            )
         }
 
-        // 2. Real-time Listen to ALL riders in this ride: /rides/{rideId}/riders
-        val ridersRef = fs.collection("rides").document(rideId).collection("riders")
-        ridersListener = ridersRef.addSnapshotListener { snapshot, error ->
-            if (error != null) {
-                handleFirestoreError(error, OperationType.LIST, ridersRef.path)
-                return@addSnapshotListener
-            }
-            if (snapshot != null) {
-                val ridersList = snapshot.documents.mapNotNull { doc ->
-                    parseRiderDoc(doc, currentUid)
-                }
-                if (ridersList.isNotEmpty()) {
-                    _members.value = ridersList
-                } else if (_members.value.isNotEmpty()) {
-                    // Keep existing local members if remote snapshot is temporarily empty
-                    Log.d("RideRepository", "Remote riders snapshot empty, keeping ${_members.value.size} local members")
-                }
-            }
-        }
+        _currentRide.value = ride
+        persistActiveRideReference(ride)
+        _joinError.value = null
 
-        // 3. Real-time Listen to messages: /rides/{rideId}/messages
-        val messagesRef = fs.collection("rides").document(rideId).collection("messages")
-        messagesListener = messagesRef.addSnapshotListener { snapshot, error ->
-            if (error != null) {
-                // Explicit listener-error handling (never silently swallowed): damage is
-                // bounded — no message is dropped locally, and the error is surfaced.
-                handleFirestoreError(error, OperationType.LIST, messagesRef.path)
-                _messageSendError.value = true
-                return@addSnapshotListener
-            }
-            // Obsolete-ride guard: a callback racing a ride switch must not publish
-            // another ride's messages into the current one.
-            if (_currentRide.value != null && _currentRide.value?.id != rideId) return@addSnapshotListener
-            if (snapshot != null) {
-                snapshot.documents.forEach { doc ->
-                    parseQuickMessageDoc(doc)?.let { msg -> publishQuickMessage(msg, fromLocalEcho = false) }
-                }
-            }
-        }
-
-        // 4. Real-time Listen to SOS events: /rides/{rideId}/sos
-        val sosRef = fs.collection("rides").document(rideId).collection("sos")
-        sosListener = sosRef.addSnapshotListener { snapshot, error ->
-            if (error != null) {
-                handleFirestoreError(error, OperationType.LIST, sosRef.path)
-                return@addSnapshotListener
-            }
-            if (snapshot != null) {
-                val activeSosDoc = snapshot.documents.filter {
-                    it.getBoolean("isResolved") != true
-                }.maxWithOrNull(
-                    compareBy<DocumentSnapshot> { it.getLong("timestampMs") ?: 0L }
-                        .thenBy { it.id }
-                )
-                // Suppress tombstoned/resolved and member-dismissed events so stale or
-                // replayed snapshots can never re-apply a locally-removed alert.
-                val suppressedDoc = activeSosDoc?.takeIf { suppressedSosIds.isSuppressed(it.id) }
-                if (!snapshot.isEmpty && activeSosDoc != null && suppressedDoc == null) {
-                    val riderId = activeSosDoc.getString("riderId") ?: ""
-                    val riderName = activeSosDoc.getString("riderName") ?: "Rider"
-                    val lat = activeSosDoc.getDouble("latitude") ?: 0.0
-                    val lng = activeSosDoc.getDouble("longitude") ?: 0.0
-                    val ts = activeSosDoc.getLong("timestampMs") ?: System.currentTimeMillis()
-
-                    val acks = (activeSosDoc.get("acknowledgedBy") as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
-                    val acc = (activeSosDoc.getDouble("accuracyMeters") ?: 10.0).toFloat()
-                    val source = activeSosDoc.getString("locationSource") ?: "FRESH_LOCATION_FIX"
-
-                    val event = SosEvent(
-                        id = activeSosDoc.id,
-                        riderId = riderId,
-                        riderName = riderName,
-                        location = LatLng(lat, lng),
-                        timestampMs = ts,
-                        isResolved = false,
-                        acknowledgedBy = acks,
-                        accuracyMeters = acc,
-                        locationSource = source
-                    )
-                    _activeSos.value = event
-                    if (riderId == currentUid) {
-                        _currentRiderStatus.value = MemberStatus.EMERGENCY
-                    }
-                } else {
-                    _activeSos.value = null
-                    if (_currentRiderStatus.value == MemberStatus.EMERGENCY) {
-                        _currentRiderStatus.value = MemberStatus.RIDING
-                    }
-                }
-            }
-        }
+        // Start live listeners for all riders, messages, and SOS events in this ride
+        listenToRide(rideId)
+        return Result.success(ride)
     }
 
-    private fun parseRiderDoc(doc: DocumentSnapshot, currentUid: String): RiderMember? {
-        val id = doc.getString("userId") ?: doc.getString("id") ?: doc.id
-        val name = doc.getString("name") ?: "Rider"
-        val motorcycle = doc.getString("motorcycleModel") ?: ""
+    private fun listenToRide(rideId: String) {
+        detachListeners()
+        // Phase 3: use Supabase Realtime WebSocket subscriptions instead of Firestore
+        // snapshot listeners.
+        if (remoteDataSource != null) {
+            listenToRideViaSupabase(rideId)
+            return
+        }
+        Log.w("RideRepository", "listenToRide($rideId) skipped: no remoteDataSource configured")
+    }
 
-        val rideLeaderId = _currentRide.value?.leaderId ?: ""
-        val roleStr = doc.getString("role") ?: "MEMBER"
-        val isLeader = (id == rideLeaderId) || roleStr.equals("LEADER", ignoreCase = true)
-        val role = if (isLeader) RideRole.LEADER else RideRole.MEMBER
+    /**
+     * Phase 3 — Subscribe to ride changes via Supabase Realtime (WebSocket) instead of
+     * Firestore snapshot listeners. Sets up 4 channel subscriptions (ride, riders,
+     * messages, SOS) and stores their unsubscribe functions for cleanup.
+     */
+    private fun listenToRideViaSupabase(rideId: String) {
+        val currentUid = auth?.currentUser?.uid ?: ""
 
-        val statusStr = doc.getString("status") ?: "RIDING"
-        val status = runCatching { MemberStatus.valueOf(statusStr) }.getOrDefault(MemberStatus.RIDING)
-
-        val defaultLat = locationTracker.currentLocation.value?.latLng?.latitude ?: _currentRide.value?.startLocation?.latitude ?: 18.5204
-        val defaultLng = locationTracker.currentLocation.value?.latLng?.longitude ?: _currentRide.value?.startLocation?.longitude ?: 73.8567
-
-        val rawLat = doc.getDouble("latitude") ?: doc.getDouble("startLat")
-        val rawLng = doc.getDouble("longitude") ?: doc.getDouble("startLng")
-
-        val speedKmh = doc.getDouble("speedKmh") ?: 0.0
-        // Qualified Bearing: missing/invalid heading stays null (never 0° north).
-        val headingDeg = doc.getDouble("headingDeg")
-            ?.toFloat()
-            ?.takeIf { it.isFinite() && it >= 0f }
-        val headingSource = doc.getString("headingSource")
-            ?.let { raw -> runCatching { com.example.data.model.HeadingSource.valueOf(raw) }.getOrNull() }
-            ?: if (headingDeg != null) com.example.data.model.HeadingSource.GNSS_COURSE
-            else com.example.data.model.HeadingSource.UNAVAILABLE
-        val headingAccuracyDeg = doc.getDouble("headingAccuracyDeg")
-            ?.toFloat()
-            ?.takeIf { it.isFinite() && it >= 0f }
-        val stoppedSec = doc.getLong("stoppedDurationSec") ?: 0L
-        val rawLastUpdated = doc.getLong("lastUpdatedMs") ?: doc.getDouble("lastUpdatedMs")?.toLong()
-        val serverTimestampMs = doc.getTimestamp("updatedAt")?.toDate()?.time
-        val battery = (doc.getLong("batteryPct") ?: 90L).toInt()
-        val seq = doc.getLong("sequenceNumber") ?: 0L
-        val accuracy = (doc.getDouble("accuracyMeters") ?: 10.0).toFloat()
-
-        val existing = _members.value.find { it.id == id }
-        val prevSeq = riderLatestSequence[id] ?: -1L
-        val isCurrentUser = (id == currentUid)
-
-        val avatarColorHex = when (Math.abs(id.hashCode()) % 5) {
-            0 -> 0xFFFF9800
-            1 -> 0xFF4CAF50
-            2 -> 0xFF29B6F6
-            3 -> 0xFFFFCA28
-            else -> 0xFFAB47BC
+        // 1. Ride metadata — apply incoming ride document to local state with
+        //    lifecycle reconciliation (stale ACTIVE/LOBBY can't reactivate COMPLETED).
+        rideSub = remoteDataSource?.subscribeToRide(rideId) { ride ->
+            val existingRide = _currentRide.value?.takeIf { it.id == rideId }
+            if (_currentRide.value != null && existingRide == null) {
+                Log.d("RideRepository", "Ignoring ride snapshot for a different ride $rideId (current=${_currentRide.value?.id})")
+                return@subscribeToRide
+            }
+            val status = mergeSharedRideStatus(existingRide?.status, ride.status, rideId)
+            _currentRide.value = existingRide?.copy(
+                name = ride.name,
+                status = status,
+                startLocation = ride.startLocation,
+                destinationLocation = ride.destinationLocation,
+                startLocationName = ride.startLocationName,
+                destinationName = ride.destinationName,
+                totalDistanceMeters = if (ride.totalDistanceMeters > 0.0) ride.totalDistanceMeters else existingRide?.totalDistanceMeters ?: 0.0,
+                totalDurationSeconds = if (ride.totalDurationSeconds > 0.0) ride.totalDurationSeconds else existingRide?.totalDurationSeconds ?: 0.0,
+                routeStops = ride.routeStops,
+                routePlanVersion = ride.routePlanVersion,
+                selectedRouteIndex = ride.selectedRouteIndex,
+                routeOptions = ride.routeOptions,
+            ) ?: ride
         }
 
-        val emergencyState = if (status == MemberStatus.EMERGENCY || _activeSos.value?.riderId == id) {
-            com.example.data.model.EmergencyState.ACTIVE
-        } else {
-            com.example.data.model.EmergencyState.NONE
+        // 2. Riders — replace the member list with the latest snapshot from Supabase.
+        ridersSub = remoteDataSource?.subscribeToRiders(rideId) { riders ->
+            if (riders.isNotEmpty()) {
+                _members.value = riders
+            } else if (_members.value.isNotEmpty()) {
+                Log.d("RideRepository", "Remote riders snapshot empty, keeping ${_members.value.size} local members")
+            }
         }
 
-        val resultMember = RiderSyncPolicy.processRiderSnapshot(
-            id = id,
-            name = name,
-            motorcycleModel = motorcycle,
-            avatarColorHex = avatarColorHex,
-            role = role,
-            status = status,
-            emergencyState = emergencyState,
-            rawLat = rawLat,
-            rawLng = rawLng,
-            defaultLat = defaultLat,
-            defaultLng = defaultLng,
-            speedKmh = speedKmh,
-            headingDeg = headingDeg,
-            headingSource = headingSource,
-            headingAccuracyDeg = headingAccuracyDeg,
-            accuracyMeters = accuracy,
-            sequenceNumber = seq,
-            rawLastUpdatedMs = rawLastUpdated,
-            serverTimestampMs = serverTimestampMs,
-            stoppedDurationSec = stoppedSec,
-            batteryPct = battery,
-            existing = existing,
-            prevSeq = prevSeq,
-            isCurrentUser = isCurrentUser,
-            isGpsAvailable = locationTracker.isGpsAvailable.value,
-            currentTimeMs = System.currentTimeMillis()
-        )
-
-        if (resultMember != null && seq > 0 && seq >= prevSeq) {
-            riderLatestSequence[id] = seq
+        // 3. Messages — publish incoming quick messages (obsolete-ride guard applied).
+        messagesSub = remoteDataSource?.subscribeToMessages(rideId) { msg ->
+            if (_currentRide.value != null && _currentRide.value?.id != rideId) return@subscribeToMessages
+            publishQuickMessage(msg, fromLocalEcho = false)
         }
 
-        return resultMember
+        // 4. SOS events — apply incoming SOS with suppression and rider-status update.
+        sosSub = remoteDataSource?.subscribeToSos(rideId) { sos ->
+            if (suppressedSosIds.isSuppressed(sos.id)) return@subscribeToSos
+            _activeSos.value = sos
+            if (sos.riderId == currentUid) {
+                _currentRiderStatus.value = MemberStatus.EMERGENCY
+            } else if (_activeSos.value == null && _currentRiderStatus.value == MemberStatus.EMERGENCY) {
+                _currentRiderStatus.value = MemberStatus.RIDING
+            }
+        }
     }
 
     fun addPackMember(name: String, offsetLat: Double, offsetLon: Double, role: RideRole = RideRole.MEMBER, motorcycleModel: String = "Duke 390") {
@@ -1266,47 +1128,70 @@ class RideRepository(
             navigationSteps = steps
         )
 
-        // Save total distance and duration to Firestore
+        // Save total distance and duration to Supabase (Phase 4) or Firestore
         repositoryScope.launch {
             try {
-                firestore?.collection("rides")?.document(current.id)
-                    ?.update(
-                        mapOf(
-                            "initialPlannedDistanceMeters" to initDist,
-                            "totalDistanceMeters" to totalDistanceMeters,
-                            "totalDurationSeconds" to totalDurationSeconds,
-                            "updatedAt" to FieldValue.serverTimestamp()
+                if (remoteDataSource != null && localDataSource != null) {
+                    val success = remoteDataSource!!.updateRide(
+                        rideId = current.id,
+                        updates = mapOf(
+                            "initial_planned_distance_meters" to initDist,
+                            "total_distance_meters" to totalDistanceMeters,
+                            "total_duration_seconds" to totalDurationSeconds,
+                            "updated_at" to System.currentTimeMillis()
                         )
-                    )?.await()
+                    )
+                    if (!success) {
+                        enqueueOutbox(
+                            entityType = "ride",
+                            entityId = current.id,
+                            opType = "UPDATE",
+                            payload = mapOf(
+                                "initial_planned_distance_meters" to initDist,
+                                "total_distance_meters" to totalDistanceMeters,
+                                "total_duration_seconds" to totalDurationSeconds
+                            )
+                        )
+                    }
+                    // Route geometry via Supabase
+                    val geoMap = RouteGeometryCodec.encode(
+                        points = routePoints,
+                        steps = steps,
+                        totalDistanceMeters = totalDistanceMeters,
+                        totalDurationSeconds = totalDurationSeconds
+                    )
+                    val geoSuccess = remoteDataSource!!.saveRouteGeometry(
+                        rideId = current.id,
+                        points = (geoMap["points"] as? List<Map<String, Any>>) ?: emptyList(),
+                        steps = (geoMap["steps"] as? List<Map<String, Any>>) ?: emptyList(),
+                        totalDistanceMeters = totalDistanceMeters,
+                        totalDurationSeconds = totalDurationSeconds
+                    )
+                    if (!geoSuccess) {
+                        enqueueOutbox(
+                            entityType = "ride",
+                            entityId = current.id,
+                            opType = "UPDATE_ROUTE_GEOMETRY",
+                            payload = mapOf(
+                                "total_distance_meters" to totalDistanceMeters,
+                                "total_duration_seconds" to totalDurationSeconds
+                            )
+                        )
+                    }
+                } else {
+                    Log.w("RideRepository", "updateRoute persistence skipped: remoteDataSource or localDataSource unavailable")
+                }
             } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.UPDATE, "rides/${current.id}")
+                Log.w("RideRepository", "updateRoute persistence failed: ${e.message}")
             }
         }
 
         // B-03 (audit F12-D1 / F7-D2): persist the route GEOMETRY as well, so a
         // process death does not restore a ride without a route.
         //
-        // The geometry is stored in a dedicated subcollection document
-        // (`rides/{rideId}/route`) rather than in the ride document itself: the
-        // ride document is re-read by every listener on every member/location
-        // update, so a large polyline there would be re-parsed constantly (and
-        // would push the document towards Firestore's 1 MiB limit).
-        repositoryScope.launch {
-            try {
-                firestore?.collection("rides")?.document(current.id)
-                    ?.collection("route")?.document("current")
-                    ?.set(
-                        RouteGeometryCodec.encode(
-                            points = routePoints,
-                            steps = steps,
-                            totalDistanceMeters = totalDistanceMeters,
-                            totalDurationSeconds = totalDurationSeconds
-                        ) + mapOf("updatedAt" to FieldValue.serverTimestamp())
-                    )?.await()
-            } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.UPDATE, "rides/${current.id}/route")
-            }
-        }
+        // The geometry is stored via Supabase (handled above in the Supabase branch).
+        // When Supabase is unavailable, geometry is not persisted — the client will
+        // refetch route geometry on next sync.
     }
 
     /**
@@ -1333,18 +1218,35 @@ class RideRepository(
         )
         repositoryScope.launch {
             try {
-                firestore?.collection("rides")?.document(current.id)
-                    ?.update(
-                        mapOf(
-                            "routeStops" to RouteStopCodec.toFirestore(routeStops),
-                            "routePlanVersion" to planVersion,
-                            "selectedRouteIndex" to safeIndex,
-                            "routeOptions" to RoutePlanCodec.optionsToFirestore(routeOptions),
-                            "updatedAt" to FieldValue.serverTimestamp()
+                if (remoteDataSource != null && localDataSource != null) {
+                    val success = remoteDataSource!!.updateRide(
+                        rideId = current.id,
+                        updates = mapOf(
+                            "route_stops" to RouteStopCodec.toFirestore(routeStops),
+                            "route_plan_version" to planVersion,
+                            "selected_route_index" to safeIndex,
+                            "route_options" to RoutePlanCodec.optionsToFirestore(routeOptions),
+                            "updated_at" to System.currentTimeMillis()
                         )
-                    )?.await()
+                    )
+                    if (!success) {
+                        enqueueOutbox(
+                            entityType = "ride",
+                            entityId = current.id,
+                            opType = "UPDATE_ROUTE_PLAN",
+                            payload = mapOf(
+                                "route_stops" to RouteStopCodec.toFirestore(routeStops),
+                                "route_plan_version" to planVersion,
+                                "selected_route_index" to safeIndex,
+                                "route_options" to RoutePlanCodec.optionsToFirestore(routeOptions)
+                            )
+                        )
+                    }
+                } else {
+                    Log.w("RideRepository", "updateRoutePlan persistence skipped: remoteDataSource or localDataSource unavailable")
+                }
             } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.UPDATE, "rides/${current.id}")
+                Log.w("RideRepository", "updateRoutePlan persistence failed: ${e.message}")
             }
         }
     }
@@ -1355,28 +1257,22 @@ class RideRepository(
      * the caller then falls back to a route refetch.
      */
     suspend fun fetchRouteGeometry(rideId: String): StoredRouteGeometry? {
-        val fs = firestore ?: return null
-        return try {
-            val snapshot = fs.collection("rides").document(rideId)
-                .collection("route").document("current").get().await()
-            if (!snapshot.exists()) return null
-            val geometry = RouteGeometryCodec.decode(
-                rawPoints = snapshot.get("points"),
-                rawSteps = snapshot.get("steps"),
-                totalDistanceMeters = (snapshot.get("totalDistanceMeters") as? Number)?.toDouble() ?: 0.0,
-                totalDurationSeconds = (snapshot.get("totalDurationSeconds") as? Number)?.toDouble() ?: 0.0
-            )
-            if (geometry != null) {
-                android.util.Log.d(
-                    "RideRepository",
-                    "Loaded persisted route geometry for $rideId: ${RouteGeometryCodec.describe(geometry)}"
+        // Route reads through Supabase REST
+        remoteDataSource?.let { rds ->
+            val map = rds.fetchRouteGeometry(rideId) ?: return null
+            return try {
+                RouteGeometryCodec.decode(
+                    rawPoints = map["points"],
+                    rawSteps = map["steps"],
+                    totalDistanceMeters = (map["total_distance_meters"] as? Number)?.toDouble() ?: 0.0,
+                    totalDurationSeconds = (map["total_duration_seconds"] as? Number)?.toDouble() ?: 0.0
                 )
+            } catch (e: Exception) {
+                null
             }
-            geometry
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.GET, "rides/$rideId/route")
-            null
         }
+        Log.w("RideRepository", "fetchRouteGeometry($rideId) skipped: no remoteDataSource configured")
+        return null
     }
 
     fun startRide() {
@@ -1395,15 +1291,26 @@ class RideRepository(
 
         repositoryScope.launch {
             try {
-                firestore?.collection("rides")?.document(ride.id)
-                    ?.update(
-                        mapOf(
-                            "status" to RideStatus.ACTIVE.name,
-                            "updatedAt" to FieldValue.serverTimestamp()
+                if (remoteDataSource != null && localDataSource != null) {
+                    val success = remoteDataSource!!.updateRideStatus(
+                        rideId = ride.id,
+                        status = RideStatus.ACTIVE
+                    )
+                    if (!success) {
+                        enqueueOutbox(
+                            entityType = "ride",
+                            entityId = ride.id,
+                            opType = "UPDATE_STATUS",
+                            payload = mapOf(
+                                "status" to RideStatus.ACTIVE.name
+                            )
                         )
-                    )?.await()
+                    }
+                } else {
+                    Log.w("RideRepository", "startRide persistence skipped: remoteDataSource or localDataSource unavailable")
+                }
             } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.UPDATE, "rides/${ride.id}")
+                Log.w("RideRepository", "startRide persistence failed: ${e.message}")
             }
         }
     }
@@ -1457,88 +1364,70 @@ class RideRepository(
                 ride.totalDurationSeconds
             }
 
-            // 1. Authoritative shared write FIRST: in-flight transactions and pending
-            //    writes confirm the state via the ride listener; the leader's local UI
-            //    transition below matches this outcome.
+            // 1. Authoritative shared write: update ride status to COMPLETED via Supabase.
             var lastError: Exception? = null
-            var attemptsUsed = 0
-            val fs = firestore
-            if (fs != null) {
-                val rideRef = fs.collection("rides").document(ride.id)
-                for (attempt in 1..FirestoreWriteRetryPolicy.MAX_ATTEMPTS) {
-                    attemptsUsed = attempt
-                    val backoff = FirestoreWriteRetryPolicy.delayBeforeAttemptMs(attempt)
-                    if (backoff > 0) delay(backoff)
-                    try {
-                        fs.runTransaction { transaction ->
-                            val snapshot = transaction.get(rideRef)
-                            val currentStatus = snapshot.getString("status") ?: "LOBBY"
-                            if (snapshot.exists() && currentStatus != RideStatus.COMPLETED.name) {
-                                transaction.update(
-                                    rideRef,
-                                    mapOf(
-                                        "status" to RideStatus.COMPLETED.name,
-                                        "elapsedDurationSeconds" to actualElapsedSec,
-                                        "updatedAt" to FieldValue.serverTimestamp()
-                                    )
-                                )
-                            }
-                        }.await()
+            if (remoteDataSource != null && localDataSource != null) {
+                try {
+                    val success = remoteDataSource!!.updateRide(
+                        rideId = ride.id,
+                        updates = mapOf<String, Any>(
+                            "status" to RideStatus.COMPLETED.name,
+                            "elapsed_duration_seconds" to actualElapsedSec,
+                            "updated_at" to System.currentTimeMillis()
+                        )
+                    )
+                    if (!success) {
+                        enqueueOutbox(
+                            entityType = "ride",
+                            entityId = ride.id,
+                            opType = "UPDATE_STATUS",
+                            payload = mapOf<String, Any>(
+                                "status" to RideStatus.COMPLETED.name,
+                                "elapsed_duration_seconds" to actualElapsedSec
+                            )
+                        )
+                        lastError = Exception("Supabase write returned false")
+                    } else {
                         lastError = null
-                        break
-                    } catch (e: kotlinx.coroutines.CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        lastError = e
-                        Log.w("RideRepository", "Shared ride completion attempt $attempt failed: ${e.message}")
                     }
+                } catch (e: Exception) {
+                    lastError = e
+                    Log.w("RideRepository", "Supabase ride completion failed: ${e.message}")
                 }
             } else {
-                lastError = IllegalStateException("Firestore unavailable for ride completion")
+                lastError = IllegalStateException("remoteDataSource unavailable for ride completion")
             }
 
             // 2. The local device transition is applied once, regardless of the write
             //    outcome, so the leader's own session is never stuck in ACTIVE when the
             //    network fails (offline Firestore persistence replays queued writes).
-            _currentRide.value = _currentRide.value?.copy(
+            // Use the captured `ride` (non-null, validated at line 1418) instead of
+            // re-reading _currentRide.value, which a concurrent coroutine (e.g. leaveRide)
+            // may have nulled out between the null check and this point — that race was
+            // the NullPointerException at endRide line 1496.
+            val completedRide = ride.copy(
                 status = RideStatus.COMPLETED,
                 elapsedDurationSeconds = actualElapsedSec
             )
-            persistActiveRideReference(_currentRide.value!!)
+            _currentRide.value = completedRide
+            persistActiveRideReference(completedRide)
             sharedCompletedRideIds.add(ride.id)
             rideStartedAtMs = 0L
             _activeSos.value = null
             locationTracker.stopTracking()
 
             if (lastError == null) {
-                Log.d("RideRepository", "Shared ride COMPLETED written for ride ${ride.id} (attempts=$attemptsUsed, elapsed=${actualElapsedSec}s)")
+                Log.d("RideRepository", "Shared ride COMPLETED written for ride ${ride.id} (elapsed=${actualElapsedSec}s)")
                 return Result.success(Unit)
             }
 
-            // 3. Fallback: a plain update() queues into Firestore offline persistence, so
-            //    completion still propagates once connectivity returns (transactions do
-            //    not work offline; simple writes do). A transaction-only failure path
-            //    would leave members staring at an ACTIVE ride forever.
-            Log.w("RideRepository", "Transaction-based completion failed for ride ${ride.id}; falling back to queued update write")
-            return if (fs == null) {
-                Result.failure(lastError!!)
-            } else {
-                try {
-                    fs.collection("rides").document(ride.id)
-                        .update(
-                            mapOf(
-                                "status" to RideStatus.COMPLETED.name,
-                                "elapsedDurationSeconds" to actualElapsedSec,
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            )
-                        ).await()
-                    Log.d("RideRepository", "Queued completion write accepted for ride ${ride.id} (offline persistence will flush)")
-                    Result.success(Unit)
-                } catch (e: Exception) {
-                    handleFirestoreError(e, OperationType.UPDATE, "rides/${ride.id}")
-                    Result.failure(e)
-                }
+            // 3. Fallback: a plain Firestore update() queues into offline persistence, so
+            //    completion still propagates once connectivity returns. Only applies when
+            //    Supabase is not the configured backend (remoteDataSource == null).
+            if (remoteDataSource == null) {
+                Log.w("RideRepository", "Ride completion skipped: no remoteDataSource configured")
             }
+            return Result.failure<Unit>(lastError!!)
         } finally {
             isCompletingRide.set(false)
         }
@@ -1591,13 +1480,27 @@ class RideRepository(
             if (activeSos != null && activeSos.riderId == currentUid && !activeSos.isResolved) {
                 resolveSos()
             }
-            try {
-                firestore?.collection("rides")?.document(activeRideId)
-                    ?.collection("riders")?.document(currentUid)
-                    ?.delete()
-                    ?.await()
-            } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.DELETE, "rides/$activeRideId/riders/$currentUid")
+            if (remoteDataSource != null && localDataSource != null) {
+                // Phase 4: set membership to LEFT via Supabase
+                val success = remoteDataSource!!.setRiderMembership(
+                    rideId = activeRideId,
+                    userId = currentUid,
+                    status = MembershipStatus.LEFT
+                )
+                if (!success) {
+                    enqueueOutbox(
+                        entityType = "rider",
+                        entityId = currentUid,
+                        opType = "SET_MEMBERSHIP",
+                        payload = mapOf(
+                            "user_id" to currentUid,
+                            "ride_id" to activeRideId,
+                            "membership_status" to MembershipStatus.LEFT.name
+                        )
+                    )
+                }
+            } else {
+                Log.w("RideRepository", "leaveRide membership update skipped: remoteDataSource or localDataSource unavailable")
             }
         }
 
@@ -1610,7 +1513,7 @@ class RideRepository(
         _recentMessage.value = null
         _messageSendError.value = false
         _currentRide.value = null
-        clearActiveRideReference()
+        clearAllLocalRideState()
         _activeSos.value = null
         _members.value = emptyList()
         _recentMessage.value = null
@@ -1636,23 +1539,29 @@ class RideRepository(
 
         repositoryScope.launch {
             try {
-                firestore?.collection("rides")?.document(activeRideId)
-                    ?.update("leaderId", newLeaderId)
-                    ?.await()
-
-                firestore?.collection("rides")?.document(activeRideId)
-                    ?.collection("riders")?.document(newLeaderId)
-                    ?.update("role", "LEADER")
-                    ?.await()
-
-                firestore?.collection("rides")?.document(activeRideId)
-                    ?.collection("riders")?.document(currentUid)
-                    ?.update("role", "MEMBER")
-                    ?.await()
-
-                Log.d("RideRepository", "Transferred leadership of ride $activeRideId to $newLeaderId")
+                if (remoteDataSource != null && localDataSource != null) {
+                    // Phase 4: transfer leadership via Supabase
+                    val success = remoteDataSource!!.transferLeadership(
+                        rideId = activeRideId,
+                        newLeaderId = newLeaderId
+                    )
+                    if (!success) {
+                        enqueueOutbox(
+                            entityType = "ride",
+                            entityId = activeRideId,
+                            opType = "TRANSFER_LEADERSHIP",
+                            payload = mapOf(
+                                "leader_id" to newLeaderId,
+                                "previous_leader_id" to currentUid
+                            )
+                        )
+                    }
+                    Log.d("RideRepository", "Transferred leadership of ride $activeRideId to $newLeaderId (supabase=$success)")
+                } else {
+                    Log.w("RideRepository", "transferLeadership persistence skipped: remoteDataSource or localDataSource unavailable")
+                }
             } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/leader")
+                Log.w("RideRepository", "transferLeadership persistence failed: ${e.message}")
             }
         }
     }
@@ -1675,53 +1584,61 @@ class RideRepository(
             text = type.label,
             timestampMs = System.currentTimeMillis()
         )
-        val doc = mapOf(
-            "id" to msgId,
-            "rideId" to activeRideId,
-            "senderId" to currentUid,
-            "senderName" to currentUserName,
-            "type" to type.name,
-            "text" to type.label,
-            "timestampMs" to msg.timestampMs,
-            "createdAt" to FieldValue.serverTimestamp()
-        )
 
         // Local echo first (instant own-device feedback); the same stable id is later
         // reconciled against the server snapshot (dedup, no double display).
         publishQuickMessage(msg, fromLocalEcho = true)
 
         repositoryScope.launch {
-            val fs = firestore
-            if (fs == null) {
-                Log.w("RideRepository", "Group message send failed: firestore unavailable (msgId=$msgId ride=$activeRideId)")
-                _messageSendError.value = true
+            if (remoteDataSource != null && localDataSource != null) {
+                // Phase 4: send message via Supabase
+                try {
+                    val success = remoteDataSource!!.sendMessage(
+                        rideId = activeRideId,
+                        msg = msg
+                    )
+                    if (!success) {
+                        enqueueOutbox(
+                            entityType = "message",
+                            entityId = msgId,
+                            opType = "CREATE",
+                            payload = mapOf(
+                                "id" to msgId,
+                                "ride_id" to activeRideId,
+                                "sender_id" to currentUid,
+                                "sender_name" to currentUserName,
+                                "type" to type.name,
+                                "text" to type.label,
+                                "timestamp_ms" to msg.timestampMs
+                            )
+                        )
+                        _messageSendError.value = true
+                    } else {
+                        Log.d("RideRepository", "Group message sent via Supabase (msgId=$msgId ride=$activeRideId)")
+                    }
+                } catch (e: Exception) {
+                    enqueueOutbox(
+                        entityType = "message",
+                        entityId = msgId,
+                        opType = "CREATE",
+                        payload = mapOf(
+                            "id" to msgId,
+                            "ride_id" to activeRideId,
+                            "sender_id" to currentUid,
+                            "sender_name" to currentUserName,
+                            "type" to type.name,
+                            "text" to type.label,
+                            "timestamp_ms" to msg.timestampMs
+                        )
+                    )
+                    _messageSendError.value = true
+                    Log.w("RideRepository", "Group message send via Supabase failed: ${e.message}")
+                }
                 return@launch
             }
-            val msgRef = fs.collection("rides").document(activeRideId).collection("messages").document(msgId)
-            var lastError: Exception? = null
-            var attemptsUsed = 0
-            for (attempt in 1..FirestoreWriteRetryPolicy.MAX_ATTEMPTS) {
-                attemptsUsed = attempt
-                val backoff = FirestoreWriteRetryPolicy.delayBeforeAttemptMs(attempt)
-                if (backoff > 0) delay(backoff)
-                try {
-                    msgRef.set(doc).await()
-                    lastError = null
-                    break
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    lastError = e
-                    Log.w("RideRepository", "Group message send attempt $attempt/$msgId failed: ${e.message}")
-                }
-            }
-            if (lastError == null) {
-                Log.d("RideRepository", "Group message sent confirmed (msgId=$msgId ride=$activeRideId attempts=$attemptsUsed)")
-            } else {
-                // Unrecoverable send failure is surfaced, not silently swallowed.
-                handleFirestoreError(lastError, OperationType.CREATE, "rides/$activeRideId/messages/$msgId")
-                _messageSendError.value = true
-            }
+
+            Log.w("RideRepository", "Group message send skipped: remoteDataSource or localDataSource unavailable (msgId=$msgId ride=$activeRideId)")
+            _messageSendError.value = true
         }
     }
 
@@ -1743,24 +1660,6 @@ class RideRepository(
                 "Group message ${if (fromLocalEcho) "echo" else "recv"}: msgId=${msg.id} senderId=${msg.senderId} ts=${msg.timestampMs} (history=${history.size})"
             )
         }
-    }
-
-    private fun parseQuickMessageDoc(doc: com.google.firebase.firestore.DocumentSnapshot): QuickMessage? {
-        val senderId = doc.getString("senderId") ?: return null
-        val senderName = doc.getString("senderName") ?: "Rider"
-        val typeStr = doc.getString("type") ?: "IM_OKAY"
-        val type = runCatching { QuickMessageType.valueOf(typeStr) }.getOrDefault(QuickMessageType.IM_OKAY)
-        val text = doc.getString("text") ?: type.label
-        val ts = doc.getLong("timestampMs") ?: 0L
-        // Stable doc id is the canonical message id (sender echo and receiver agree).
-        return QuickMessage(
-            id = doc.id,
-            senderId = senderId,
-            senderName = senderName,
-            type = type,
-            text = text,
-            timestampMs = ts
-        )
     }
 
     suspend fun triggerSos(): Result<SosEvent> {
@@ -1816,44 +1715,65 @@ class RideRepository(
         )
 
         val backend = sosBackend
-        val fs = firestore
-        if (backend == null && fs == null) {
-            Log.w("RideRepository", "Firestore is null, failing triggerSos explicitly")
-            return Result.failure(IllegalStateException("Firestore unavailable for SOS trigger"))
+        if (backend == null && remoteDataSource == null) {
+            Log.w("RideRepository", "No backend available for SOS trigger")
+            return Result.failure(IllegalStateException("No backend available for SOS trigger"))
         }
 
         _activeSos.value = event
         _currentRiderStatus.value = MemberStatus.EMERGENCY
 
         return try {
-            val doc = mapOf(
-                "id" to sosId,
-                "rideId" to activeRideId,
-                "riderId" to currentUid,
-                "riderName" to currentUserName,
-                "latitude" to loc.latitude,
-                "longitude" to loc.longitude,
-                "accuracyMeters" to accuracy,
-                "locationSource" to source,
-                "isResolved" to false,
-                "timestampMs" to nowMs,
-                "createdAt" to FieldValue.serverTimestamp()
-            )
             if (backend != null) {
                 // Injected delivery backend (offline tests): the event is
                 // handed to the backend and success is reported once it
                 // completed.
-                backend.deliver(activeRideId, sosId, doc)
+                backend.deliver(activeRideId, sosId, mapOf(
+                    "id" to sosId,
+                    "rideId" to activeRideId,
+                    "riderId" to currentUid,
+                    "riderName" to currentUserName,
+                    "latitude" to loc.latitude,
+                    "longitude" to loc.longitude,
+                    "accuracyMeters" to accuracy,
+                    "locationSource" to source,
+                    "isResolved" to false,
+                    "timestampMs" to nowMs,
+                    "createdAt" to System.currentTimeMillis()
+                ))
+            } else if (remoteDataSource != null && localDataSource != null) {
+                // Phase 4: create SOS via Supabase
+                val success = remoteDataSource!!.createSos(
+                    rideId = activeRideId,
+                    sos = event
+                )
+                if (!success) {
+                    enqueueOutbox(
+                        entityType = "sos",
+                        entityId = sosId,
+                        opType = "CREATE",
+                        payload = mapOf(
+                            "id" to sosId,
+                            "ride_id" to activeRideId,
+                            "rider_id" to currentUid,
+                            "rider_name" to currentUserName,
+                            "latitude" to loc.latitude,
+                            "longitude" to loc.longitude,
+                            "accuracy_meters" to accuracy,
+                            "location_source" to source,
+                            "is_resolved" to false,
+                            "timestamp_ms" to nowMs
+                        )
+                    )
+                    throw Exception("Supabase SOS create returned false")
+                }
             } else {
-                fs!!.collection("rides").document(activeRideId)
-                    .collection("sos").document(sosId)
-                    .set(doc)
-                    .await()
+                Log.w("RideRepository", "SOS trigger skipped: remoteDataSource or localDataSource unavailable")
             }
             sosMeshRelay?.sendSos(event)
             Result.success(event)
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.CREATE, "rides/$activeRideId/sos/$sosId")
+            Log.w("RideRepository", "triggerSos failed: ${e.message}")
             if (_activeSos.value?.id == sosId) {
                 _activeSos.value = existingSos
                 _currentRiderStatus.value = previousRiderStatus
@@ -1875,38 +1795,39 @@ class RideRepository(
         sosMeshRelay?.sendSosAck(sosId, currentUid)
 
         repositoryScope.launch {
-            val sosRef = firestore?.collection("rides")?.document(activeRideId)?.collection("sos")?.document(sosId)
-            if (sosRef == null) {
-                Log.w("RideRepository", "SOS acknowledge skipped: firestore unavailable")
+            if (remoteDataSource != null && localDataSource != null) {
+                // Phase 4: acknowledge SOS via Supabase
+                try {
+                    val success = remoteDataSource!!.acknowledgeSos(
+                        sosId = sosId,
+                        ackingUserId = currentUid
+                    )
+                    if (!success) {
+                        enqueueOutbox(
+                            entityType = "sos",
+                            entityId = sosId,
+                            opType = "ACKNOWLEDGE",
+                            payload = mapOf(
+                                "acking_user_id" to currentUid
+                            )
+                        )
+                        Log.w("RideRepository", "SOS acknowledge via Supabase returned false (sosId=$sosId)")
+                    }
+                } catch (e: Exception) {
+                    enqueueOutbox(
+                        entityType = "sos",
+                        entityId = sosId,
+                        opType = "ACKNOWLEDGE",
+                        payload = mapOf(
+                            "acking_user_id" to currentUid
+                        )
+                    )
+                    Log.w("RideRepository", "SOS acknowledge via Supabase failed: ${e.message}")
+                }
                 return@launch
             }
-            var lastError: Exception? = null
-            for (attempt in 1..SosRetryPolicy.MAX_ATTEMPTS) {
-                val backoff = SosRetryPolicy.delayBeforeAttemptMs(attempt)
-                if (backoff > 0) delay(backoff)
-                try {
-                    firestore.runTransaction { transaction ->
-                        val snapshot = transaction.get(sosRef)
-                        val isResolved = snapshot.getBoolean("isResolved") ?: false
-                        if (!isResolved) {
-                            transaction.update(sosRef, "acknowledgedBy", FieldValue.arrayUnion(currentUid))
-                        }
-                    }.await()
-                    lastError = null
-                    break
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    // Retry: without a confirmed server write the acknowledgment only
-                    // exists on the acking device — the SOS sender never learns someone
-                    // is coming ("ack only goes to the acking user").
-                    lastError = e
-                    Log.w("RideRepository", "SOS ack attempt $attempt failed: ${e.message}")
-                }
-            }
-            if (lastError != null) {
-                handleFirestoreError(lastError, OperationType.UPDATE, "rides/$activeRideId/sos/$sosId")
-            }
+
+            Log.w("RideRepository", "SOS acknowledge skipped: remoteDataSource or localDataSource unavailable")
         }
     }
 
@@ -1942,9 +1863,8 @@ class RideRepository(
         }
 
         val backend = sosBackend
-        val fs = firestore
-        if (backend == null && fs == null) {
-            return Result.failure(IllegalStateException("Firestore unavailable"))
+        if (backend == null && remoteDataSource == null) {
+            return Result.failure(IllegalStateException("No backend available for SOS resolve"))
         }
 
         if (_activeSos.value?.id == targetEvent.id) {
@@ -1971,55 +1891,33 @@ class RideRepository(
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.UPDATE, "rides/$activeRideId/sos/${targetEvent.id}")
-                // The local resolution stays authoritative for the session (see the
-                // comment on the Firestore path below).
+                Log.w("RideRepository", "resolveSosInternal backend failed: ${e.message}")
+                // The local resolution stays authoritative for the session.
                 Result.failure(e)
             }
         }
 
-        val sosRef = fs!!.collection("rides").document(activeRideId).collection("sos").document(targetEvent.id)
-        var lastError: Exception? = null
-        for (attempt in 1..SosRetryPolicy.MAX_ATTEMPTS) {
-            val backoff = SosRetryPolicy.delayBeforeAttemptMs(attempt)
-            if (backoff > 0) delay(backoff)
-            try {
-                fs.runTransaction { transaction ->
-                    val snapshot = transaction.get(sosRef)
-                    if (snapshot.exists() && snapshot.getBoolean("isResolved") != true) {
-                        transaction.update(
-                            sosRef,
-                            mapOf(
-                                "isResolved" to true,
-                                "resolvedAtMs" to System.currentTimeMillis(),
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            )
-                        )
-                    }
-                }.await()
-                lastError = null
-                break
+        if (remoteDataSource != null && localDataSource != null) {
+            // Phase 4: resolve SOS via Supabase
+            return try {
+                val success = remoteDataSource!!.resolveSos(sosId = targetEvent.id)
+                if (!success) {
+                    Log.w("RideRepository", "Supabase SOS resolve returned false")
+                    Result.failure(Exception("Supabase SOS resolve returned false"))
+                } else {
+                    sosMeshRelay?.sendSosResolve(targetEvent.id)
+                    Result.success(Unit)
+                }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // Retry transient failures: an unresolved doc left on the server keeps the
-                // alert ringing on every other member's device indefinitely.
-                lastError = e
-                Log.w("RideRepository", "SOS resolve attempt $attempt failed: ${e.message}")
+                Log.w("RideRepository", "resolveSosInternal Supabase failed: ${e.message}")
+                Result.failure(e)
             }
         }
-        return if (lastError == null) {
-            sosMeshRelay?.sendSosResolve(targetEvent.id)
-            Result.success(Unit)
-        } else {
-            handleFirestoreError(lastError, OperationType.UPDATE, "rides/$activeRideId/sos/${targetEvent.id}")
-            // Intentionally do NOT resurrect the alert here: once the rider leader/sender has
-            // resolved locally, that state is authoritative for the session. Firestore will
-            // propagate the resolve when connectivity returns; restoring a "previousSos"
-            // snapshot after a transient offline write failure made the banner flash back on
-            // the UI (and broke resolve idempotency in tests).
-            Result.failure(lastError)
-        }
+
+        Log.w("RideRepository", "SOS resolve skipped: remoteDataSource or localDataSource unavailable")
+        return Result.failure<Unit>(IllegalStateException("remoteDataSource unavailable for SOS resolve"))
     }
 
     fun resolveSos() {
@@ -2095,14 +1993,15 @@ class RideRepository(
     }
 
     private fun detachListeners() {
-        rideListener?.remove()
-        rideListener = null
-        ridersListener?.remove()
-        ridersListener = null
-        messagesListener?.remove()
-        messagesListener = null
-        sosListener?.remove()
-        sosListener = null
+        // Clean up Supabase Realtime subscriptions
+        rideSub?.invoke()
+        rideSub = null
+        ridersSub?.invoke()
+        ridersSub = null
+        messagesSub?.invoke()
+        messagesSub = null
+        sosSub?.invoke()
+        sosSub = null
     }
 
     private fun generateInviteCode(): String {

@@ -278,7 +278,6 @@ class RiderStatusAndSyncAuditTest {
         val tracker = LocationTracker(context)
         val repo = RideRepository(
             locationTracker = tracker,
-            firestore = null,
             context = context,
             sosBackend = InMemorySosBackend()
         )

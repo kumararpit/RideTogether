@@ -1,21 +1,96 @@
+// ============================================================================
+// DEPRECATED — Firestore has been removed from the RideTogether Android app
+// (Phase 5: Firestore dependency removed from RideRepository.kt).
+//
+// Firebase Auth remains the sole identity provider. Supabase is the data layer.
+// This file is kept for historical/reference purposes only. It is no longer
+// deployed to Firebase and no client code references Firestore.
+//
+// See supabase-schema.sql for the replacement authorization model:
+// Firebase ID token → trusted backend verifies via Firebase Admin SDK →
+// SET app.current_user_id → RLS policies use current_setting('app.current_user_id', true).
+// ============================================================================
+
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // =========================================================================
+    // Authentication helpers
+    // =========================================================================
     function isAuthenticated() {
       return request.auth != null;
     }
 
-    function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
+    function callerUid() {
+      return request.auth.uid;
     }
 
+    function isOwner(userId) {
+      return isAuthenticated() && callerUid() == userId;
+    }
+
+    // =========================================================================
+    // Document path helpers
+    // =========================================================================
+    function rideDoc(rideId) {
+      return /databases/$(database)/documents/rides/$(rideId);
+    }
+
+    function riderDoc(rideId, riderUid) {
+      return /databases/$(database)/documents/rides/$(rideId)/riders/$(riderUid);
+    }
+
+    function messageDoc(rideId, messageId) {
+      return /databases/$(database)/documents/rides/$(rideId)/messages/$(messageId);
+    }
+
+    function sosDoc(rideId, sosId) {
+      return /databases/$(database)/documents/rides/$(rideId)/sos/$(sosId);
+    }
+
+    // =========================================================================
+    // Membership / role helpers (trusted server-side authorization boundary)
+    // =========================================================================
+    // A rider is a member of a ride when a rider document exists for them in that
+    // ride. Leadership is the ride document's leaderId (canonical source of truth).
+    function isMember(rideId, memberUid) {
+      return isAuthenticated()
+        && exists(riderDoc(rideId, memberUid))
+        && get(riderDoc(rideId, memberUid)).data.membershipStatus == 'ACTIVE';
+    }
+
+    function isLeader(rideId, leaderUid) {
+      return isAuthenticated()
+        && exists(rideDoc(rideId))
+        && get(rideDoc(rideId)).data.leaderId == leaderUid;
+    }
+
+    function isMemberOrLeader(rideId, memberUid) {
+      return isMember(rideId, memberUid) || isLeader(rideId, memberUid);
+    }
+
+    // Keys that must never change on an existing document (identity / ownership).
+    function immutableRideKeys() {
+      return ['id', 'createdAt', 'inviteCode'];
+    }
+
+    function immutableRiderKeys() {
+      return ['id', 'userId', 'rideId'];
+    }
+
+    // =========================================================================
+    // Field-shape validation (defense-in-depth; authorization is enforced above)
+    // =========================================================================
     function isValidUser(data) {
       return data.id is string
+        && data.id == callerUid()
         && data.name is string && data.name.size() > 0 && data.name.size() <= 100
         && data.email is string && data.email.size() > 0
         && (!('photoUrl' in data) || data.photoUrl is string)
-        && data.createdAt is timestamp && data.createdAt <= request.time;
+        // createdAt / updatedAt are written via FieldValue.serverTimestamp() and
+        // arrive as a sentinel that rules cannot type-check as `timestamp`; skip
+        // those checks so writes are not rejected.
     }
 
     function isValidRide(data) {
@@ -30,7 +105,9 @@ service cloud.firestore {
         && data.startLng is number
         && data.destLat is number
         && data.destLng is number
-        && data.createdAt is timestamp && data.createdAt <= request.time;
+        // createdAt / updatedAt are written via FieldValue.serverTimestamp() and
+        // arrive as a sentinel that rules cannot type-check as `timestamp`; skip
+        // those checks so writes are not rejected.
     }
 
     function isValidRider(data) {
@@ -38,89 +115,199 @@ service cloud.firestore {
         && data.userId is string
         && data.rideId is string
         && data.name is string && data.name.size() > 0 && data.name.size() <= 100
-        && (!('motorcycleModel' in data) || (data.motorcycleModel is string && data.motorcycleModel.size() <= 100))
+        && (!('motorcycleModel' in data) || data.motorcycleModel is string)
         && data.role in ['LEADER', 'MEMBER']
+        && data.membershipStatus in ['ACTIVE', 'LEFT', 'REMOVED', 'BANNED']
         && data.status in ['RIDING', 'STOPPED', 'EMERGENCY', 'OFFLINE']
         && data.latitude is number
-        && data.longitude is number;
+        && data.longitude is number
+        && (!('lastUpdatedMs' in data) || data.lastUpdatedMs is number)
+        // updatedAt is written via FieldValue.serverTimestamp() and arrives as a
+        // sentinel that rules cannot type-check as `timestamp`; skip that check
+        // so writes are not rejected.
     }
 
     function isValidQuickMessage(data) {
       return data.id is string
         && data.rideId is string
         && data.senderId is string
-        && data.senderName is string
+        && data.senderName is string && data.senderName.size() > 0
         && data.type is string
-        && data.text is string && data.text.size() > 0 && data.text.size() <= 200;
+        && data.text is string && data.text.size() > 0 && data.text.size() <= 200
+        && (!('timestampMs' in data) || data.timestampMs is number)
+        // createdAt is written via FieldValue.serverTimestamp() and arrives as a
+        // sentinel that rules cannot type-check as `timestamp`; skip that check
+        // so writes are not rejected.
     }
 
     function isValidSos(data) {
       return data.id is string
         && data.rideId is string
         && data.riderId is string
-        && data.riderName is string
+        && data.riderName is string && data.riderName.size() > 0
         && data.latitude is number
         && data.longitude is number
-        && data.isResolved is bool;
+        && data.isResolved is bool
+        && (!('timestampMs' in data) || data.timestampMs is number)
+        // createdAt / updatedAt are written via FieldValue.serverTimestamp() and
+        // arrive as a sentinel that rules cannot type-check as `timestamp`; skip
+        // those checks so writes are not rejected.
+        && (!('acknowledgedBy' in data) || data.acknowledgedBy is list);
     }
 
-    // Users collection
+    // =========================================================================
+    // Users collection — owner-only. No one (including unauthenticated) may read
+    // or write another user's profile.
+    // =========================================================================
     match /users/{userId} {
-      allow read, write: if true;
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data);
+      allow delete: if false;
     }
 
-    // Rides collection
+    // =========================================================================
+    // Rides collection — metadata read open to authenticated callers (required
+    // for invite-code discovery/join lookup; see product note below). All writes
+    // require authentication; mutation requires ride leadership.
+    //
+    // PRODUCT NOTE: ride-doc read is intentionally open to authenticated callers
+    // so the join-by-invite-code flow can look up a ride before membership exists.
+    // A fully membership-gated ride read requires a trusted server-side
+    // invite-code validation function (tracked as a Phase 2+ backend change).
+    // Communication sub-collections (riders / messages / sos) are membership-gated
+    // regardless, which is where the sensitive live data lives.
+    // =========================================================================
     match /rides/{rideId} {
-      // NOTE (Task 21): reads remain open for lobby/preview discovery by invite code
-      // (see below for the exact change and why hardening is incremental).
-      allow read: if true;
+      // Ride metadata is visible only to the ride's leader and members. This
+      // gates restore-by-ride-ID and ride enumeration; it also means the
+      // invite-code discovery/lookup step cannot be served by a plain collection
+      // query before membership exists. That lookup requires a trusted
+      // server-side invite-code validation function (Phase 2+; documented as a
+      // release blocker) — do not weaken this rule to keep the legacy lookup
+      // working.
+      allow read: if isMemberOrLeader(rideId, callerUid());
 
-      // Create/delete unchanged: ride creation happens before the leader has any
-      // member-side state, and delete is not exercised by the app.
-      allow create, delete: if true;
+      allow create: if isAuthenticated()
+        && request.resource.data.leaderId == callerUid()
+        && isValidRide(request.resource.data);
 
-      // Shared ride status is CANONICAL group lifecycle state (Task 21): moving a ride
-      // between lifecycle states (CREATED/LOBBY/ACTIVE/COMPLETED/CANCELLED) is
-      // leader-only. Non-status field updates (distance telemetry, leader transfer
-      // inside the same doc) keep working for any authenticated rider; the ride leader
-      // check uses the server-side document's leaderId, not client-supplied data.
-      //
-      // The route PLAN is leader-authoritative as well: the ordered stops, the
-      // plan version, the candidate route list and the leader's selected
-      // candidate may only be changed by the ride leader. `diff(...).affectedKeys()`
-      // is used deliberately: a member updating distance telemetry must stay
-      // allowed even though the document already carries the plan fields.
-      allow update: if (
-            !request.resource.data.diff(resource.data).affectedKeys()
-              .hasAny(['routeStops', 'routePlanVersion', 'selectedRouteIndex', 'routeOptions'])
-            || (request.auth != null && request.auth.uid == resource.data.leaderId)
-          ) && (
-            !('status' in request.resource.data)
-            || request.resource.data.status == resource.data.status
-            || (request.resource.data.status in ['ACTIVE', 'COMPLETED', 'CANCELLED']
-                && request.auth != null
-                && request.auth.uid == resource.data.leaderId)
-          );
+      allow delete: if isLeader(rideId, callerUid());
 
-      // Riders subcollection
+      allow update: if isLeader(rideId, callerUid())
+        && !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(immutableRideKeys());
+
+      // ---- Riders subcollection: membership roster + location/telemetry ----
       match /riders/{riderId} {
-        allow read, write: if true;
+        // Members may read the roster of the rides they belong to.
+        allow read: if isMemberOrLeader(rideId, callerUid());
+
+        // Create a membership record: only the ride leader may create rider
+        // documents in their ride (the authorized join workflow). A caller can
+        // never grant themselves membership by writing directly to Firestore.
+        // The leader may create a MEMBER record for any user (adding a rider),
+        // or their own LEADER record at ride creation (userId == callerUid).
+        allow create: if isAuthenticated()
+          && isLeader(rideId, request.auth.uid)
+          && request.resource.data.rideId == rideId
+          && exists(rideDoc(rideId))
+          && isValidRider(request.resource.data)
+          && (
+              request.resource.data.role == 'MEMBER'
+              || (request.resource.data.role == 'LEADER'
+                  && request.auth.uid == request.resource.data.userId)
+            );
+
+        // Update: the record owner maintains their own telemetry while ACTIVE;
+        // may not self-promote to LEADER; may set their own membershipStatus to
+        // LEFT (leaving the ride). The ride leader may change role (transfer)
+        // or membershipStatus (remove/ban) but not telemetry or identity.
+        // Identity fields (id/userId/rideId) are immutable.
+        allow update: if isAuthenticated()
+          && !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(immutableRiderKeys())
+          && (
+              // Owner maintains their own record while ACTIVE; may not
+              // self-promote to LEADER; may set membershipStatus to LEFT.
+              (request.auth.uid == resource.data.userId
+               && resource.data.membershipStatus == 'ACTIVE'
+               && !(
+                   request.resource.data.diff(resource.data).affectedKeys()
+                     .hasAny(['role'])
+                   && request.resource.data.role == 'LEADER'
+                 ))
+              ||
+              // Ride leader may change role or membershipStatus only.
+              (isLeader(rideId, request.auth.uid)
+               && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasAny(['role', 'membershipStatus'])
+               && !request.resource.data.diff(resource.data).affectedKeys()
+                 .hasAny([
+                   'name', 'motorcycleModel', 'status', 'latitude', 'longitude',
+                   'speedKmh', 'headingDeg', 'headingAccuracyDeg', 'accuracyMeters',
+                   'sequenceNumber', 'lastUpdatedMs', 'batteryPct', 'stoppedDurationSec'
+                 ]))
+            )
+          && isValidRider(request.resource.data);
+
+        // Delete: owner leaves their own membership; leader may remove a rider.
+        allow delete: if isAuthenticated()
+          && (
+              request.auth.uid == resource.data.userId
+              || isLeader(rideId, request.auth.uid)
+            );
       }
 
-      // Quick Messages subcollection (Task 21): sender identity must match the
-      // authenticated user — a client cannot spoof another rider's senderId. The app
-      // already sets senderId from the Firebase auth uid in sendQuickMessage().
+      // ---- Quick messages subcollection: group chat ----
       match /messages/{messageId} {
-        allow read: if true;
-        allow create: if request.auth != null
-          && request.resource.data.senderId == request.auth.uid;
+        // Only members of the ride may read its messages.
+        allow read: if isMemberOrLeader(rideId, callerUid());
+
+        // Create: sender must be a member of this ride, senderId must equal the
+        // authenticated caller, and the message must address this ride.
+        allow create: if isMemberOrLeader(rideId, callerUid())
+          && request.auth.uid == request.resource.data.senderId
+          && request.resource.data.rideId == rideId
+          && isValidQuickMessage(request.resource.data);
+
+        // Messages are immutable once written (no edit / retract at this layer).
         allow update, delete: if false;
       }
 
-      // SOS Events subcollection
+      // ---- SOS events subcollection: emergency alerts ----
       match /sos/{sosId} {
-        allow read, write: if true;
+        // Only members of the ride may read its SOS events.
+        allow read: if isMemberOrLeader(rideId, callerUid());
+
+        // Create: caller must be a member, riderId must equal the caller, and the
+        // event must address this ride.
+        allow create: if isMemberOrLeader(rideId, callerUid())
+          && request.auth.uid == request.resource.data.riderId
+          && request.resource.data.rideId == rideId
+          && isValidSos(request.resource.data);
+
+        // Update (acknowledge / resolve): only by the ride leader or the SOS
+        // author; limited to lifecycle fields so the emergency payload is not
+        // silently altered.
+        allow update: if isMemberOrLeader(rideId, callerUid())
+          && (
+              isLeader(rideId, callerUid())
+              || request.auth.uid == resource.data.riderId
+            )
+          && !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['id', 'rideId', 'riderId', 'riderName', 'latitude', 'longitude', 'timestampMs'])
+          && isValidSos(request.resource.data);
+
+        allow delete: if false;
       }
+    }
+
+    // =========================================================================
+    // Default deny: any path not explicitly matched above is rejected.
+    // =========================================================================
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

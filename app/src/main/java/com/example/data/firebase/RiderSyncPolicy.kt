@@ -5,6 +5,7 @@ import com.example.data.model.EmergencyState
 import com.example.data.model.HeadingSource
 import com.example.data.model.LatLng
 import com.example.data.model.MemberStatus
+import com.example.data.model.MembershipStatus
 import com.example.data.model.MovementState
 import com.example.data.model.RideRole
 import com.example.data.model.RiderMember
@@ -161,6 +162,7 @@ object RiderSyncPolicy {
         serverTimestampMs: Long?,
         stoppedDurationSec: Long,
         batteryPct: Int,
+        membershipStatus: MembershipStatus = MembershipStatus.ACTIVE,
         existing: RiderMember?,
         prevSeq: Long,
         isCurrentUser: Boolean,
@@ -227,7 +229,8 @@ object RiderSyncPolicy {
             serverTimestampMs = riderTs.serverTimestampMs, // Server timestamp preserved separately!
             stoppedDurationSec = stoppedDurationSec,
             isCurrentUser = isCurrentUser,
-            batteryPct = batteryPct
+            batteryPct = batteryPct,
+            membershipStatus = membershipStatus
         )
     }
 }

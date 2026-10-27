@@ -27,7 +27,6 @@ class SosLifecycleAndDeliveryTest {
         val tracker = LocationTracker(context)
         val repo = RideRepository(
             locationTracker = tracker,
-            firestore = null,
             context = context,
             sosBackend = InMemorySosBackend()
         )
@@ -53,7 +52,6 @@ class SosLifecycleAndDeliveryTest {
         val tracker = LocationTracker(context)
         val repo = RideRepository(
             locationTracker = tracker,
-            firestore = null,
             context = context,
             sosBackend = InMemorySosBackend()
         )
@@ -81,7 +79,6 @@ class SosLifecycleAndDeliveryTest {
         val tracker = LocationTracker(context)
         val repo = RideRepository(
             locationTracker = tracker,
-            firestore = null,
             context = context,
             sosBackend = InMemorySosBackend()
         )
@@ -110,7 +107,6 @@ class SosLifecycleAndDeliveryTest {
         val tracker = LocationTracker(context)
         val repo = RideRepository(
             locationTracker = tracker,
-            firestore = null,
             context = context,
             sosBackend = InMemorySosBackend()
         )
@@ -136,7 +132,6 @@ class SosLifecycleAndDeliveryTest {
         val tracker = LocationTracker(context)
         val repo = RideRepository(
             locationTracker = tracker,
-            firestore = null,
             context = context,
             sosBackend = InMemorySosBackend()
         )
@@ -159,7 +154,7 @@ class SosLifecycleAndDeliveryTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val tracker = LocationTracker(context)
         // Repository created with null Firestore
-        val repo = RideRepository(locationTracker = tracker, firestore = null)
+        val repo = RideRepository(locationTracker = tracker)
 
         val result = repo.triggerSos()
         assertTrue("triggerSos must return failure when Firestore is null", result.isFailure)
@@ -173,7 +168,6 @@ class SosLifecycleAndDeliveryTest {
         val tracker = LocationTracker(context)
         val repo = RideRepository(
             locationTracker = tracker,
-            firestore = null,
             context = context,
             sosBackend = InMemorySosBackend()
         )
@@ -200,7 +194,6 @@ class SosLifecycleAndDeliveryTest {
         val tracker = LocationTracker(context)
         val repo = RideRepository(
             locationTracker = tracker,
-            firestore = null,
             context = context,
             sosBackend = InMemorySosBackend()
         )
@@ -229,7 +222,7 @@ class SosLifecycleAndDeliveryTest {
     fun `test 9 - resolveSosInternal returns failure without clearing local state if firestore is null`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val tracker = LocationTracker(context)
-        val repo = RideRepository(locationTracker = tracker, firestore = null)
+        val repo = RideRepository(locationTracker = tracker)
 
         repo.initCurrentUser("rider_resolve_null_fs", "Arpit Null FS")
 
@@ -267,7 +260,6 @@ class SosLifecycleAndDeliveryTest {
         }
         val repo = RideRepository(
             locationTracker = tracker,
-            firestore = null,
             context = context,
             sosBackend = backend
         )
@@ -298,7 +290,6 @@ class SosLifecycleAndDeliveryTest {
         }
         val repo = RideRepository(
             locationTracker = tracker,
-            firestore = null,
             context = context,
             sosBackend = backend
         )

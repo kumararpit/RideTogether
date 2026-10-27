@@ -155,7 +155,6 @@ class ExampleRobolectricTest {
         // the network, which keeps the offline suite hermetic and repeatable.
         val repo = RideRepository(
             locationTracker = tracker,
-            firestore = null,
             context = context
         )
         repo.initCurrentUser("user_arpit", "Arpit")
